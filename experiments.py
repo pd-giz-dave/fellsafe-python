@@ -1,6 +1,10 @@
 from PIL import Image, ImageDraw, ImageFont
 import random
 
+"""
+01/06/21 DCN: Giving up on this ring based scheme - its bit density is too high
+"""
+
 """ coding scheme
 
     The coding scheme is designed to be easy to detect and robust against noise, defects, lighting, perspective
@@ -416,6 +420,7 @@ class Decoder:
         # scale is how many complete circular codes would fit side-by-side
         # the objective is to be able to decode up to 8 across (from a size pov)
         while scale > 1:
+            pass
 
 
     def average(self, x, y, dx, dy, cells):
