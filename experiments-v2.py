@@ -1122,9 +1122,9 @@ test_code_bits = code_bits
 test_ratio_scale = ratio_scale
 test_ring_width = 64
 test_num_set = [341, 511, 682, 795, 877]
-test_black = min_luminance #+ 64 + 32
-test_white = max_luminance #- 64 - 32
-test_noise = 0 #mid_luminance
+test_black = min_luminance + 64 + 32
+test_white = max_luminance - 64 - 32
+test_noise = mid_luminance
 
 test = Test(test_code_bits, min_num, max_num, test_ratio_scale)
 test.coding()

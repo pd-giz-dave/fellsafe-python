@@ -8,85 +8,54 @@ import traceback
     This coding scheme is intended to be easy to detect and robust against noise and luminance artifacts.
     The code is designed for use as competitor numbers in club level fell races, as such the number range
     is limited to between 101 and 999 inclusive, i.e. always a 3 digit number and max 899 competitors.
-    The actual implementation limits the max competitors to 883, still plenty for our use case.
+    The actual implementation limit may be less depending on coding constraints chosen (parity, edges, code size).
     The code is circular (so orientation does not matter) and consists of:
         a solid circular centre of 'white' with a radius R,
         surrounded by a solid ring of 'black' and width R,
-        surrounded by 3 concentric rings of width R and divided into 15 equal segments (24 degrees each)
+        surrounded by 3 concentric rings of width R and divided into N (typically 14..16) equal segments.
     Total radius is 5R.
     The radial segments form 3 bits, which are used as a triple redundant data bit copy.
-    Segments around the ring provide for 15 bits. Each ring is skewed clockwise by 5 bits (a kind of interleave).
+    Segments around the ring provide for N bits. Each ring is skewed clockwise by 5 bits (a kind of interleave).
     A one-bit is white (i.e. high luminance) and a zero-bit is black (i.e. low luminance).
     An alignment marker of 0110 (4 bits) is used to identify the start/stop of the code word encoded in a ring.
-    The remaining 11 bits are the payload (big-endian) and must not contain the alignment marker and also must
+    The remaining bits are the payload (big-endian) and must not contain the alignment marker and also must
     not end in 011 and must not start with 110 (else they look like 0110 when adjacent to the alignment marker).
+    The payload is N data-bits and an optional parity bit and may be constrained to have at least N bit transitions.
     The 3 payload rings are skewed round by 5 bits so that the alignment marker is not aligned radially. This 
-    evens out the luminance levels and also has the effect of interleaving the redundant bits. So the 3 rings
-    have bits like this:
-        0110abcdefghijk
-        ghijk0110abcdef
-        bcdefghijk0110a
+    evens out the luminance levels and also has the effect of interleaving the redundant bits.
     The code is detected by searching for the 'bullseye' (central circle and its enclosing ring). The luminance
     in the bullseye must be approximately the same for all its pixels and its surrounding ring must also have an
     approximately even luminance but be significantly dimmer than the central circle. These two luminance levels
     determine the black/white/grey thresholds. The radius of the circle determines the width of subsequent rings.
     The algorithm for detecting the central circle first does a simple quadrant probe out from some point looking
-    for a 'sharp' luminance change. If all quadrants change at a similar radius its a potential bullseye. Else
-    try the 'next' location. Check all points in the circle have similar luminance. Else try the 'next' location.
-    Next check the enclosing ring has consistent luminance all the way around. Else try the 'next' location.
-    The black, white, grey luminance levels and the circle radius (R) are now known. 
-    Each bit position is examined clockwise (3 * 15 = 45) to determine its colour, which can be black, white or
-    grey (i.e. don't know - could be a 0 or 1 to be determined later).
+    for a 'sharp' luminance change. 
+    Each bit position is examined clockwise to determine its colour, which can be black, white or grey (i.e. don't
+    know - could be a 0 or 1 to be determined later).
     When probing for bits a 'blob' is examined that approximates a circle segment but is sized such that small
     errors in the width do not cross a ring boundary. From a blob boundary (start position is arbitrary), take
     average of N pixels, slide up 1, repeat until get M the same-ish averages or moved by 2 segments (this is a
     'give-up' condition). That average is then the blob value. The next blob starts 1 segment away from the start
     of this blob.
     Each pixel value is the average of 9 pixels (central one and its 8 neighbours), the pixel value is the average
-    of this set. The rings are then de-skewed and the 3 redundant bits merged as follows (0=black, 1=white, ?=grey):
-        ??? = either 0 or 1
-        ??0 = maybe 0
-        ??1 = maybe 1
-        ?0? = maybe 0
-        ?00 = 0
-        ?01 = either 0 or 1
-        ?1? = maybe 1
-        ?10 = either 0 or 1
-        ?11 = 1
-        0?? = maybe 0
-        0?0 = 0
-        0?1 = either 0 or 1
-        00? = 0
-        000 = 0
-        001 = 0
-        01? = either 0 or 1
-        010 = 0
-        011 = 1
-        1?? = maybe 1
-        1?0 = either 0 or 1
-        1?1 = 1
-        10? = either 0 or 1
-        100 = 0
-        101 = 1
-        11? = 1
-        110 = 1
-        111 = 1
-    This results in 5 states for each bit: 0, 1, maybe 0 (0?), maybe 1 (1?), could be either (?).
-    The ambiguities are (partially) resolved by pattern matching for the start/stop bit (0110).
+    of this set. The rings are then de-skewed and the 3 redundant bits merged into a definite value, a maybe value
+    or junk. Each pixel may be black (0), white(1) or grey (?). The 3 pixels may be all the same (a definite value),
+    two the same plus grey (a maybe value), or other mixes (junk). Like this:
+        three 0's         = 0
+        three 1's         = 1
+        two zeroes + grey = maybe 0
+        two ones + grey   = maybe 1
+        anything else     = junk
+    This results in 5 states for each bit: 0, 1, maybe 0 (0?), maybe 1 (1?), junk (!).
+    The ambiguities are (partially) resolved by pattern matching for the start/stop bit pattern (0110).
     A potential alignment marker is sought in this order:
         exact match - 0110 (can only be one in a valid detection)
         single maybe bit - i.e. one of the market bits is a (0?) or (1?)      (could be several candidates)
         double maybe bit - i.e. two of the market bits is a (0?) or (1?)      (could be several candidates)
         triple maybe bit - i.e. three of the market bits is a (0?) or (1?)    (could be several candidates)
         quadruple maybe bit - i.e. four of the market bits is a (0?) or (1?)  (could be several candidates)
-    When there are several maybe candidates, each is tried to extract a code word, if more than one succeed
-    its a give-up situation as there is too much ambiguity.
-    When trying maybe candidates, all other candidates are demoted (by changing (0?) and (1?) to (?)).
-    When an alignment candidate has been found, then the potential code-word is extracted.
-    When doing that (0?) is treated a 0, (1?) is treated as 1 and every possible combination of (?) as
-    0 or 1. If more than one succeed in extracting a valid code-word its another give-up situation.
-    When giving up it means re-start looking for the bullseye from a different position. How different that
-    position is depends on what was found before giving up.
+    When there are several maybe candidates, each is tried to extract a code word. When doing that (0?) is
+    treated a 0, (1?) is treated as 1, if more than one succeed its a give-up situation as there is too much
+    ambiguity. When giving up it means re-start looking for the bullseye from a different position.
     
     Note: The decoder can cope with several targets in the same image. It uses the relative size of
           the targets to present the results in distance order, nearest (i.e. biggest) first. This is
@@ -118,9 +87,9 @@ class Codes:
     is_one = 1
     maybe_zero = 2
     maybe_one = 3
-    maybe_either = 4
+    is_neither = 4
 
-    def __init__(self, size, min_num, max_num):
+    def __init__(self, size, min_num, max_num, parity, edges):
         """ create the valid code set for a number in the range min_num..max_num for code_size
             a valid code is one where there are no embedded start/stop bits bits but contains at least one 1 bit,
             we create two arrays - one maps a number to its code and the other maps a code to its number.
@@ -128,6 +97,8 @@ class Codes:
         self.size = size                                       # total ring code size in bits
         self.min_num = min_num                                 # minimum number we want to be able to encode
         self.max_num = max_num                                 # maximum number we want to be able to encode
+        self.parity = parity                                   # None, 0 (even) or 1 (odd)
+        self.edges = edges                                     # how many bit transitions we want per code
         self.skew = max(int(self.size / 3),1)                  # ring to ring skew in bits
         self.grey_min = None                                   # luminance below this is considered 'black'
         self.grey_max = None                                   # luminance above this is considered 'white'
@@ -153,14 +124,25 @@ class Codes:
                         break
                     check >>= 1                                # NB: introduces a leading 0 (required, see above)
                 if check is not None:
-                    # got a good code, give it to next number
-                    num += 1
-                    if num > self.max_num:
-                        # found enough, don't use this one
-                        pass
-                    else:
-                        self.codes[code] = num                 # decode code as num
-                        self.nums[num] = code                  # encode num as code
+                    # got a potential code, check its parity
+                    one_bits = 0
+                    edges = 0
+                    check = code
+                    for bit in range(self.code_bits):
+                        if check & 1 == 1:
+                            one_bits += 1
+                        if (check & 3 == 1) or (check & 3 == 2):
+                            edges += 1
+                        check >>= 1
+                    if (self.parity is None or ((one_bits & 1) == self.parity)) and (edges >= self.edges):
+                        # got a good parity and edges, give it to next number
+                        num += 1
+                        if num > self.max_num:
+                            # found enough, don't use this one
+                            pass
+                        else:
+                            self.codes[code] = num                 # decode code as num
+                            self.nums[num] = code                  # encode num as code
         self.num_limit = num
         print('Within 0..{} there are {} valid codes, mapped to {}..{} numbers'.format(self.code_range,
                                                                                        num - (self.min_num - 1),
@@ -234,9 +216,6 @@ class Codes:
             for n in maybe:
                 # n is the next one we are going to try, demote all others
                 word = [bit for bit in bits]   # make a copy
-                for m_at in maybe_at:
-                    for m in m_at:
-                        self.demote_marker(m, word)
                 code = self.extract_word(n, word)
                 if code is not None:
                     if found is not None:
@@ -285,63 +264,26 @@ class Codes:
             return None                  # not a match
         return maybes
 
-    def demote_marker(self, n, bits):
-        """ demote the candidate alignment marker at n to not a candidate
-            this is done by changing any (0?) and (1?) bits to (?)
-            """
-        i = self.marker_bits_pos(n)
-        for bit in range(self.marker_bits):
-            self.demote_bit(i[bit], bits)
-
-    def demote_bit(self, n, bits):
-        """ demote the bit at n to (?) from (0?) or (1?) """
-        if bits[n] == self.maybe_one or bits[n] == self.maybe_zero:
-            bits[n] = self.maybe_either
-
     def data_bits(self, n, bits):
         """ return an array of the data-bits from bits array starting at bit position n """
         return [bits[int(pos % self.size)] for pos in range(n+self.marker_bits, n+self.size)]
 
     def extract_word(self, n, bits):
         """ given an array of bit values with the alignment marker at position n
-            extract the code word and decode it (via decode()), returns None if cannot,
-            this may take several attempts if the bit values contain maybe_either bits
-            maybe_zero is treated as is_zero and maybe_one is treated as is_one but each
-            maybe_either is tried for both (along with all the others, if X bits can be
-            either then 2^X combinations are tried), more than one valid combination is
-            a no-can-do condition (too ambiguous)
+            extract the code word and decode it (via decode()), returns None if cannot
             """
         word = self.data_bits(n, bits)
-        partial = [None for _ in range(len(word))]
-        options = 0
+        code = 0
         for bit in range(len(word)):
+            code <<= 1                   # make room for next bit
             val = word[bit]
             if (val == self.is_one) or (val == self.maybe_one):
-                partial[bit] = 1
+                code += 1                # got a one bit
             elif (val == self.is_zero) or (val == self.maybe_zero):
-                partial[bit] = 0
+                pass                     # got a zero bit
             else:
-                options += 1
-        # try every possible combination of bit options discovered
-        found = None
-        for mask in range(max(1 << options, 1)):
-            # NB: Building candidate big-endian
-            candidate = 0
-            for bit in partial:
-                candidate <<= 1                    # make room for next bit
-                if bit is None:
-                    candidate += (mask & 1)        # add the next option bit
-                    mask >>= 1                     # prepare the next optional bit
-                else:
-                    candidate += bit               # we know what this one is
-            result = self.decode(candidate)        # note: returns None if not valid
-            if result is not None:
-                if found is not None:
-                    # must only be 1 good one, else ambiguous
-                    return None
-                found = result                     # note the first good one we find
-        # every possibility has now been evaluated
-        return found
+                return None              # got junk
+        return self.decode(code)
 
     def check(self, num):
         """ check encode/decode is symetric
@@ -360,76 +302,42 @@ class Codes:
     def bit(self, s1, s2, s3):
         """ given 3 blob values determine the most likely bit value
             the blobs are designated as 'black', 'white' or 'grey'
-            the return bit is one of is_zero, is_one, maybe_either, maybe_zero, maybe_one, or None
+            the return bit is one of is_zero, is_one, maybe_zero, maybe_one, or is_neither
             """
+        zeroes = 0
+        ones   = 0
+        greys  = 0
+        # count states
         if s1 == self.grey:
-            if s2 == self.grey:
-                if s3 == self.grey:
-                    return self.maybe_either
-                elif s3 == self.black:
-                    return self.maybe_zero
-                elif s3 == self.white:
-                    return self.maybe_one
-            elif s2 == self.black:
-                if s3 == self.grey:
-                    return self.maybe_zero
-                elif s3 == self.black:
-                    return self.is_zero
-                elif s3 == self.white:
-                    return self.maybe_either
-            elif s2 == self.white:
-                if s3 == self.grey:
-                    return self.maybe_one
-                elif s3 == self.black:
-                    return self.maybe_either
-                elif s3 == self.white:
-                    return self.is_one
+            greys += 1
         elif s1 == self.black:
-            if s2 == self.grey:
-                if s3 == self.grey:
-                    return self.maybe_zero
-                elif s3 == self.black:
-                    return self.is_zero
-                elif s3 == self.white:
-                    return self.maybe_either
-            elif s2 == self.black:
-                if s3 == self.grey:
-                    return self.is_zero
-                elif s3 == self.black:
-                    return self.is_zero
-                elif s3 == self.white:
-                    return self.is_zero
-            elif s2 == self.white:
-                if s3 == self.grey:
-                    return self.maybe_either
-                elif s3 == self.black:
-                    return self.is_zero
-                elif s3 == self.white:
-                    return self.is_one
+            zeroes += 1
         elif s1 == self.white:
-            if s2 == self.grey:
-                if s3 == self.grey:
-                    return self.maybe_one
-                elif s3 == self.black:
-                    return self.maybe_either
-                elif s3 == self.white:
-                    return self.is_one
-            elif s2 == self.black:
-                if s3 == self.grey:
-                    return self.maybe_either
-                elif s3 == self.black:
-                    return self.is_zero
-                elif s3 == self.white:
-                    return self.is_one
-            elif s2 == self.white:
-                if s3 == self.grey:
-                    return self.is_one
-                elif s3 == self.black:
-                    return self.is_one
-                elif s3 == self.white:
-                    return self.is_one
-        # none of the above, so...
-        return None
+            ones += 1
+        if s2 == self.grey:
+            greys += 1
+        elif s2 == self.black:
+            zeroes += 1
+        elif s2 == self.white:
+            ones += 1
+        if s3 == self.grey:
+            greys += 1
+        elif s3 == self.black:
+            zeroes += 1
+        elif s3 == self.white:
+            ones += 1
+        # test definite cases
+        if zeroes == 3:
+            return self.is_zero
+        elif ones == 3:
+            return self.is_one
+        # test maybe cases
+        if zeroes == 2 and greys == 1:
+            return self.maybe_zero
+        elif ones == 2 and greys == 1:
+            return self.maybe_one
+        # the rest are junk
+        return self. is_neither
 
     def blob(self, s1, s2, s3):
         """ given 3 luminance samples determine the most likely blob value
@@ -441,10 +349,10 @@ class Codes:
     def category(self, level):
         """ given a luminance level categorize it as black, white or grey """
         if self.grey_max is None or self.grey_min is None:
-            # we haven't been given the thresholds, so no-can-do
-            return None
+            # we haven't been given the thresholds, treat all as grey
+            return self.grey
         if level is None:
-            return None
+            return self.grey
         elif level < self.grey_min:
             return self.black
         elif level > self.grey_max:
@@ -724,7 +632,8 @@ class Angle:
 class Ring:
     """ draw a ring of width w and radius r from centre x,y with s segments containing bits b,
         all bits 1 is solid white, all 0 is solid black
-        bit 0 is drawn first, then 1, etc, up to bit s-1, this is considered to be clockwise
+        bit 0 (MSB) is drawn first, then 1, etc, up to bit s-1 (LSB), this is big-endian and is
+        considered to be clockwise
         """
     def __init__(self, centre_x, centre_y, segments, width, scale, frame):
         # set constant parameters
@@ -735,10 +644,19 @@ class Ring:
         self.y = centre_y                # ..
         # setup our angles look-up table
         self.angle = Angle(scale).angle
-        self.edge = 360 / self.s         # the angle at which a bit edge occurs
+        self.edge = 360 / self.s         # the angle at which a bit edge occurs (NB: not an int)
         # draw the bullseye and its enclosing ring
         self.draw(0, -1)
         self.draw(-1, 0)
+
+    def _pixel(self, x, y, colour):
+        """ draw a pixel at x,y with the given luminance """
+        x += self.x
+        y += self.y
+        self.c.putpixel(x  , y  , colour)
+        self.c.putpixel(x+1, y  , colour)
+        self.c.putpixel(x  , y+1, colour)
+        self.c.putpixel(x+1, y+1, colour)
 
     def _point(self, x, y, bit):
         """ draw a point at offset x,y from our centre with the given bit (0 or 1) colour (black or white) """
@@ -746,12 +664,7 @@ class Ring:
             colour = min_luminance
         else:
             colour = max_luminance
-        x += self.x
-        y += self.y
-        self.c.putpixel(x  , y  , colour)
-        self.c.putpixel(x+1, y  , colour)
-        self.c.putpixel(x  , y+1, colour)
-        self.c.putpixel(x+1, y+1, colour)
+        self._pixel(x, y, colour)
 
     def _draw(self, radius, bits):
         """ draw a ring at radius of bits """
@@ -873,14 +786,25 @@ class Ring:
 
 class Frame:
     """ image frame buffer as a 2D array of luminance values """
-    buffer = None
 
-    def new(self, width, luminance):
-        self.buffer = [[luminance for _ in range(width)] for _ in range(width)]
+    buffer = None
+    max_x  = None
+    max_y  = None
+
+    def instance(self):
+        """ return a new instance of self """
+        return Frame()
+
+    def new(self, width, height, luminance):
+        """ prepare a new buffer of the given size and luminance """
+        self.buffer = [[luminance for _ in range(height)] for _ in range(width)]
+        self.max_x = width
+        self.max_y = height
+        return self
 
     def size(self):
         """ return the x,y size of the current frame buffer """
-        return len(self.buffer), len(self.buffer[0])
+        return self.max_x, self.max_y
 
     def load(self, image_file):
         """ load frame buffer from a JPEG image file """
@@ -888,48 +812,381 @@ class Frame:
         im.convert(mode='L')
         # im.show()
 
-        max_x = im.size[0]
-        max_y = im.size[1]
+        self.max_x = im.size[0]
+        self.max_y = im.size[1]
 
         # Note: axis arranged such that buffer[x][y] yields pixel(x,y)
-        self.buffer = [[im.getpixel((x, y))[0] for y in range(max_y)] for x in range(max_x)]
+        self.buffer = [[im.getpixel((x, y))[0] for y in range(self.max_y)] for x in range(self.max_x)]
 
         im.close()
 
-    def unload(self, image_file):
-        """ unload the frame buffer to a JPEG image file """
-        max_x, max_y = self.size()
-        im = Image.new("RGB", (max_x, max_y), (mid_luminance, mid_luminance, mid_luminance))
-        for x in range(max_x):
-            for y in range(max_y):
+    def _draw(self):
+        """ return an RGB image of the current buffer
+            the returned image is a PIL image that can be saved as a JPEG or shown
+            and must be closed after use
+            """
+        im = Image.new("RGB", (self.max_x, self.max_y), (mid_luminance, mid_luminance, mid_luminance))
+        for x in range(self.max_x):
+            for y in range(self.max_y):
                 pixel = self.buffer[x][y]
                 im.putpixel((x, y), (pixel, pixel, pixel))
+        return im
+
+    def unload(self, image_file):
+        """ unload the frame buffer to a JPEG image file """
+        im = self._draw()
         im.save(image_file)
-        im.show()
+        im.close()
+
+    def show(self, title=None):
+        """ show the current buffer """
+        im = self._draw()
+        im.show(title)
         im.close()
 
     def getpixel(self, x, y):
         """ get the pixel value at x,y """
-        if x < 0 or x >= len(self.buffer) or y < 0 or y >= len(self.buffer[0]):
+        if x < 0 or x >= self.max_x or y < 0 or y >= self.max_y:
             return None
         else:
             return self.buffer[x][y]
 
     def putpixel(self, x, y, value):
         """ put the pixel of value at x,y """
-        if x < 0 or x >= len(self.buffer) or y < 0 or y >= len(self.buffer[0]):
+        if x < 0 or x >= self.max_x or y < 0 or y >= self.max_y:
             pass
         else:
             self.buffer[x][y] = min(max(value, min_luminance), max_luminance)
 
 
+class Transform:
+    """ various image transforming operations """
+
+    identity_map = ((0, 0, 0),
+                    (0, 1, 0),
+                    (0, 0, 0))
+
+    sharpen_map = (( 0, -1,  0),
+                   (-1,  5, -1),
+                   ( 0, -1,  0))
+
+    #edge_map = ((-1, -1, -1),
+    #            (-1,  8, -1),
+    #            (-1, -1, -1))
+
+    #edge_map = (( 0, -1,  0),
+    #            (-1,  4, -1),
+    #            ( 0, -1,  0))
+
+    edge_map = (( 1,  0, -1),
+                ( 0,  0,  0),
+                (-1,  0,  1))
+
+    sobel_x = ((-1, -2, -1),
+               ( 0,  0,  0),
+               ( 1,  2,  1))
+
+    sobel_y = ((-1, 0, 1),
+               (-2, 0, 2),
+               (-1, 0, 1))
+
+    def gaussian(self, sigma, cutoff):
+        """ make a gaussian blur kernel with the given sigma,
+            sigma is the standard deviation required and cutoff is ratio (0..1) at which to stop,
+            bigger sigma means a bigger kernel, bigger cutoff means a smaller kernel, see
+            https://patrickfuller.github.io/gaussian-blur-image-processing-for-scientists-and-engineers-part-4/
+            for the inspiration for this function
+            """
+        if 0 <= cutoff >= 1:
+            raise Exception('cutoff must be between 0 and 1, not {}'.format(cutoff))
+        if 0 <= sigma >= 10:
+            raise Exception('sigma must be between 0 and 10, not {}'.format(sigma))
+        kernel_width = 1 + 2 * max(int(math.sqrt(-2*sigma*sigma*math.log(cutoff))),1)
+        kernel = [[0 for _ in range(kernel_width)] for _ in range(kernel_width)]
+        min_g = None
+        for v in range(kernel_width):
+            for u in range(kernel_width):
+                uc = u - (kernel_width>>1)
+                vc = v - (kernel_width>>1)
+                g = math.exp(-(uc*uc+vc*vc)/(2*sigma*sigma))
+                kernel[u][v] = g
+                if min_g is None or g < min_g:
+                    min_g = g
+        for v in range(kernel_width):
+            for u in range(kernel_width):
+                kernel[u][v] = int(kernel[u][v]/min_g)
+        return kernel
+
+    def blur(self, source, sigma=1, step=1):
+        """ apply a gaussian blur to the given image"""
+        kernel = self.gaussian(sigma, .1)
+        return self._convolve(source, kernel, step)
+
+    def edges(self, source, step=1):
+        """ apply edge detection to the given image"""
+        return self._convolve(source, self.edge_map, step)
+
+    def sharpen(self, source, step=1):
+        """ sharpen the given image"""
+        return self._convolve(source, self.sharpen_map, step)
+
+    def sobel(self, source, step=1):
+        """ apply a sobel edge detecting filter to source """
+        width, height = source.size()
+        target = source.instance().new(width, height, min_luminance)
+        for x in range(1, width - 1):
+            for y in range(1, height - 1):
+                magx, magy = 0, 0
+                for a in range(3):
+                    for b in range(3):
+                        xn = x + a - 1
+                        yn = y + b - 1
+                        pixel = source.getpixel(xn, yn)
+                        magx += pixel * self.sobel_x[a][b]
+                        magy += pixel * self.sobel_y[a][b]
+                        colour = int(math.sqrt(magx ** 2 + magy ** 2))
+                        target.putpixel(x, y, colour)
+        return target
+
+    def _convolve(self, source, kernel, step):
+        """ apply the convolution defined by kernel to the source frame returning a target frame,
+            the image edges are ignored (kernel/2+1 pixels all around),
+            the kernel must be square and an odd number (so there is a middle) and consist of integers,
+            step is the x, y increment to apply (e.g. 2 halves the width and height of the target,
+             [ a b c ]   [ 1 2 3 ]
+             [ d e f ] * [ 4 5 6 ] == i*1 + h*2 + g*3 + f*4 + e*5 + d*6 + c*7 + b*8 + a*9
+             [ g h i ]   [ 7 8 9 ]
+            """
+        def target_xy(x, y):
+            """ calculate the equivalent target x,y from the given source x, y """
+            return int(x/step), int(y/step)
+        # validate
+        if len(kernel) != len(kernel[0]):
+            raise Exception('Only square kernels supported, not {}'.format(kernel))
+        if len(kernel) & 1 == 0:
+            raise Exception('Only odd number of kernel elements supported, not {}'.format(kernel))
+        # calc scale of the kernel (we divide by this to keep pixels in the same range)
+        scale = 0
+        for line in kernel:
+            for item in line:
+                scale += item
+        # calc the kernel addresses (based on the central element)
+        mid_k_x = len(kernel[0]) >> 1
+        mid_k_y = len(kernel) >> 1
+        max_k_x = len(kernel[0]) - 1
+        max_k_y = len(kernel) - 1
+        kx = [x-mid_k_x for x in range(max_k_x+1)]
+        ky = [y-mid_k_y for y in range(max_k_y+1)]
+        # calc source/target co-ordinate ranges
+        min_x = mid_k_x + 1
+        min_y = mid_k_y + 1
+        width, height = source.size()
+        max_x = width - min_x
+        max_y = height - min_y
+        target_width, target_height = target_xy(width, height)
+        # get a new target buffer
+        target = source.instance().new(target_width, target_height, min_luminance)
+        # do the convolution
+        for y in range(min_y, max_y, step):
+            for x in range(min_x, max_x, step):
+                pixel = 0
+                for dy in ky:
+                    for dx in kx:
+                        pixel += (source.getpixel(x+dx, y+dy) * kernel[mid_k_y-dy][mid_k_x-dx])
+                if scale != 0:
+                    pixel = int(pixel / scale)
+                target_x, target_y = target_xy(x, y)
+                target.putpixel(target_x, target_y, pixel)
+        return target
+
+    def max(self, source):
+        """ reduce each 3x3 segment to its max returning a target frame
+            """
+        width, height = source.size()
+        min_x = 1
+        min_y = 1
+        max_x = width - min_x
+        max_y = height - min_y
+        target = source.instance().new(max_x - min_x, max_y - min_y, min_luminance)
+        for y in range(min_y, max_y):
+            for x in range(min_x, max_x):
+                max_val = 0
+                for dy in (-1, 0, +1):
+                    for dx in (-1, 0, +1):
+                        pixel = source.getpixel(x+dx, y+dy)
+                        if pixel > max_val:
+                            max_val = pixel
+                target.putpixel(x-min_x, y-min_y, max_val)
+        return target
+
+    def diff(self, s1, s2):
+        """ given 2 source images of the same size return an image of their difference
+            the differences are scaled to span the whole luminance range (0==no diff==black,
+            255==max diff==white)
+            """
+        if s1.size() != s2.size():
+            raise Exception('Source 1 and 2 must be the same size, not {} and {}'.format(s1.size(), s2.size()))
+        width, height = s1.size()
+        target = s1.instance().new(width, height, min_luminance)
+        min_d = 255
+        max_d = 0
+        for y in range(height):
+            for x in range(width):
+                p1 = s1.getpixel(x, y)
+                p2 = s2.getpixel(x, y)
+                if p1 < p2:
+                    d = p2 - p1
+                else:
+                    d = p1 - p2
+                if d < min_d:
+                    min_d = d
+                if d > max_d:
+                    max_d = d
+                target.putpixel(x, y, d)
+        scale = max_luminance / max(max_d - min_d, 1)
+        for y in range(height):
+            for x in range(width):
+                pixel = int((target.getpixel(x, y) - min_d) * scale)
+                target.putpixel(x, y, pixel)
+        return target
+
+
+class Scan:
+    """ scan an image looking for codes """
+    def __init__(self, frame):
+        """ frame is the frame instance containing the image to be scanned
+
+            """
+        self.original = frame
+        self.transform = Transform()                                             # make a new frame instance
+        self.blurred1 = self.transform.blur(self.original, 1, 2)                 # de-noise and downsize
+        self.blurred2 = self.transform.blur(self.blurred1, 5)                    # blur
+        self.diff    = self.transform.diff(self.blurred1, self.blurred2)
+        self.diff.show('diff')  # HACK
+        breakpoint()
+        self.width, self.height = frame.size()
+        self.num_rings = 5
+        self.min_ring_width = 5                                                  # pixels, smallest we can detect
+        self.min_x = self.num_rings * self.min_ring_width
+        self.max_x = self.width - self.min_x
+        self.min_y = self.min_x
+        self.max_y = self.height - self.min_y
+        self.max_width = min(self.width, self.height)
+        self.max_ring_width = int(self.max_width / ((self.num_rings * 2) + 1))  # the biggest that will fit
+        self.min_level_range = 9                                                # minimum luminance black/white diff
+        self.quadrants = [[0, -1, 0], [1, 1, 0], [2, 0, 1], [3, -1, 0]]         # pixel addressing when searching
+
+    def is_bullseye(self, x, y):
+        """ check if there is a bullseye at x,y
+            what we are looking for is a consistent area of white surrounded by a consistent area of black,
+            the initial probes are +/- 1 pixel on x,y in four directions (North, East, South, West).
+            """
+        # our complete code consists of 5 rings each of which must be at least 5 pixels wide
+        # this means there is no point in looking near the image edges as our code would overflow them
+        if x < self.min_x: return None
+        if y < self.min_y: return None
+        if x > self.max_x: return None
+        if y > self.max_y: return None
+        """ probe N,E,S,W one pixel at a time looking for a 'significant' luminance change
+            if we're anywhere inside the central circle we should see a high to low luminance change
+            we want a fast pre-probe to eliminate junk, we want to find the black/white luminance levels
+            and the ring width, so starting at the min width we average the luminance from the supposed
+            centre for that width, then again for the enclosing ring, if no significant change increase
+            the ring width until reach the max
+            """
+        min_radius = self.min_ring_width
+        max_radius = min(int(x / self.num_rings), int(y / self.num_rings))
+        for radius in range(min_radius, max_radius):
+            whites = [0, 0, 0, 0]
+            blacks = [0, 0, 0, 0]
+            maybe_bullseye = True
+            # get the luminance for a strip of radius in each quadrant
+            for quadrant in self.quadrants:
+                for pixel in range(radius):
+                    white = self.original.getpixel(x + (pixel * quadrant[1]),
+                                                   y + (pixel*quadrant[2]))    # central bullseye
+                    if white is None:
+                        maybe_bullseye = False                                 # gone off the image edge
+                        break
+                    whites[quadrant[0]] += white
+                    black = self.original.getpixel(x + (pixel * quadrant[1]) + radius,
+                                                   y + (pixel*quadrant[2]) + radius)  # surrounding black ring
+                    if black is None:
+                        maybe_bullseye = False                                 # gone off the image edge
+                        break
+                    blacks[quadrant[0]] += black
+            if not maybe_bullseye:
+                break                                                          # gone off the image edge
+            # if all the whites are similar and all the blacks are similar and all blacks < all whites
+            # then found a potential bullseye
+            max_range = 0
+            threshold = self.min_level_range * radius
+            for white in whites:
+                for black in blacks:
+                    if (black + threshold) >= white:
+                        # not a big enough difference in luminance
+                        maybe_bullseye = False
+                        break
+                    if (white - black) > max_range:
+                        max_range = white - black
+                if not maybe_bullseye:
+                    break
+            if not maybe_bullseye:
+                continue
+            # all blacks are less than all whites by a sufficient margin
+            # all blacks and all whites must be within 1/3rd of max_range (so can detect a grey in between)
+            threshold = int(max_range / 3)
+            reference = whites[0]
+            white_level = 0
+            for white in whites:
+                if ((white - reference) > threshold) or ((reference - white) > threshold):
+                    maybe_bullseye = False
+                    break
+                white_level += white
+            if not maybe_bullseye:
+                continue
+            # all whites are close to each other in luminance
+            reference = blacks[0]
+            black_level = 0
+            for black in blacks:
+                if ((black - reference) > threshold) or ((reference - black) > threshold):
+                    maybe_bullseye = False
+                    break
+                black_level += black
+            if not maybe_bullseye:
+                continue
+            # all blacks are close to each other in luminance
+            black_level = int(black_level / (radius * len(blacks)))  # estimated black level
+            white_level = int(white_level / (radius * len(whites)))  # estimated white level
+            print('Possible bullseye at {},{} of radius {}, black={}, white={}'.
+                  format(x, y, radius, black_level, white_level))
+            return radius, black_level, white_level
+        return None
+
+    def find_bullseye(self):
+        """ search entire image looking for a bullseye """
+        bullseyes = []
+        y = self.min_y
+        while y < self.max_y:
+            x = self.min_x
+            while x < self.max_x:
+                bullseye = self.is_bullseye(x, y)
+                if bullseye is None:
+                    x += 1
+                else:
+                    bullseyes.append(bullseye)
+                    x += (bullseye[0] * 4)
+            y += 1
+        return bullseyes
+
+
 class Test:
     """ test the critical primitives """
-    def __init__(self, code_bits, min_num, max_num, ratio_scale):
+    def __init__(self, code_bits, min_num, max_num, ratio_scale, parity, edges):
         self.code_bits = code_bits
         self.min_num = min_num
         self.ratio_scale = ratio_scale
-        self.c = Codes(self.code_bits, min_num, max_num)
+        self.c = Codes(self.code_bits, min_num, max_num, parity, edges)
         self.frame = Frame()
         self.max_num = min(max_num, self.c.num_limit)
 
@@ -961,7 +1218,8 @@ class Test:
             """
         print('')
         print('******************')
-        print('Check build/unbuild from {} to {}'.format(self.min_num, self.max_num))
+        print('Check build/unbuild from {} to {} with black={}, white={} and noise {}'.
+              format(self.min_num, self.max_num, black, white, noise))
         try:
             grey = int((white - black) / 3)
             self.c.set_thresholds(min(black + grey, max_luminance), max(white - grey, min_luminance))
@@ -1003,11 +1261,15 @@ class Test:
         print('Check code-words (visual)')
         numbers = [self.min_num] + test_set + [self.max_num]
         bin = '{:0'+str(self.code_bits)+'b}'
-        frm = '{}('+bin+')=('+bin+', '+bin+', '+bin+')'
+        frm_ok = '{}('+bin+')=('+bin+', '+bin+', '+bin+')'
+        frm_bad = '{}('+bin+')=(None)'
         try:
             for n in numbers:
                 rings = self.c.build(n)
-                print(frm.format(n, n, rings[0], rings[1], rings[2]))
+                if rings is None:
+                    print(frm_bad.format(n, n))
+                else:
+                    print(frm_ok.format(n, n, rings[0], rings[1], rings[2]))
         except:
             traceback.print_exc()
         print('******************')
@@ -1075,7 +1337,7 @@ class Test:
         print('******************')
         print('Draw an angle test ring (visual)')
         try:
-            self.frame.new(width * 11, mid_luminance)          # 11 == 5 rings in radius + a border
+            self.frame.new(width * 11, width * 11, mid_luminance)      # 11 == 5 rings in radius + a border
             x, y = self.frame.size()
             ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.ratio_scale, self.frame)
             ring.draw(1,0x5555)          # alternating 0's and 1's
@@ -1096,11 +1358,27 @@ class Test:
             numbers = [self.min_num] + test_set + [self.max_num]
             for n in numbers:
                 rings = self.c.build(n)
-                self.frame.new(width * 11, mid_luminance)      # 11 == 5 rings in radius + a border
-                x, y = self.frame.size()
-                ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.ratio_scale, self.frame)
-                ring.code(n, rings)
-                self.frame.unload('{}-segment-{}.jpg'.format(self.code_bits, n))
+                if rings is None:
+                    print('{}: failed to generate the code rings'.format(n))
+                else:
+                    self.frame.new(width * 11, width * 11, mid_luminance)  # 11 == 5 rings in radius + a border
+                    x, y = self.frame.size()
+                    ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.ratio_scale, self.frame)
+                    ring.code(n, rings)
+                    self.frame.unload('{}-segment-{}.jpg'.format(self.code_bits, n))
+        except:
+            traceback.print_exc()
+        print('******************')
+
+    def scan(self, n, image):
+        """ do a scan for the code in image and expect the number given"""
+        print('')
+        print('******************')
+        print('Scan image {} for code {}'.format(image, n))
+        try:
+            self.frame.load(image)
+            scan = Scan(self.frame)
+            scan.find_bullseye()
         except:
             traceback.print_exc()
         print('******************')
@@ -1111,21 +1389,23 @@ min_num = 101                            # min number we want
 max_num = 999                            # max number we want (may not be achievable)
 code_bits = 15                           # number of bits in our code word
 ratio_scale = 3600                       # scale factor for ratio and angle calculations (good for 0.1 degree)
+parity = None                            # code word parity to apply (None, 0=even, 1=odd)
+edges = 4                                # how many bit transitions we want per code word
 
 test_circle_size = 120
-test_code_bits = code_bits
-test_ratio_scale = ratio_scale
 test_ring_width = 64
 test_num_set = [341, 511, 682, 795, 877]
-test_black = min_luminance #+ 64 + 32
-test_white = max_luminance #- 64 - 32
-test_noise = 0 #mid_luminance
+test_black = min_luminance + 64 #+ 32
+test_white = max_luminance - 64 #- 32
+test_noise = mid_luminance >> 1
 
-test = Test(test_code_bits, min_num, max_num, test_ratio_scale)
-test.coding()
-test.decoding(test_black, test_white, test_noise)
-test.angles(test_circle_size)
-test.ratios(test_circle_size)
-test.code_words(test_num_set)
-test.rings(test_ring_width)
-test.codes(test_num_set, test_ring_width)
+test = Test(code_bits, min_num, max_num, ratio_scale, parity, edges)
+#test.coding()
+#test.decoding(test_black, test_white, test_noise)
+#test.angles(test_circle_size)
+#test.ratios(test_circle_size)
+#test.code_words(test_num_set)
+#test.rings(test_ring_width)
+#test.codes(test_num_set, test_ring_width)
+test.scan(101, '15-segment-101.jpg')
+#test.scan(101, '101-341-511-682-795-877-984-photo.jpg')
