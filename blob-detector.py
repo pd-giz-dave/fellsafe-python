@@ -6,7 +6,7 @@ import numpy as np;
 orig = cv2.imread("101-341-511-682-795-877-984-photo.jpg", cv2.IMREAD_GRAYSCALE)
 
 # De-noise it
-blurred = cv2.GaussianBlur(orig, (3, 3), 1)
+blurred = cv2.GaussianBlur(orig, (5, 5), 0)
 
 # Downsize it
 width, height = blurred.shape
@@ -24,7 +24,7 @@ params = cv2.SimpleBlobDetector_Params()
 # Change thresholds
 params.minThreshold = 0
 params.maxThreshold = 256
-params.thresholdStep = 8
+params.thresholdStep = 16
 
 # Filter by Area.
 params.filterByArea = True
@@ -51,7 +51,7 @@ keypoints = detector.detect(im)
 
 # Draw detected blobs as red circles.
 # cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS ensures the size of the circle corresponds to the size of blob
-im_with_keypoints = cv2.drawKeypoints(im, keypoints, np.array([]), (0, 0, 255),
+im_with_keypoints = cv2.drawKeypoints(shrunk, keypoints, np.array([]), (0, 0, 255),
                                       cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 # Show keypoints
