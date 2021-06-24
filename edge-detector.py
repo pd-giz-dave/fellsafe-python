@@ -3,7 +3,7 @@ import numpy as np
 from math import sqrt
 
 # Load image:
-input_image = Image.open("101-341-511-682-795-877-984-photo.jpg")
+input_image = Image.open("blob-0-photo-365-oblique.jpg")
 input_pixels = input_image.load()
 width, height = input_image.width, input_image.height
 
@@ -15,7 +15,8 @@ draw = ImageDraw.Draw(output_image)
 intensity = np.zeros((width, height))
 for x in range(width):
     for y in range(height):
-        intensity[x, y] = sum(input_pixels[x, y]) / 3
+        #intensity[x, y] = sum(input_pixels[x, y]) / 3    # colour image
+        intensity[x, y] = input_pixels[x, y]             # b/w image
 
 # Compute convolution between intensity and kernels
 max_colour = 0
@@ -28,7 +29,7 @@ for x in range(1, input_image.width - 1):
                 Gx = -1,  0, +1  and Gy =  0,  0,  0
                       0,  0,  0            0, +1,  0
             """
-        magx = intensity[x + 1, y] - intensity[x - 1, y]
+        magx = 0 #intensity[x + 1, y] - intensity[x - 1, y]
         magy = intensity[x, y + 1] - intensity[x, y - 1]
 
         # Draw in black and white the magnitude

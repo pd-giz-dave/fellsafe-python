@@ -371,88 +371,6 @@ class Codes:
         self.grey_min = min_grey
         self.grey_max = max_grey
 
-class Octant:
-    """ an iterator that returns a series of x,y co-ordinates for an octant of circle of radius r
-        it uses the Bresenham algorithm: https://www.geeksforgeeks.org/bresenhams-circle-drawing-algorithm/
-        """
-    def __init__(self, r):
-        # define a circle of radius r
-        self.r = r
-
-    def __iter__(self):
-        # init and return self
-        self.x = 0
-        self.y = self.r
-        self.d = 3 - 2 * self.r
-        return self
-
-    def __next__(self):
-        # return next tuple or raise StopIteration
-        ret = (self.x, self.y)
-        if self.y >= self.x:
-            self.x += 1
-            if self.d > 0:
-                self.y -= 1
-                self.d = self.d + 4 * (self.x - self.y) + 10
-            else:
-                self.d = self.d + 4 * self.x + 6
-            return ret
-        else:
-            raise StopIteration
-
-class Circle:
-    """ an iterator that returns a series of x,y co-ordinates for a circle of radius r """
-    def __init__(self, r):
-        octant1 = []
-        octant2 = []
-        octant3 = []
-        octant4 = []
-        octant5 = []
-        octant6 = []
-        octant7 = []
-        octant8 = []
-        for dx, dy in Octant(r):
-            octant1.append([ dx,  dy])   # forwards
-            octant2.append([ dy,  dx])   # backwards
-            octant3.append([ dy, -dx])   # forwards
-            octant4.append([ dx, -dy])   # backwards
-            octant5.append([-dx, -dy])   # forwards
-            octant6.append([-dy, -dx])   # backwards
-            octant7.append([-dy,  dx])   # forwards
-            octant8.append([-dx,  dy])   # backwards
-        # remove duplicate edges
-        if octant1[-1] == octant2[-1]:  octant1.pop(-1)
-        if octant2[ 0] == octant3[ 0]:  octant2.pop( 0)
-        if octant3[-1] == octant4[-1]:  octant3.pop(-1)
-        if octant4[ 0] == octant5[ 0]:  octant4.pop( 0)
-        if octant5[-1] == octant6[-1]:  octant5.pop(-1)
-        if octant6[ 0] == octant7[ 0]:  octant6.pop( 0)
-        if octant7[-1] == octant8[-1]:  octant7.pop(-1)
-        if octant8[ 0] == octant1[ 0]:  octant8.pop( 0)
-        # construct circle
-        self._circle = []
-        for p in          octant1 : self._circle.append(p)
-        for p in reversed(octant2): self._circle.append(p)
-        for p in          octant3 : self._circle.append(p)
-        for p in reversed(octant4): self._circle.append(p)
-        for p in          octant5 : self._circle.append(p)
-        for p in reversed(octant6): self._circle.append(p)
-        for p in          octant7 : self._circle.append(p)
-        for p in reversed(octant8): self._circle.append(p)
-
-    def __iter__(self):
-        # init and return self
-        self._i = -1
-        return self
-
-    def __next__(self):
-        # return next tuple or raise StopIteration
-        self._i += 1
-        if self._i >= len(self._circle):
-            raise StopIteration
-        else:
-            return self._circle[self._i][0], self._circle[self._i][1]
-
 class Angle:
     """ a fast mapping (i.e. uses lookup tables and not math functions) from angles to co-ordinates
         and co-ordinates to angles for a circle
@@ -463,173 +381,141 @@ class Angle:
             scale defines the accuracy required, the bigger the more accurate, it must be a +ve integer
             """
         # NB: This code is only executed once so clarity over performance is preferred
-        self.ratio_scale = scale
-        self.angles = [None for _ in range(self.ratio_scale)]
+        self.ratio_scale = int(round(scale))
+        self.angles = [None for _ in range(self.ratio_scale+1)]
         self.angles[0] = 0
         for step in range(1,len(self.angles)):
             # each step here represents 1/scale of an octant
-            # the index is the ratio of x/y, the result is the angle (in degrees)
+            # the index is the ratio of x/y (0..1*scale), the result is the angle (in degrees)
             self.angles[step] = math.degrees(math.atan(step / self.ratio_scale))
         self.ratios = [[None, None] for _ in range(self.ratio_scale+1)]
         self.step_angle = 45 / self.ratio_scale  # the angle represented by each step in the lookup table
         for step in range(len(self.ratios)):
-            # each octant here consists of scale steps
-            # the index is an angle 0..45, the result is the x,y co-ordinates for circle of radius 1
-            self.ratios[step][0] = math.sin(math.radians(step * self.step_angle))
-            self.ratios[step][1] = math.cos(math.radians(step * self.step_angle))
+            # each octant here consists of scale steps,
+            # the index is an angle 0..45, the result is the x,y co-ordinates for circle of radius 1,
+            # angle 0 is considered to be straight up and increase clockwise, the vertical axis is
+            # considered to be -Y..0..+Y, and the horizontal -X..0..+X,
+            # the lookup table contains 0..45 degrees, other octants are calculated by appropriate x,y
+            # reversals and sign reversals
+            self.ratios[step][0] = 0.0 + math.sin(math.radians(step * self.step_angle))  # NB: x,y reversed
+            self.ratios[step][1] = 0.0 - math.cos(math.radians(step * self.step_angle))  #     ..
         # Parameters for ratio() for each octant:
         #   edge angle, offset, 'a' multiplier', reverse x/y, x multiplier, y multiplier
-        self.octants = [[45 ,   0,+1,False,+1,+1],   # octant 0
-                        [90 , +90,-1,True ,+1,+1],   # octant 1
-                        [135, -90,+1,True ,-1,+1],   # octant 2
-                        [180,+180,-1,False,+1,-1],   # octant 3
-                        [225,-180,+1,False,-1,-1],   # octant 4
-                        [270,+270,-1,True ,-1,-1],   # octant 5
-                        [315,-270,+1,True ,+1,-1],   # octant 6
-                        [360,+360,-1,False,-1,+1]]   # octant 7
+        #                                            #                     -Y
+        #                                        #                     -Y
+        self.octants = [[45 ,   0,+1,0,+1,+1],   # octant 0         \ 7 | 0 /
+                        [90 , +90,-1,1,-1,-1],   # octant 1       6  \  |  /  1
+                        [135, -90,+1,1,-1,+1],   # octant 2           \ | /
+                        [180,+180,-1,0,+1,-1],   # octant 3    -X ------+------ +X
+                        [225,-180,+1,0,-1,-1],   # octant 4           / | \
+                        [270,+270,-1,1,+1,+1],   # octant 5       5  /  |  \  2
+                        [315,-270,+1,1,+1,-1],   # octant 6         / 4 | 3 \
+                        [360,+360,-1,0,-1,+1]]   # octant 7            +Y
+        # these octants describe the parameters to this equation:
+        #  x = ratios[offset + angle*signa][0+reversed] * signx * radius
+        #  y = ratios[offset + angle*signa][1-reversed] * signy * radius
+        # octant 0 is the native values from self.ratios
+        # octant[0] is the angle threshold
+        # octant[1] is the offset to rotate the octant
+        # octant[2] is the sign of a
+        # octant[3] is the reversed signal, 0 == not reversed, 1 == reversed
+        # octant[4] is the sign of x
+        # octant[5] is the sign of y
 
-    def ratio(self, a, r):
+    def polarToCart(self, a, r):
         """ get the x,y co-ordinates on the circumference of a circle of radius 'r' for angle 'a'
             'a' is in degrees (0..360), 'r' is in pixels
-              0..45   octant 0 --> [    a    ] =  x/ y ==   +0 + (+a)
-             45..90   octant 1 --> [ 90-a    ] =  y/ x ==  +90 + (-a)
-             90..135  octant 2 --> [    a-90 ] = -y/ x ==  -90 + (+a)
-            135..180  octant 3 --> [180-a    ] =  x/-y == +180 + (-a)
-            180..225  octant 4 --> [    a-180] = -x/-y == -180 + (+a)
-            225..270  octant 5 --> [270-a    ] = -y/-x == +270 + (-a)
-            270..315  octant 6 --> [    a-270] =  y/-x == -270 + (+a)
-            315..360  octant 7 --> [360-a    ] = -x/ y == +360 + (-a)
+            'a' of 0 is 12 o'clock and increases clockwise
             """
         if a < 0 or a > 360:
             return None, None
         if r == 0:
             return 0, 0
         for octant in self.octants:
-            if a < octant[0]:
-                ratio = self.ratios[int(((octant[1] + (a * octant[2])) / self.step_angle) + 0.5)]
-                if octant[3]:
-                    x = ratio[1]
-                    y = ratio[0]
-                else:
-                    x = ratio[0]
-                    y = ratio[1]
-                x *= octant[4]
-                y *= octant[5]
-                return int(x * r), int(y * r)
+            if a <= octant[0]:
+                ratio = self.ratios[int(round((octant[1] + (a * octant[2])) / self.step_angle))]
+                x = ratio[0+octant[3]] * octant[4] * r
+                y = ratio[1-octant[3]] * octant[5] * r
+                return x, y
         return None, None
 
-    def angle(self, x, y):
-        """ get the angle from these x,y co-ordinates around a circle
-                +x, +y, y >  x -->   0..45   octant 0 = 0   + [ x/ y]
-                +x, +y, y <  x -->  45..90   octant 1 = 90  - [ y/ x]
-                +x, -y, x > -y -->  90..135  octant 2 = 90  + [-y/ x]
-                +x, -y, x < -y --> 135..180  octant 3 = 180 - [ x/-y]
-                -x, -y, y <  x --> 180..225  octant 4 = 180 + [-x/-y]
-                -x, -y, y >  x --> 225..270  octant 5 = 270 - [-y/-x]
-                -x, +y, y < -x --> 270..315  octant 6 = 270 + [ y/-x]
-                -x, +y, y > -x --> 315..360  octant 7 = 360 - [-x/ y]
+    def cartToPolar(self, x, y):
+        """ get the angle and radius from these x,y co-ordinates around a circle,
+            see diagram in __init__ for the octant mapping (its this):
+                +x, -y, -y >  x -->   0..45    octant 0
+                +x, -y, -y <  x -->  45..90    octant 1
+                +x, +y,  y <  x -->  90..135   octant 2
+                +x, +y,  y >  x --> 135..180   octant 3
+                -x, +y,  y > -x --> 180..225   octant 4
+                -x, +y,  y < -x --> 225..270   octant 5
+                -x, -y, -y < -x --> 270..315   octant 6
+                -x, -y, -y > -x --> 315..360   octant 7
             edge cases:
                 x = 0, y = 0 --> None        edge 0
                 x > 0, y = 0 --> 90          edge 1
-                x = 0, y < 0 --> 180         edge 2
+                x = 0, y > 0 --> 180         edge 2
                 x < 0, y = 0 --> 270         edge 3
-                x = 0, y > 0 --> 0 (or 360)  edge 4
+                x = 0, y < 0 --> 0 (or 360)  edge 4
         """
         def _ratio2angle(offset, sign, ratio):
-            """ do a lookup on the given ratio, changes its sign (+1 or -1) and add the offset (degrees) """
-            return offset + (self.angles[int(ratio * self.ratio_scale)] * sign)
+            """ do a lookup on the given ratio, changes its sign (+1 or -1) and add the offset (degrees)
+                ratio is in the range 0..1 and is mapped via the LUT to 0..45 degrees,
+                the sign may change that to -45..0,
+                the offset rotates that by that many degrees,
+                result is degrees in range 0..360, with 0 at 12 o'clock
+                """
+            return offset + (self.angles[int(round(ratio * self.ratio_scale))] * sign)
+
+        def _xy2r(x, y):
+            """" convert x, y to a radius """
+            return math.sqrt(x*x + y*y)
 
         # edge cases
         if x == 0:
-            if y == 0: return None       # edge 0
-            if y  < 0: return 180        # edge 2
-            else:      return 0          # edge 4
+            if y == 0: return None, None       # edge 0
+            if y  > 0: return 180, +y          # edge 2
+            else:      return   0, -y          # edge 4
         elif y == 0:  # and x != 0
-            if x  > 0: return  90        # edge 1
-            else:      return 270        # edge 3
+            if x  > 0: return  90, +x          # edge 1
+            else:      return 270, -x          # edge 3
         # which octant?
+        # NB: both x and y are not 0 to get here
         if x > 0:
-            if y > 0:
-                if   y >  x: return _ratio2angle(0, +1, x / y)
-                elif y <  x: return _ratio2angle(90, -1, y / x)
-                else:        return  45
-            else:  # y < 0
-                if   x > -y: return _ratio2angle(90, +1, -y / x)
-                elif x < -y: return _ratio2angle(180, -1, x / -y)
-                else:        return 135
-        else:  # x < 0
+            # octant 0, 1, 2, 3
             if y < 0:
-                if   y <  x: return _ratio2angle(180, +1, -x / -y)
-                elif y >  x: return _ratio2angle(270, -1, -y / -x)
-                else:        return 225
-            else:  # y > 0
-                if   y < -x: return _ratio2angle(270, +1, y / -x)
-                elif y > -x: return _ratio2angle(360, -1, -x / y)
-                else:        return 315
-
-    def check_angle(self, x, y):
-        """ check the angle mapping for co-ords x,y is within 1 resolution step """
-        def _atan(x, y):
-            """ do the angle determination the math way """
-            if x > 0 and y > 0:  # q1
-                return math.degrees(math.atan(x / y))
-            elif x > 0 and y < 0:  # q2
-                return math.degrees(math.atan(-y / x)) + 90
-            elif x < 0 and y < 0:  # q3
-                return math.degrees(math.atan(-x / -y)) + 180
-            elif x < 0 and y > 0:  # q4
-                return math.degrees(math.atan(y / -x)) + 270
-            elif x == 0 and y > 0:
-                return 0
-            elif x == 0 and y < 0:
-                return 180
-            elif y == 0 and x > 0:
-                return 90
-            elif y == 0 and x < 0:
-                return 270
+                # octant 0, 1
+                if -y > x:
+                    # octant 0
+                    return _ratio2angle(  0, +1,  x/-y), _xy2r(x, y)
+                else:
+                    # octant 1
+                    return _ratio2angle( 90, -1, -y/ x), _xy2r(x, y)
             else:
-                raise Exception('Invalid co-ordinates {},{}'.format(x, y))
-
-        a = self.angle(x, y)                     # do our lookup conversion of x,y to an angle
-        m = _atan(x, y)                          # do the same thing via atan()
-        d = a - m                                # calc the difference
-        if math.fabs(d) >= 0.1:
-            # got a bad one
-            return a, m, d
-        else:
-            return None, None, None
-
-    def check_ratio(self, a, r):
-        """ check the ratio mapping for angles 'a' and radius 'r' is within 1 pixel """
-        def _sincos(a, r):
-            """ do the x,y determination the math way """
-            if a < 0 or a > 360:
-                return None, None
-            if r == 0:
-                return 0, 0
-            for octant in self.octants:
-                if a < octant[0]:
-                    p = math.radians(octant[1] + (a * octant[2]))
-                    ratio = [math.sin(p), math.cos(p)]
-                    if octant[3]:
-                        x = ratio[1]
-                        y = ratio[0]
-                    else:
-                        x = ratio[0]
-                        y = ratio[1]
-                    x *= octant[4]
-                    y *= octant[5]
-                    return int(x * r), int(y * r)
-
-        x, y = self.ratio(a, r)                  # do our lookup conversion of a,r to x,y
-        mx, my = _sincos(a, r)                   # do the same thing via sin() and cos()
-        dx = x - mx                              # calc the difference
-        dy = y - my                              # ..
-        if (math.fabs(dx) > 0) or (math.fabs(dy) > 0):
-            # got a bad one
-            return x, y, mx, my, dx, dy
-        else:
-            return None, None, None, None, None, None
+                # octant 2, 3
+                if y < x:
+                    # octant 2
+                    return _ratio2angle( 90, +1,  y/ x), _xy2r(x, y)
+                else:
+                    # octant 3
+                    return _ratio2angle(180, -1,  x/ y), _xy2r(x, y)
+        else:  # x < 0
+            # octant 4, 5, 6, 7
+            if y > 0:
+                # octant 4, 5
+                if y > -x:
+                    # octant 4
+                    return _ratio2angle(180, +1, -x/ y), _xy2r(x, y)
+                else:
+                    # octant 5
+                    return _ratio2angle(270, -1,  y/-x), _xy2r(x, y)
+            else:  # y < 0
+                # octant 6, 7
+                if -y < -x:
+                    # octant 6
+                    return _ratio2angle(270, +1, -y/-x), _xy2r(x, y)
+                else:
+                    # octant 7
+                    return _ratio2angle(360, -1, -x/-y), _xy2r(x, y)
 
 class Ring:
     """ draw a ring of width w and radius r from centre x,y with s segments containing bits b,
@@ -638,7 +524,7 @@ class Ring:
         considered to be clockwise
         """
 
-    def __init__(self, centre_x, centre_y, segments, width, scale, frame):
+    def __init__(self, centre_x, centre_y, segments, width, frame):
         # set constant parameters
         self.s = segments                # how many bits in each ring
         self.w = width                   # width of each ring
@@ -646,17 +532,19 @@ class Ring:
         self.x = centre_x                # where the centre of the rings are
         self.y = centre_y                # ..
         # setup our angles look-up table
-        self.angle = Angle(scale).angle
+        scale = 2 * math.pi * width * 7
+        self.angle_xy = Angle(scale).polarToCart
         self.edge = 360 / self.s         # the angle at which a bit edge occurs (NB: not an int)
 
     def _pixel(self, x, y, colour):
-        """ draw a pixel at x,y from the image centre with the given luminance """
+        """ draw a pixel at x,y from the image centre with the given luminance
+            to mitigate pixel gaps in the circle algorithm we draw several pixels near x,y
+            """
         x += self.x
         y += self.y
         self.c.putpixel(x  , y  , colour)
         self.c.putpixel(x+1, y  , colour)
         self.c.putpixel(x  , y+1, colour)
-        self.c.putpixel(x+1, y+1, colour)
 
     def _point(self, x, y, bit):
         """ draw a point at offset x,y from our centre with the given bit (0 or 1) colour (black or white)
@@ -671,18 +559,25 @@ class Ring:
         self._pixel(x, y, colour)
 
     def _draw(self, radius, bits):
-        """ draw a ring at radius of bits, if bits is None a grey solid ring is drawn """
+        """ draw a ring at radius of bits, if bits is None a grey solid ring is drawn
+            the bits are drawn big-endian and clockwise , i.e. MSB first (0 degrees), LSB last (360 degrees)
+            """
         if radius <= 0:
             # special case - just draw a dot at x,y of the LSB colour of bits
             self._point(0, 0, bits & 1)
         else:
-            for x, y in Circle(radius):
-                a = self.angle(x, y)
+            msb = 1 << (self.s-1)
+            scale = 2 * math.pi * radius
+            for step in range(int(round(scale))):
+                a = (step / scale) * 360
+                x, y = self.angle_xy(a, radius)
+                x = int(round(x))
+                y = int(round(y))
                 if a > 0:
                     segment = int(a / self.edge)
                 else:
                     segment = 0
-                mask = 1 << segment
+                mask = msb >> segment
                 if bits is None:
                     self._point(x, y, -1)
                 elif bits & mask:
@@ -870,9 +765,15 @@ class Transform:
     """ various image transforming operations """
 
     def blur(self, source, size=3):
-        """ apply a gaussian blur to the given cv2 image with a kernel of the given size """
+        """ apply a median blur to the given cv2 image with a kernel of the given size """
         target = source.instance()
-        target.set(cv2.GaussianBlur(source.get(), (size, size), 0))
+        target.set(cv2.medianBlur(source.get(), size))
+        return target
+
+    def downSize(self, source):
+        """ blur and downsize (by half in both directions) the given image """
+        target = source.instance()
+        target.set(cv2.pyrDown(source.get()))
         return target
 
     def resize(self, source, new_size):
@@ -933,6 +834,16 @@ class Transform:
         # Detect blobs (NB: reversing image as we want bright blobs not dark ones)
         return detector.detect(255 - source.get())
 
+    def edges(self, source, xorder, yorder, size=3):
+        """ perform an edge detection filter on the given image and return a new image of the result
+            xorder=1, yorder=0 will detect horizontal edges,
+            xorder=0, yorder=1 will detect vertical edges,
+            xorder=1, yorder=1 will detect both
+            """
+        target = source.instance()
+        target.set(cv2.Sobel(source.get(), -1, xorder, yorder, size))
+        return target
+
     def label(self, source, keypoints, colour=(0, 0, 255), title=None):
         """ return an image with a coloured ring around the given key points in the given image
             and a textual title at each key point centre
@@ -972,13 +883,17 @@ class Scan:
 
         # pre-process
         self.transform = Transform()                                             # make a new frame instance
-        self.blurred = self.transform.blur(self.original, 3)                     # de-noise
+        self.blurred = self.transform.downSize(self.original)                    # de-noise and down-sample
         self.image = self.transform.resize(self.blurred, 1080)                   # re-size
         self.blobs = self.transform.blobs(self.image)                            # find the blobs
 
         # context
-        self.targets = []  # list of potential targets we've found
-        self.status = []  # list of blobs and their accepted/rejected status
+        max_radius, _ = self.image.size()
+        max_circumference = min(2 * math.pi * max_radius, 3600)
+        self.angle = Angle(int(round(max_circumference)))
+        self.angle_xy = self.angle.polarToCart
+        self.targets = []                # list of potential targets we've found
+        self.status = []                 # list of blobs and their accepted/rejected status
 
     def _prepare_ring_scan(self, inner_radius, outer_radius):
         """ setup the params to scan a ring """
@@ -1021,25 +936,38 @@ class Scan:
                             grey += 1
         return black, grey, white
 
+    def _unwrap(self, centre_x, centre_y, width):
+        """ produce a radius, theta (angle) image of the circular area defined by given params
+            this converts the circular image into a rectangle,
+            the resolution of the radius is one pixel, the resolution of the angle is one degree,
+            """
+        angle_steps = 360
+        angle_delta = 360 / angle_steps
+        limit_radius = int(round((self.num_rings + 2) * width))    # go big to allow for perspective distortions
+        code = self.original.instance().new(angle_steps, limit_radius, min_luminance)
+        for radius in range(limit_radius):
+            for angle in range(angle_steps):
+                degrees = angle * angle_delta
+                x, y = self.angle_xy(degrees, radius)
+                if x is None:
+                    pixel = None
+                else:
+                    pixel = self.image.getpixel(int(round(centre_x + x)), int(round(centre_y + y)))
+                if pixel is None:
+                    code.putpixel(angle, radius, mid_luminance)
+                else:
+                    code.putpixel(angle, radius, pixel)
+        if self.debug:
+            code.unload('blob-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, width, self.original.source))
+            code.show()
+        return code
+
     def find_targets(self):
         """ find target candidates from our image,
             a target is a bright blob surrounded by a uniform darker area with an outer uniform black ring,
-            result is an array of potentials in self.targets,
+            result is an array of potentials in self.targets, these have been 'unwrapped' into a rectangle
+            with height = radius and width = angle,
             returns a count of how many found.
-            method:
-                1. assume found blobs are mostly circular and mostly white, note its width R (keypoint size/4)
-                1.1 reject those with a width that is too small
-                1.2 reject those that would cross the image edge
-                2 get the average luminance for the inner 2/3rds of the blob
-                2.1 take this to be white
-                3. get the average luminance of the middle third of the ring at radius R for a width R
-                3.1 take this to be black
-                3.2 reject the target if black is not sufficiently dimmer than white
-                4. determine the grey thresholds from the black and white levels
-                4.1 apply to central blob - reject target if not enough are white
-                4.2 apply to black ring at R - reject target if not enough are black
-                4.3 apply to outer black ring - reject target if not enough are black
-                5. the target qualifies as a candidate
             """
         self.targets = []
         self.status = []
@@ -1055,6 +983,28 @@ class Scan:
                           format(centre_x, centre_y, width))
                     self.status.append([blob, 'too small', width])
                 continue
+            target = self._unwrap(centre_x, centre_y, width)
+            """ target is now a rectangle where x is the angle and y is the radius,
+                every 24 degrees is one bit segment,
+                every 'width' radius is a 'ring', but due to perspective distortions the ring boundaries can be
+                'wavy', to mitigate this we consider 8 degree samples and assume the 'wavy-ness' across that is
+                not significant, 8 degrees represents 3 samples per bit segment which is sufficient to guarantee
+                at least one will be completely within the segment, the first 2 rings are pure white, we assume
+                the 'wavy-ness' is such that inner ring is not polluted with the enclosing black ring, so a first
+                check is that the inner ring (for each segment - 3 samples) is all the same colour, this becomes
+                'white' for each segment, 
+                """
+            v_edge = self.transform.edges(target, 0, 1, 3)     # get black to white edges along the radius
+            if self.debug:
+                v_edge.unload('v-edges-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, width, self.original.source))
+                v_edge.show()
+            """
+                to qualify as a target the luminance sequence across the radius must be: white, black, ?, ?, ?, black
+                but perspective distortions make the edges 'wavy' so we cannot just scan across all angles, our code
+                segments span 24 degrees, if we split this into three 8 degree samples we can guarantee at least one
+                of those will be completely inside the code segment, within that 8 degree sample we assume the
+                'wavy-ness' will not be significant 
+                """
             rings = [[(width*ring_num)+border, (width*(ring_num+1))-border] for ring_num in range(self.num_rings)]
             if not self.image.inimage(int(round(centre_x)), int(round(centre_y)), int(round(width * self.num_rings))):
                 # whole code would go off the image edge
@@ -1144,10 +1094,9 @@ class Scan:
 
 class Test:
     """ test the critical primitives """
-    def __init__(self, code_bits, min_num, max_num, ratio_scale, parity, edges):
+    def __init__(self, code_bits, min_num, max_num, parity, edges):
         self.code_bits = code_bits
         self.min_num = min_num
-        self.ratio_scale = ratio_scale
         self.c = Codes(self.code_bits, min_num, max_num, parity, edges)
         self.frame = Frame()
         self.max_num = min(max_num, self.c.num_limit)
@@ -1281,62 +1230,68 @@ class Test:
             traceback.print_exc()
         print('******************')
 
-    def angles(self, circle_size):
-        """ test accuracy of angle lookup table """
+    def circles(self):
+        """ test accuracy of co-ordinate conversions - polar to/from cartesian,
+            also check polarToCart goes clockwise
+            """
         print('')
-        print('******************')
-        print('Check angle look-up')
+        print('******************************************')
+        print('Check co-ordinate conversions (radius 100)')
+        # check clockwise direction by checking sign and relative size as we go round each octant
+        #          angle, x-sign, y-sign, xy-sign
+        octants = [[ 45, +1, -1, -1],
+                   [ 90, +1, -1, +1],
+                   [135, +1, +1, +1],
+                   [180, +1, +1, -1],
+                   [225, -1, +1, -1],
+                   [270, -1, +1, +1],
+                   [315, -1, -1, +1],
+                   [360, -1, -1, -1]]
+        # checks are:
+        #  x * x-sign > 0
+        #  y * y-sign > 0
+        #  (x-y) * xy-sign > 0
         try:
-            i = 0
             good = 0
             bad = 0
-            check = Angle(self.ratio_scale).check_angle
-            for x,y in Circle(circle_size):
-                a, m, d = check(x, y)
-                if a is not None:
+            radius = 100
+            scale = 360 * 10             # 0.1 degrees
+            angle = Angle(scale)
+            for step in range(int(round(scale))):
+                a = (step / scale) * 360
+                cx, cy = angle.polarToCart(a, radius)
+                ca, cr = angle.cartToPolar(cx, cy)
+                rotation_err = 'angle out of range!'
+                for octant in octants:
+                    if a <= octant[0]:
+                        # found the octant we are in
+                        xsign = cx * octant[1]
+                        ysign = cy * octant[2]
+                        xysign = (xsign - ysign) * octant[3]
+                        if xsign >= 0:
+                            if ysign >= 0:
+                                if xysign >= 0:
+                                    # rotation correct
+                                    rotation_err = None
+                                else:
+                                    rotation_err = 'x bigger than y'
+                            else:
+                                rotation_err = 'y sign'
+                        else:
+                            rotation_err = 'x sign'
+                        break
+                rerr = math.fabs(cr - radius)
+                aerr = math.fabs(ca - a)
+                if rerr > 0.01 or aerr > 0.3 or rotation_err is not None:
                     bad += 1
-                    print('{:+03},{:+03}: lookup={:+6.1f}  atan={:+6.1f}  err={:+8.3f}        '.format(x, y, a, m, d), end='')
-                    i += 1
-                    if i % 5 == 0:
-                        print('')
-                        i = 0
+                    print('{:.3f} degrees --> {:.3f}x, {:.3f}y --> {:.3f} degrees, {:.3f} radius: aerr={:.3f}, rerr={:.3f}, rotation={}'.
+                          format(a, cx, cy, ca, cr, aerr, rerr, rotation_err))
                 else:
                     good += 1
-            if bad > 0: print('')
             print('{} good, {} bad'.format(good, bad))
         except:
             traceback.print_exc()
-        print('******************')
-
-    def ratios(self, circle_size):
-        """ test accuracy of ratio lookup table """
-        print('')
-        print('******************')
-        print('Check ratio look-up')
-        try:
-            r = circle_size >> 1
-            i = 0
-            good = 0
-            bad = 0
-            scale = 10
-            check = Angle(self.ratio_scale).check_ratio
-            for a in range(360 * scale):
-                x, y, mx, my, dx, dy = check(a/scale, r)
-                if x is not None:
-                    bad += 1
-                    print('{:+7.2f},{:+03}: lookup=({:+03},{:+03})  sincos=({:+03},{:+03})  err=({:+03},{:+03})        '.\
-                          format(a/scale, r, x, y, mx, my, dx, dy), end='')
-                    i += 1
-                    if i % 4 == 0:
-                        print('')
-                        i = 0
-                else:
-                    good += 1
-            if bad > 0: print('')
-            print('{} good, {} bad'.format(good, bad))
-        except:
-            traceback.print_exc()
-        print('******************')
+        print('******************************************')
 
     def rings(self, width):
         """ draw angle test ring segments (visual) """
@@ -1346,7 +1301,7 @@ class Test:
         try:
             self.frame.new(width * 14, width * 14, max_luminance)      # 14 == 6 rings in radius + a border
             x, y = self.frame.size()
-            ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.ratio_scale, self.frame)
+            ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.frame)
             ring.code(999, [0x5555, 0xAAAA, 0x5555])
             self.frame.unload('{}-segment-angle-test.jpg'.format(self.code_bits))
         except:
@@ -1366,7 +1321,7 @@ class Test:
                 else:
                     self.frame.new(width * 14, width * 14, max_luminance)  # 14 == 6 rings in radius + a border
                     x, y = self.frame.size()
-                    ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.ratio_scale, self.frame)
+                    ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.frame)
                     ring.code(n, rings)
                     self.frame.unload('{}-segment-{}.jpg'.format(self.code_bits, n))
         except:
@@ -1392,25 +1347,24 @@ class Test:
 min_num = 101                            # min number we want
 max_num = 999                            # max number we want (may not be achievable)
 code_bits = 15                           # number of bits in our code word
-ratio_scale = 3600                       # scale factor for ratio and angle calculations (good for 0.1 degree)
 parity = None                            # code word parity to apply (None, 0=even, 1=odd)
 edges = 4                                # how many bit transitions we want per code word
 
-test_circle_size = 120
 test_ring_width = 64
 test_black = min_luminance + 64 #+ 32
 test_white = max_luminance - 64 #- 32
 test_noise = mid_luminance >> 1
 
-test = Test(code_bits, min_num, max_num, ratio_scale, parity, edges)
-#test.coding()
-#test.decoding(test_black, test_white, test_noise)
-#test.angles(test_circle_size)
-#test.ratios(test_circle_size)
+test = Test(code_bits, min_num, max_num, parity, edges)
+test.coding()
+test.decoding(test_black, test_white, test_noise)
+test.circles()
 test_num_set = test.test_set(6)
-#test.code_words(test_num_set)
-#test.rings(test_ring_width)
-#test.codes(test_num_set, test_ring_width)
-#test.scan(101, '15-segment-101.jpg')
+test.code_words(test_num_set)
+test.rings(test_ring_width)
+test.codes(test_num_set, test_ring_width)
+#test.scan(101, '15-segment-angle-test.jpg')
+test.scan(101, '15-segment-101.jpg')
 #test.scan(101, 'photo-101.jpg')
-test.scan(101, 'photo-all-test-set.jpg')
+#test.scan(365, 'photo-365-oblique.jpg')
+#test.scan(101, 'photo-all-test-set.jpg')
