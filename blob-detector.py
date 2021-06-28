@@ -3,7 +3,7 @@ import cv2
 import numpy as np;
 
 # Read image
-orig = cv2.imread("101-341-511-682-795-877-984-photo.jpg", cv2.IMREAD_GRAYSCALE)
+orig = cv2.imread("15-segment-101.jpg", cv2.IMREAD_GRAYSCALE)
 
 # De-noise it
 blurred = cv2.GaussianBlur(orig, (5, 5), 0)
@@ -16,7 +16,8 @@ new_height = int(new_width * aspect_ratio)
 shrunk = cv2.resize(blurred, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
 # Reverse it
-im = 255-shrunk
+#im = 255-shrunk
+im = shrunk
 
 # Setup SimpleBlobDetector parameters.
 params = cv2.SimpleBlobDetector_Params()
@@ -27,20 +28,20 @@ params.maxThreshold = 256
 params.thresholdStep = 16
 
 # Filter by Area.
-params.filterByArea = True
+params.filterByArea = False
 params.minArea = 100
 params.maxArea = 100000
 
 # Filter by Circularity
-params.filterByCircularity = True
+params.filterByCircularity = False
 params.minCircularity = 0.8
 
 # Filter by Convexity
-params.filterByConvexity = True
+params.filterByConvexity = False
 params.minConvexity = 0.8
 
 # Filter by Inertia
-params.filterByInertia = True
+params.filterByInertia = False
 params.minInertiaRatio = 0.8
 
 # Create a detector with the parameters
