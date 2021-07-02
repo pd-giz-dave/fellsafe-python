@@ -518,9 +518,16 @@ class Angle:
                     # octant 7
                     return _ratio2angle(360, -1, -x/-y), _xy2r(x, y)
 
-    def arcLength(self, major_axis, minor_axis, angle):
-        """ determine the approximate length for an arc of 1 degree at the given angle
-            on an ellipse with major_axis and minor_axis
+    def arcDifference(self, major_axis, minor_axis, angle, radius):
+        """ determine the approximate difference in length for an arc of 1 degree at the given
+            angle and radius between an ellipse with major_axis and minor_axis and a circle with
+            radius minor_axis,
+            the length of the arc for a circle is (angle * pi / 180) * radius,
+            we assume the same for an ellipse but we need to determine the 'radius' to do it at,
+            near the major_axis the ellipse is similar to a circle of the minor_axis and vice-versa,
+            so the nearer the given radius is to the major_axis the nearer the circle radius needs
+            to be to the minor_axis, we do that 'reversal' by adding to the minor_axis the difference
+            between the radius and the major axis, our difference is then that of this and minor_axis
             """
         # do it the long way to see if it works, the long way is this (see https://en.wikipedia.org/wiki/Ellipse):
         #  co-ords of a point on the circumference of an ellipse with major-axis a and minor-axis b at angle t:
@@ -550,14 +557,19 @@ class Angle:
             delta = +1
         else:
             delta = -1
-        t = math.radians(angle)
-        dt = math.radians(angle + delta)
+        t = math.radians(angle % 91)
+        dt = math.radians((angle + delta) % 91)
         sint = math.sin(t) - math.sin(dt)
         cost = math.cos(t) - math.cos(dt)
         a = minor_axis * sint
         b = major_axis * cost
         d = math.sqrt(a*a + b*b)
-        return d
+
+        # now get the diff to a circle arc of 1 degree at radius minor_axis
+        # i.e. 2*pi*r/360
+        c = (2 * math.pi * minor_axis) / 360
+        diff = d - c
+        return diff
 
 class Ring:
     """ draw a ring of width w and radius r from centre x,y with s segments containing bits b,
@@ -914,18 +926,17 @@ class Scan:
             the areas of interest (by looking for bright blobs)
             """
         # constants
-        self.min_border_pixels = 1       # minimum border pixels when sampling an area
-        self.min_ring_width = 1 + 3 + 1  # must be wide enough to have an ignored border and still leave enough
+        self.min_border_pixels = 2       # minimum border pixels when sampling an area
+        self.min_ring_width = 9          # must be wide enough to have a 2 pixel ignored border and still leave 3
         self.min_black_white_diff = 21   # must be divisible by 3 and still be big enough to be obvious
         self.min_white_ratio = 0.8       # percent pixels that must be white in the central circle (ring 0)
         self.min_black_ratio = 0.6       # percent pixels that must be black in the central border (ring 2)
         self.num_rings = 7               # total number of rings in the whole code (central blob counts as 2)
-        self.radius_stretch = 1.5        # how much to stretch the radius tested to cope with perspective distortion
+        self.radius_stretch = 1.4        # how much to stretch the radius to cope with perspective distortion
         self.angle_steps = 360           # angular resolution when 'projecting'
-        self.min_distance_scale = 1      # the minimum inner to outer edge distance as a proportion of blob width
-        self.min_inner_edge_scale = 0.3  # the minimum inner edge distance as a proportion of blob width
-        self.edge_threshold = int(max_luminance * 0.1)     # minimum luminance for an edge pixel to qualify as an edge
-        self.circle_scale = 0.9          # circle radius scale when calculating differentials from an ellipse
+        self.min_distance_scale = 2      # the minimum inner to outer edge distance as a proportion of ring width
+        self.min_inner_edge_scale = 1    # the minimum inner edge distance as a proportion of ring width
+        self.edge_threshold = int(max_luminance * 0.7)     # minimum luminance for an edge pixel to qualify as an edge
 
         # params
         self.original = frame
@@ -933,7 +944,7 @@ class Scan:
 
         # pre-process
         self.transform = Transform()                           # make a new frame instance
-        blurred = self.transform.blur(self.original)           # de-noise
+        blurred = self.transform.downSize(self.original)       # de-noise and down-sample (halve x and y)
         self.image = self.transform.resize(blurred, 1080)      # re-size (to HD video convention)
         self.blobs = self.transform.blobs(self.image)          # find the blobs
 
@@ -942,7 +953,7 @@ class Scan:
         max_circumference = min(2 * math.pi * max_radius, 3600)
         self.angle = Angle(int(round(max_circumference)))
         self.angle_xy = self.angle.polarToCart
-        self.arc_len = self.angle.arcLength
+        self.arc_diff = self.angle.arcDifference
         self.targets = []                # list of targets we've found
         self.status = []                 # list of blobs and their accepted/rejected status
 
@@ -977,10 +988,6 @@ class Scan:
 
     def _project(self, centre_x, centre_y, width):
         """ 'project' a potential target from its circular shape to a rectangle of radius (y) x angle (x),
-            we do a gaussian mean on the sampled pixels with its N/S/W/E neighbours of:
-                - 1 -
-                1 2 1
-                - 1 -
             """
         angle_delta = 360 / self.angle_steps
         limit_radius = int(round((self.num_rings * self.radius_stretch) * width))
@@ -990,39 +997,18 @@ class Scan:
                 degrees = angle * angle_delta
                 x, y = self.angle_xy(degrees, radius)
                 if x is None:
-                    pixel = mid_luminance
+                    pixel = None
                 else:
-                    dx = int(round(centre_x + x))
-                    dy = int(round(centre_y + y))
-                    c = self.image.getpixel(dx, dy) * 2
-                    n = self.image.getpixel(dx, dy-1)
-                    s = self.image.getpixel(dx, dy+1)
-                    w = self.image.getpixel(dx - 1, dy)
-                    e = self.image.getpixel(dx+1, dy)
-                    pixel = 0
-                    count = 0
-                    if c is not None:
-                        pixel += c
-                        count += 2
-                    if n is not None:
-                        pixel += n
-                        count += 1
-                    if s is not None:
-                        pixel += s
-                        count += 1
-                    if w is not None:
-                        pixel += w
-                        count += 1
-                    if e is not None:
-                        pixel += e
-                        count += 1
-                    pixel = int(round(pixel / count))
-                code.putpixel(angle, radius, pixel)
+                    pixel = self.image.getpixel(int(round(centre_x + x)), int(round(centre_y + y)))
+                if pixel is None:
+                    code.putpixel(angle, radius, mid_luminance)
+                else:
+                    code.putpixel(angle, radius, pixel)
         return code
 
-    def _find_radius_edge(self, target, direction):
+    def _find_edge(self, target, direction):
         """ look for a continuous edge in the given target either top-down (inner) or bottom-up (outer),
-            direction is +1 for top-down or -1 for bottom-up, an 'edge' is vertical, i.e along the radius,
+            direction is +1 for top-down or -1 for bottom-up,
             to qualify as an 'edge' it must be continuous across all angles (i.e. no dis-connected jumps)
             to find the edge we scan the radius at angle 0 looking for a pixel above our edge threshold,
             then follow that along the angle axis, if we get to 360 without a break we've found it
@@ -1033,23 +1019,18 @@ class Scan:
             radius = (y for y in range(max_y))
         else:
             radius = (y for y in range(max_y-1, -1, -1))
-        # we sample in a semi-circle around each pixel over the threshold to find the best candidate to follow
-        sample_xy = [[0, -2],
-                     [0, -1], [1, -1],
-                     [0,  0], [1,  0], [2, 0],
-                     [0, +1], [1,  1],
-                     [0, +2]]
         for y in radius:
             pixel = target.getpixel(0, y)
             if pixel is not None and pixel > self.edge_threshold:
                 # found a potential edge
-                edge_y = y + 2*direction       # +2 to get into the middle of our sample semi-circle
-                for x in range(max_x):
+                edge[0] = y
+                edge_y = y
+                for x in range(1, max_x):
                     brightest = 0
                     brightest_dy = 0
-                    for dx, dy in sample_xy:
+                    for dy in [-2, -1, 0, +1, +2]:
                         # scan our forward neighbours and follow the brightest that is over our threshold
-                        pixel = target.getpixel(x + dx, edge_y + dy)
+                        pixel = target.getpixel(x, edge_y + dy)
                         if pixel is not None and pixel > self.edge_threshold:
                             # found an ongoing neighbour also in range, is it the brightest?
                             if pixel > brightest:
@@ -1063,32 +1044,22 @@ class Scan:
                         edge_y += brightest_dy
                         edge[x] = edge_y
                 if edge[0] is not None:
-                    # we found one, smooth it by doing a 1-1-1 mean across 3 pixels
-                    for x in range(1, len(edge)-1):
-                        edge[x] = int(round((edge[x-1] + edge[x] + edge[x+1])/3))
+                    # we found one
                     return edge
         # we did not find one
         return None
 
     def _perspective(self, target, centre_x, centre_y, width):
         """ remove perspective distortions from the given 'projected' image, width is the ring width of the target blob,
-            a circle when not viewed straight on appears as an ellipse, when that is projected into a rectangle
-            the radius edges becomes 'wavy' (a sine wave) and a similar stretching/compressing occurs along
-            the angle axis, this function gets it back to a circle-ish,
+            a circle when not viewed straight on appears as an ellipsis, so we need to get it back to a circle-ish,
             we do this by scaling the radius axis by a factor determined from the distance between the inner
-            white to black edge and outer black to white edge, the angle axis is more complex:
-                every input angle represents one degree around an ellipse,
-                each has an arc length that is dependant on the angle,
-                the largest arc length is at the minor-axis, call that D,
-                for every input angle divide its arc length by D, this represents the 'scale' for its output angle,
-                then for every input angle the output angle is the previous output plus the 'scale' of this one
-                draw a pixel at the math.floor of that
-            the radius axis scale factor is calculated as:
-                the first 2 rings are pure white, the next is pure black,
-                we detect these boundaries using a vertical edge detector,
-                this gives us an actual radius for every angle,
-                we just scale these such that they are all the same as the smallest
-            the returned image is just enough to contain the (reduced) image pixels
+            white to black edge and outer black to white edge, and use an angle dependant offset for the angle axis,
+            target here is a rectangle where x is the angle and y is the radius, due to perspective distortions
+            the ring boundaries can be 'wavy', the first 2 rings are pure white, the next is pure black, we detect
+            this boundary using a vertical edge detector, we use that to determine the actual width of our rings and
+            create the radius scaling factor, the angle offset is an approximation that is good enough to
+            get reliable bit boundaries, the angle is 'stretched' most where the outer edge is at a minimum and
+            least where the outer edge is a maximum, we just accumulate the difference as we go round
             """
 
         # find our marker edges in the radius
@@ -1101,20 +1072,19 @@ class Scan:
             v_outer_edge.show()
 
         # create a vector of the first inner edge radius for every angle
-        ring_inner_edge = self._find_radius_edge(v_inner_edge, +1)
+        ring_inner_edge = self._find_edge(v_inner_edge, +1)
         if ring_inner_edge is None:
-            return None, 'no inner edge'
+            return None, None, 'no inner edge'
 
         # create a vector of the last outer edge radius for every angle
-        ring_outer_edge = self._find_radius_edge(v_outer_edge, -1)
+        ring_outer_edge = self._find_edge(v_outer_edge, -1)
         if ring_outer_edge is None:
-            return None, 'no outer edge'
+            return None, None, 'no outer edge'
 
         # get the edge and distance limits we need
         max_x, max_y = v_inner_edge.size()
         min_inner_edge = max_y
         min_outer_edge = max_y
-        max_inner_edge = 0
         max_outer_edge = 0
         max_outer_at = 0
         min_distance = max_y
@@ -1127,16 +1097,14 @@ class Scan:
             distance = outer_edge - inner_edge
             if distance < min_distance:
                 if distance < distance_limit:
-                    return None, 'ring width too small at {}'.format(x)
+                    return None, None, 'width too small at {}'.format(x)
                 min_distance = distance
-            if distance > max_distance:
-                max_distance = distance
             if inner_edge < min_inner_edge:
                 if inner_edge < inner_edge_limit:
-                    return None, 'inner edge too small'
+                    return None, None, 'inner edge too small'
                 min_inner_edge = inner_edge
-            if inner_edge > max_inner_edge:
-                max_inner_edge = inner_edge
+            if distance > max_distance:
+                max_distance = distance
             if outer_edge < min_outer_edge:
                 min_outer_edge = outer_edge
             if outer_edge > max_outer_edge:
@@ -1149,7 +1117,7 @@ class Scan:
             distance = ring_outer_edge[x] - ring_inner_edge[x]
             radius_scale[x] = min_distance / distance                  # range is 0..1
 
-        # calculate the ellipse angle from the major-axis of every angle sample
+        # create an approximate within ellipse angle for every angle sample
         angle_from0 = [None for _ in range(max_x)]
         x = max_outer_at
         angle = 0.0
@@ -1159,28 +1127,22 @@ class Scan:
             angle = (angle + angle_step) % 360
             x = (x+1) % max_x
 
-        # create an arc length correction vector for every angle
-        radius = min_outer_edge
-        arc_circle = (2 * math.pi * radius) / 360
-        major_axis = max_outer_edge * (max_outer_edge / min_outer_edge)  # scaled by a fudge factor, but seems to work!
-        minor_axis = min_outer_edge
-        arc_scale = [None for _ in range(max_x)]
+        # create an angle offset vector for every angle
+        angle_offset = [None for _ in range(max_x)]
+        angle_delta = [None for _ in range(max_x)]  # HACK
+        offset = 0.0
         for x in range(max_x):
+            angle_offset[x] = int(offset)
+            radius = ring_inner_edge[x]
             angle = angle_from0[x]
-            d = self.arc_len(major_axis, minor_axis, angle)    # ellipse arc length at angle
-            arc_scale[x] = arc_circle / d                      # scale factor to get it down to a circle
+            delta = self.arc_diff(max_outer_edge, min_outer_edge, angle, radius)
+            offset += delta
+            angle_delta[x] = round(delta, 3) # HACK
 
-        # create a new image scaled as appropriate
-        # @@TBD@@ this algorithm is squashing where pixels are dense,
-        #         instead do one that stretches where they are not dense,
-        #         this'll preserve more info in the dense region
+        # create a new image scaled and offset as appropriate
         code = self.original.instance().new(max_x, max_y, min_luminance)
-        out_x = 0
-        max_new_x = 0                    # max extent in angle of the image after perspective corrections
-        max_new_y = 0                    # ..ditto for radius
         for x in range(max_x):
-            out_x += arc_scale[x]
-            new_x = int(out_x)
+            new_x = x - angle_offset[x]        # we only ever shrink things, so subtract
             start_y = ring_inner_edge[x]
             stop_y = ring_outer_edge[x]
             y_scale = radius_scale[x]
@@ -1196,35 +1158,9 @@ class Scan:
                     new_y = int(round(((y - start_y) * y_scale) + min_inner_edge))
                 pixel = target.getpixel(x, y)
                 code.putpixel(new_x, new_y, pixel)
-                if new_x > max_new_x:
-                    max_new_x = new_x
-                if new_y > max_new_y:
-                    max_new_y = new_y
-
-        # crop the image to the max limits we actually filled
-        old_buffer = code.get()
-        new_buffer = old_buffer[0:int(round(max_new_y*1.05)), 0:max_new_x]   # go slightly over in radius
-
-        code.set(new_buffer)
 
         # return flattened image and the new ring width (2 inner white rings, so our edge over 2 is it)
-        return code, None
-
-    def _find_segment_edges(self, target, width):
-        """ find the segment edges in the given target with the given ring width (R),
-            the target must have been perspective corrected,
-            the target is a rectangle of radius x angle, the radius must be divided into rings
-            of 2R (central white blob), 1R (black ring), 3R (data rings), 1R (black ring),
-            this function is only concerned with the 3 data rings, it returns a vector of the
-            angle co-ordinate of each bit edge (both edges), it calculates these by a combination
-            of detecting rising and falling edges in the angle direction (x) and the a-priori
-            knowledge of how many bits should be in the ring, the calculation allows for errors
-            in the perspective correction up to a certain limit, it returns the estimated start
-            and stop position of each bit, for a 'perfect' image the stop of segment N will be the
-            start of segment N+1, but the image is assumed not to be perfect so a fixed border
-            around each segment is removed when reporting positions
-            """
-        return [], '_find_segment_edges not yet'
+        return code, min_inner_edge / 2, ''
 
     def find_targets(self):
         """ find targets within our image,
@@ -1250,69 +1186,49 @@ class Scan:
         for blob in self.blobs:
             centre_x = blob.pt[0]
             centre_y = blob.pt[1]
-            raw_width = (blob.size - self.min_border_pixels) / 4   # white bleeds into black so blob detector comes up big
-            border = max(raw_width / 3, self.min_border_pixels)
-            if raw_width < self.min_ring_width:
+            width = (blob.size - self.min_border_pixels) / 4   # white bleeds into black so blob detector comes up big
+            border = max(width / 3, self.min_border_pixels)
+            if width < self.min_ring_width:
                 # too small - ignore it
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, raw width {:4.1f} - too small'.
-                          format(centre_x, centre_y, raw_width))
-                    self.status.append([blob, 'too small', centre_x, centre_y, raw_width])
+                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f} - too small'.
+                          format(centre_x, centre_y, width))
+                    self.status.append([blob, 'too small', width])
                 continue
 
             # do the polar to cartesian projection
-            projected = self._project(centre_x, centre_y, raw_width)     # this does not fail
+            projected = self._project(centre_x, centre_y, width)     # this does not fail
             if self.debug:
-                projected.unload('target-wavy-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, raw_width, self.original.source))
+                projected.unload('target-wavy-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, width, self.original.source))
                 projected.show()
 
             # do the perspective correction
-            perspected, reason = self._perspective(projected, centre_x, centre_y, raw_width)
+            perspected, new_width, reason = self._perspective(projected, centre_x, centre_y, width)
             if perspected is None:
                 # failed - this means some constraint was not met
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, raw width {:4.1f} - {}'.
-                          format(centre_x, centre_y, raw_width, reason))
-                    self.status.append([blob, reason, centre_x, centre_y, raw_width])
-                continue
-            _, new_width = perspected.size()
-            new_width /= self.num_rings
-            if new_width < self.min_ring_width:
-                # too small - ignore it
-                if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, new width {:4.1f} - too small'.
-                          format(centre_x, centre_y, new_width))
-                    self.status.append([blob, 'too small', centre_x, centre_y, new_width])
+                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f} - {}'.
+                          format(centre_x, centre_y, width, reason))
+                    self.status.append([blob, reason, width])
                 continue
             if self.debug:
                 perspected.unload('target-flat-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, new_width, self.original.source))
                 perspected.show()
 
-            # find the bit segment boundaries
-            segments, reason = self._find_segment_edges(perspected, new_width)
-            if segments is None:
-                # failed - this means some constraint was not met
-                if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, new width {:4.1f} - {}'.
-                          format(centre_x, centre_y, new_width, reason))
-                    self.status.append([blob, reason, centre_x, centre_y, new_width])
-                continue
-
-            # do the luminance correction - is it required?
-            # the luminance varies mostly around the radius but its only across the radius we care about
-
-            # do this on a s segment by segment basis, not around the whole ring
-            # @@RBD@@
+            # do the luminance correction
+            # @@TBD@@
             max_x, _ = perspected.size()
             white_level = self._luminance(perspected, 0, 0, max_x, new_width)
-            #black_level = self._luminance(perspected, 0, new_width*2, max_x, new_width)
             h_edge = self.transform.edges(perspected, 1, 0, 3)     # get white to black edges around the annulus
             if self.debug:
-                h_edge.unload('target-h-edges-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, new_width, self.original.source))
+                h_edge.unload('target-h-edges-{:.0f}x{:.0f}y{:.0f}w-{}'.format(centre_x, centre_y, width, self.original.source))
                 h_edge.show()
             """
-                to qualify as a target the luminance sequence across the radius must be:
-                    white, black, ?, ?, ?, black
+                to qualify as a target the luminance sequence across the radius must be: white, black, ?, ?, ?, black
+                but perspective distortions make the edges 'wavy' so we cannot just scan across all angles, our code
+                segments span 24 degrees, if we split this into three 8 degree samples we can guarantee at least one
+                of those will be completely inside the code segment, within that 8 degree sample we assume the
+                'wavy-ness' will not be significant 
                 """
             """
             rings = [[(width*ring_num)+border, (width*(ring_num+1))-border] for ring_num in range(self.num_rings)]
@@ -1360,30 +1276,27 @@ class Scan:
                 continue
             """
             if self.debug:
-                print('**** Accepting blob at {:4.1f}, {:4.1f}, width {:4.1f}, min_grey={}, max_grey={}, white={:4.1f}%, black={:4.1f}%'.
+                print('**** Accepting blob at {:4.1f}, {:4.1f}, radius {:4.1f}, min_grey={}, max_grey={}, white={:4.1f}%, black={:4.1f}%'.
                       format(centre_x, centre_y, new_width, min_grey, max_grey, white_ratio*100, black_ratio*100))
-                self.status.append([blob, None, centre_x, centre_y, new_width])
-        self.targets.append([centre_x, centre_y, new_width, min_grey, max_grey])
+                self.status.append([blob, None, width])
+        self.targets.append([centre_x, centre_y, width, min_grey, max_grey])
         if self.debug:
             # label all the blobs we processed and draw their rings
-            labels = self.transform.copy(self.image)
+            self.labels = self.transform.copy(self.image)
             for blob in self.status:
                 k = blob[0]
                 reason = blob[1]
-                x = blob[2]
-                y = blob[3]
-                w = blob[4]
+                width = blob[2] * 2
                 if reason is not None:
                     # got a reject
                     colour = (0, 0, 255)       # red
                 else:
                     # got a good'un
-                    reason = 'good target'
+                    reason = 'potential target'
                     colour = (0, 255, 0)       # green
-                labels = self.transform.label(labels, [k], colour, '{} {:.0f}x{:.0f}y{:.0f}w'.
-                                              format(reason, x, y, w))
-            labels.unload('targets-'+self.original.source)
-            labels.show('targets')
+                self.labels = self.transform.label(self.labels, [k], colour, reason)
+            self.labels.unload('targets-'+self.original.source)
+            self.labels.show('targets')
         return len(self.targets)
 
 
@@ -1664,8 +1577,5 @@ test = Test(code_bits, min_num, max_num, parity, edges, rings)
 #test.scan(101, '15-segment-101.jpg')
 #test.scan(365, '15-segment-365.jpg')
 #test.scan(101, 'photo-101.jpg')
-#test.scan(365, 'photo-365-oblique.jpg')
+test.scan(365, 'photo-365-oblique.jpg')
 #test.scan(101, 'photo-all-test-set.jpg')
-#test.scan(999, 'photo-angle-test-oblique.jpg')
-#test.scan(999, 'photo-angle-test-small-curve.jpg')
-test.scan(999, 'photo-angle-test-big-curve.jpg')
