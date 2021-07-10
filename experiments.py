@@ -995,27 +995,26 @@ class Transform:
 class Scan:
     """ scan an image looking for codes """
 
+    TOP_DOWN = +1              # top-down y scan direction, see _find_brightest_radii and _find_radius_edge
+    BOTTOM_UP = -1             # bottom-up y scan direction, see _find_brightest_radii and _find_radius_edge
+
     def __init__(self, size, frame, debug=False):
         """ frame is the frame instance containing the image to be scanned
             do all the pre-processing here, the pre-processing just isolates
             the areas of interest (by looking for bright blobs)
             """
         # constants
-        self.min_border_pixels = 1       # minimum border pixels when sampling an area
-        self.min_ring_width = 1 + 3 + 1  # must be wide enough to have an ignored border and still leave enough
+        self.max_edge_width = 5          # pixel gap from inner/outer edge to clear space
         self.min_timing_width = 3        # min width of a timing half-bit to be valid
-        self.min_timing_height = 1       # min radius gap between pixels that are 'connected' in timing edges
-        self.min_edge_neighbours = 4     # minimum required neighbours when following bit timing edges
+        self.min_timing_length = 0.66    # min length of a segment edge in the timing ring relative to ring width
+        self.min_timing_height = 2       # min radius gap between pixels that are 'connected' in timing edges
         self.min_black_white_diff = 21   # must be divisible by 3 and still be big enough to be obvious
         self.min_white_ratio = 0.8       # percent pixels that must be white in the central circle (ring 0)
         self.min_black_ratio = 0.6       # percent pixels that must be black in the central border (ring 2)
         self.num_rings = 9               # total number of rings in the whole code (central blob counts as 2)
         self.radius_stretch = 1.5        # how much to stretch the radius tested to cope with perspective distortion
         self.angle_steps = 360           # angular resolution when 'projecting'
-        self.min_distance_scale = 1      # the minimum inner to outer edge distance as a proportion of blob width
-        self.min_inner_edge_scale = 0.3  # the minimum inner edge distance as a proportion of blob width
-        self.edge_threshold = int(max_luminance * 0.3)  # minimum luminance for an edge pixel to qualify as an edge
-        self.circle_scale = 0.9          # circle radius scale when calculating differentials from an ellipse
+        self.edge_threshold = int(max_luminance * 0.1)  # minimum luminance for an edge pixel to qualify as an edge
 
         # params
         self.original = frame
@@ -1031,27 +1030,21 @@ class Scan:
         # context
         max_radius, _ = self.image.size()
         max_circumference = min(2 * math.pi * max_radius, 3600)
-        self.angle = Angle(int(round(max_circumference)))
-        self.angle_xy = self.angle.polarToCart
-        self.arc_len = self.angle.arcLength
+        angle = Angle(int(round(max_circumference)))
+        self.angle_xy = angle.polarToCart
         self.targets = []                # list of targets we've found
         self.status = []                 # list of blobs and their accepted/rejected status
 
-        # semi-circle of samples probed when looking for horizontal edges (see _find_brightest_neighbour)
-        # we sample in a semi-circle around each pixel over the threshold to find the best candidate to follow
-        self.broad_edge_kernel = [[0, -2],
-                                  [0, -1], [1, -1],
-                                  [0,  0], [1,  0], [2, 0],
-                                  [0, +1], [1,  1],
-                                  [0, +2]]
-        self.tight_edge_kernel = [[0, -1], [1, -1],
-                                  [0,  0], [1,  0],
-                                  [0, +1], [1,  1]]
+        # samples probed (x,y offsets from self) when looking for horizontal edges (see _find_brightest_neighbour)
+        # NB: the 'height' of this kernel must be reflected in self.min_timing_height
+        self.edge_kernel = [                    [+2, -2],
+                                      [+1, -1], [+2, -1],
+                            [ 0,  0], [+1,  0], [+2,  0],
+                                      [+1, +1], [+2, +1],
+                                                [+2, +2]]
 
-        # addresses of neighbours for checking timing edges
-        self.timing_edge_neighbours = [[-1, -1], [ 0, -1], [+1, -1],
-                                       [-1,  0], [ 0,  0], [+1,  0],
-                                       [-1, +1], [ 0, +1], [+1, +1]]
+        # edge vector smoothing kernel, pairs of offset and scale factor (see _smooth_edge)
+        self.edge_smoothing_kernel = [[-3, 1], [-2, 2], [-1, 2], [0, 1], [+1, 2]]
 
     def _luminance(self, image, start_x, start_y, end_x, end_y):
         """ get the average luminance in the given image rectangle """
@@ -1132,19 +1125,19 @@ class Scan:
         return code
 
     def _smooth_edge(self, edge, centre_x, centre_y):
-        """ smooth the given edge vector by doing a mean across N pixels
-            centre_xy params are purely for diagnostic reporting
+        """ smooth the given edge vector by doing a mean across N pixels,
+            centre_x/y params are purely for diagnostic reporting
             """
         extent = len(edge)
         for x in range(extent):
             v = 0  # value accumulator
             d = 0  # divisor accumulator
-            for dx, f in [[-2, 1], [-1, 1], [0, 1], [+1, 1], [+2, 1]]:
+            for dx, f in self.edge_smoothing_kernel:
                 sample = edge[(x + dx) % extent]
                 if sample is None:
                     # eh?
                     if self.debug:
-                        print('{:.0f}x{:.0f}y edge[{}] is None!'.format(centre_x, centre_y, (x + dx) % extent))
+                        print('Blob: {:.0f}x{:.0f}y - edge[{}] is None! - info'.format(centre_x, centre_y, (x + dx) % extent))
                 else:
                     v += int(round(sample * f))
                     d += f
@@ -1156,14 +1149,15 @@ class Scan:
         """ from x,y in the target image find the brightest radii that is over our threshold,
             the pixel at x,y must be over else None is returned,
             end_y is the limit radius to stop at, if None stop at image edge in 'direction',
-            direction is +1 for top-down or -1 for bottom-up
+            direction is top-down or bottom-up,
+            returns the y co-ord of the brightest and limit that is still over the threshold
             """
         brightest = target.getpixel(x, y)
         if brightest < self.edge_threshold:
-            return None
+            return None, None
         brightest_at = y
-        if direction > 0:
-            # top-down
+        limit_at = y
+        if direction == self.TOP_DOWN:
             if end_y is None:
                 _, end_y = target.size()
             radius = (dy for dy in range(y, end_y))
@@ -1174,67 +1168,93 @@ class Scan:
             radius = (dy for dy in range(y, end_y, -1))
         for dy in radius:
             pixel = target.getpixel(x, dy)
-            if pixel > brightest:
+            if pixel < self.edge_threshold:
+                break
+            if pixel >= brightest:       # find last occurrence
                 brightest = pixel
                 brightest_at = dy
-            elif pixel < self.edge_threshold:
-                break
-        return brightest_at
+            limit_at = dy
+        return brightest_at, limit_at
 
-    def _find_brightest_neighbour(self, target, x, y, tight=False):
+    def _find_brightest_neighbour_in_x(self, target, x, y):
         """ find brightest edge forward (i.e. increasing x) neighbour in target from x, y,
             returns the pixel level and y co-ord of the brightest neighbour that is over our edge threshold,
             returns 0,0 if there is not one,
+            this function is intended to be used when following edges in the x direction,
+            it finds the best ongoing y co-ordinate to follow
             """
         brightest = 0
-        brightest_dy = 0
-        if tight:
-            span = self.tight_edge_kernel
-        else:
-            span = self.broad_edge_kernel
-        for dx, dy in span:
+        brightest_at = 0
+        max_x, _ = target.size()
+        for dx, dy in self.edge_kernel:
             # scan our forward neighbours and follow the brightest that is over our threshold
-            pixel = target.getpixel(x + dx, y + dy)
-            if pixel is not None and pixel > self.edge_threshold:
+            tx = (x + dx) % max_x
+            ty = y + dy
+            pixel = target.getpixel(tx, ty)
+            if pixel is not None and pixel >= self.edge_threshold:
                 # found an ongoing neighbour also in range, is it the brightest?
-                if pixel > brightest:
+                if pixel > brightest:    # note first occurrence of brightest
                     brightest = pixel
-                    brightest_dy = dy
-        return brightest, y + brightest_dy
+                    brightest_at = ty
+        return brightest, brightest_at
+
+    def _follow_edge_in_x(self, target, x, y, end_y, direction):
+        """ follow the edge at x,y until come to its end, follow means increasing x,
+            return a vector of its y co-ords,
+            the pixel at x,y must be over else None is returned,
+            end_y is the limit radius to stop at when looking for the brightest in radii,
+            direction is top-down or bottom-up,
+            """
+        brightest = target.getpixel(x, y)
+        if brightest < self.edge_threshold:
+            return None
+        max_x, _ = target.size()
+        edge_y, _ = self._find_brightest_radii(target, x, y, end_y, direction)
+        edge = []
+        x -= 1
+        for _ in range(max_x):
+            x = (x + 1) % max_x
+            brightest, brightest_dy = self._find_brightest_neighbour_in_x(target, x, edge_y)
+            if brightest == 0:
+                # no more qualifying neighbors
+                return edge
+            else:
+                edge_y = brightest_dy
+                edge.append(edge_y)
+        return edge
+
+    def _find_edge_limits_in_y(self, target, x, y, start_y=None, end_y=None):
+        """ find the edge limits in y at at x,y,
+            returns the min/max y that is over the threshold,
+            the pixel at x,y must be over else 0,0 is returned,
+            start_y/end_y are the limit radii to stop at, None means at the image edge
+            """
+        brightest = target.getpixel(x, y)
+        if brightest < self.edge_threshold:
+            return 0, 0
+        _, top_edge_at = self._find_brightest_radii(target, x, y, start_y, self.BOTTOM_UP)
+        _, bottom_edge_at = self._find_brightest_radii(target, x, y, end_y, self.TOP_DOWN)
+        return top_edge_at, bottom_edge_at
 
     def _find_radius_edge(self, target, direction, centre_x, centre_y):
         """ look for a continuous edge in the given target either top-down (inner) or bottom-up (outer),
-            direction is +1 for top-down or -1 for bottom-up, an 'edge' is vertical, i.e along the radius,
+            direction is top-down or bottom-up, an 'edge' is vertical, i.e along the radius,
             centre_x/y are purely diagnostic reporting,
             to qualify as an 'edge' it must be continuous across all angles (i.e. no dis-connected jumps)
             to find the edge we scan the radius at angle 0 looking for a pixel above our edge threshold,
             then follow that along the angle axis, if we get to 360 without a break we've found it
             """
         max_x, max_y = target.size()
-        edge = [None for _ in range(max_x)]
-        if direction > 0:
+        if direction == self.TOP_DOWN:
             radius = (y for y in range(max_y))
         else:
             radius = (y for y in range(max_y-1, -1, -1))
         for y in radius:
-            pixel = target.getpixel(0, y)
-            if pixel is not None and pixel > self.edge_threshold:
-                # found a potential edge, find its bright spot and follow it
-                edge_y = self._find_brightest_radii(target, 0, y, None, direction)
-                edge_y += 2*direction          # +/-2 to get into the middle of our sample semi-circle
-                for x in range(max_x):
-                    brightest, brightest_dy = self._find_brightest_neighbour(target, x, edge_y, tight=False)
-                    if brightest == 0:
-                        # no qualifying neighbors, try next y
-                        edge = [None for _ in range(max_x)]  # zap the previous candidate
-                        break
-                    else:
-                        edge_y = brightest_dy
-                        edge[x] = edge_y
-                if edge[0] is not None:
-                    # we found one, smooth it
-                    edge = self._smooth_edge(edge, centre_x, centre_y)
-                    return edge
+            edge = self._follow_edge_in_x(target, 0, y, None, direction)
+            if edge is not None and len(edge) == max_x:
+                # found an edge that goes all the way, so that's it, just smooth it and go
+                edge = self._smooth_edge(edge, centre_x, centre_y)
+                return edge
         # we did not find one
         return None
 
@@ -1252,58 +1272,37 @@ class Scan:
             """
         max_x, max_y = target.size()
 
-        # find all the radii that are over our edge threshold for every angle
-        edge = [None for _ in range(max_x)]
-        max_level = 0
-        max_at = 0
-        for x in range(max_x):
-            start_y = int(round(outer_edge[x] - (self.min_ring_width / 2)))
-            end_y = int(round(inner_edge[x] + (self.min_ring_width / 2)))
+        # find all the edge segments that are over our length threshold
+        edge = []
+        segments = 0
+        x = 0
+        # ToDo: must start looking for segments at the start of one else first segment found may be seen as too short
+        # ToDo: must allow for 'higher' segment running past the start of a 'lower' segment
+        while x < max_x:
+            # ToDo: generate another array of 'clear' space around edges instead of this constant
+            start_y = int(round(outer_edge[x] - self.max_edge_width))  # get clear of outer edge
+            end_y = int(round(inner_edge[x] + self.max_edge_width))    # get clear of inner edge
+            found_segment = False
             for y in range(start_y, end_y, -1):
-                pixel = target.getpixel(x, y)
-                if pixel is not None and pixel > self.edge_threshold:
-                    # found one over our edge, find the brightest before we go back below it
-                    brightest_at = self._find_brightest_radii(target, x, y, end_y, -1)
-                    # now find our brightest neighbour
-                    brightest, brightest_at = self._find_brightest_neighbour(target, x, brightest_at, tight=True)
-                    if brightest == 0:
-                        # does not qualify as an edge
-                        continue
-                    edge[x] = brightest_at
-                    if brightest_at > max_level:
-                        max_level = brightest_at
-                        max_at = x
+                segment = self._follow_edge_in_x(target, x, y, end_y, self.BOTTOM_UP)
+                if segment is not None and len(segment) > self.min_timing_width:
+                    # found a qualifying segment edge, keep it
+                    found_segment = True
                     break
-        if max_at == 0:
-            return None, 'no timing ring edges detected'
-
-        # remove noise, noise is any 'connected' sequence that is too short
-        if self.debug:
-            noise = [None for _ in range(max_x)]
-        x = (max_at - 1) % max_x         # start where we know we're inside a timing ring outer edge
-        y = edge[x]
-        if y is None:
-            y = 0
-        edge_length = max_x              # to stop first segment end zapping anything
-        for _ in range(max_x + 1):       # overshoot by 1 to get segments that wrap our start position
-            x = (x + 1) % max_x
-            last_y = y
-            y = edge[x]
-            if y is None:
-                # this means we did not detect an edge
-                y = 0
-            if y - last_y > self.min_timing_height or last_y - y > self.min_timing_height:
-                # this is a segment edge, x is now the first sample of the next segment
-                if edge_length < self.min_timing_width:
-                    # its too small, zap it
-                    for dx in range(edge_length):
-                        if self.debug:
-                            noise[(x-(dx+1)) % max_x] = edge[(x-(dx+1)) % max_x]
-                        edge[(x-(dx+1)) % max_x] = None
-                edge_length = 1
+            if found_segment:
+                segments += 1
+                edge.extend(segment)
+                x += len(segment)
+                if x >= max_x:
+                    if self.debug:
+                        print('Blob {:.0f}x{:.0f}y - segments extend beyond {} to {} - truncating'.
+                              format(centre_x, centre_y, max_x, x))
+                    edge = edge[:max_x]
             else:
-                # we're connected to our predecessor
-                edge_length += 1
+                edge.append(None)
+                x += 1
+        if segments == 0:
+            return None, 'no timing ring edges detected'
 
         if self.debug:
             plots = []
@@ -1339,7 +1338,6 @@ class Scan:
                 plots.append([start_x, points])
             plot = self._draw_plots(target, plots, colour=(0, 255, 0))
             plot = self._draw_plots(plot, gaps, colour=(255, 0, 0))
-            plot = self._draw_plots(plot, [[0, noise]], colour=(0, 0, 255))
             plot.unload('target-timing-{:.0f}x{:.0f}y-{}'.format(centre_x, centre_y, self.original.source))
             plot.show()
 
@@ -1470,12 +1468,12 @@ class Scan:
             v_b2w_edge.show()
 
         # create a vector of the first inner edge radius for every angle (this is usually accurate)
-        ring_inner_edge = self._find_radius_edge(v_w2b_edge, +1, centre_x, centre_y)
+        ring_inner_edge = self._find_radius_edge(v_w2b_edge, self.TOP_DOWN, centre_x, centre_y)
         if ring_inner_edge is None:
             return None, None, 'no inner edge'
 
         # create a vector of the last outer edge radius for every angle (this can be distorted by curvature)
-        ring_outer_edge = self._find_radius_edge(v_b2w_edge, -1, centre_x, centre_y)
+        ring_outer_edge = self._find_radius_edge(v_b2w_edge, self.BOTTOM_UP, centre_x, centre_y)
         if ring_outer_edge is None:
             return None, None, 'no outer edge'
 
@@ -1618,8 +1616,9 @@ class Scan:
         # return flattened image
         return (code, min_inner_edge, one_ring), None
 
-    def _find_segment_edges(self, target, timing_ring_pos, centre_x, centre_y):
+    def _find_segment_edges(self, target, timing_ring_pos, width, centre_x, centre_y):
         """ find the segment edges in the given timing ring position in the given target,
+            width is the estimated width (in radius) of the timing ring,
             the target must have been perspective corrected,
             the centre_x, and centre_y  params are only present for naming the debug image files created,
             this function is only concerned with the bit timing ring, it returns a vector of the angle
@@ -1628,9 +1627,12 @@ class Scan:
             transition in the centre of each bit segment, its assumed any angular distortion is constant
             at these edges so the data bits should lie across these edges
             """
+
         # get white to black edges for every angle
         all_edges = self.transform.edges(target, 1, 0, 3)
         max_x, max_y = all_edges.size()
+
+        min_length = int(round(width * self.min_timing_length))  # timing edge must be at least this long
 
         # get a vector of the edges for the timing ring (NB: the ring wraps at end back to start)
         bit_edges = []
@@ -1638,28 +1640,37 @@ class Scan:
         x = 0
         for _ in range(max_x):
             pixel = all_edges.getpixel(x, y)
-            if pixel is not None and pixel > self.edge_threshold:
-                # got one over our threshold, find the brightest connected until go below threshold
+            if pixel is not None and pixel >= self.edge_threshold:
+                # found a potential edge, to qualify the edge length (in radii) must be over a threshold,
+                # but first we find the brightest in the x direction
                 brightest = pixel
                 brightest_at = x
                 dx = x
-                # scan for the end allowing fpr wrapping around the end
+                # scan for the end allowing for wrapping around the end
                 for _ in range(max_x):
                     dx = (dx + 1) % max_x
+                    limit_at = dx
                     pixel = all_edges.getpixel(dx, y)
-                    if pixel is not None and pixel > self.edge_threshold:
-                        if pixel > brightest:
-                            brightest = pixel
-                            brightest_at = dx
-                    else:
+                    if pixel < self.edge_threshold:
                         # gone past the edge
                         break
-                # note the brightest we found as an edge
-                bit_edges.append(brightest_at)
-                if dx < x:
-                    # we've wrapped, so done
-                    break
-                x = dx
+                    elif pixel > brightest:    # note first occurrence
+                        brightest = pixel
+                        brightest_at = dx
+                # found brightest in x, now check the edge length
+                top_y, bottom_y = self._find_edge_limits_in_y(all_edges, brightest_at, y)
+                if bottom_y - top_y < min_length:
+                    # too small ignore it (continue the scan from the end of this one)
+                    if self.debug:
+                        print('Blob {:.0f}x{:.0f}y - timing edge at {} too small ({}..{}) - rejecting'.
+                              format(centre_x, centre_y, brightest_at, top_y, bottom_y))
+                else:
+                    # it qualifies, note the brightest we found as an edge
+                    bit_edges.append(brightest_at)
+                    if dx < x:
+                        # we've wrapped, so done
+                        break
+                x = limit_at
             else:
                 x += 1
                 if x >= max_x:
@@ -1758,7 +1769,7 @@ class Scan:
         for blob in self.blobs:
             centre_x = blob.pt[0]
             centre_y = blob.pt[1]
-            raw_width = (blob.size - self.min_border_pixels) / 4   # white bleeds into black so blob detector comes up big
+            raw_width = blob.size / 4    # ToDo: remove the need for this, see _project
 
             # do the polar to cartesian projection
             projected = self._project(centre_x, centre_y, raw_width)     # this does not fail
@@ -1771,7 +1782,7 @@ class Scan:
             if corrected is None:
                 # failed - this means some constraint was not met
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}x, {:4.1f}y - {}'.
+                    print('Blob {:.0f}x{:.0f}y - {} - rejecting'.
                           format(centre_x, centre_y, reason))
                     self.status.append([blob, reason, centre_x, centre_y])
                 continue
@@ -1779,24 +1790,18 @@ class Scan:
             start_at = corrected[1]
             new_width = corrected[2]
             max_x, max_y = perspected.size()
-            if new_width < self.min_ring_width:
-                # too small - ignore it
-                if self.debug:
-                    print('Rejecting blob at {:4.1f}x, {:4.1f}y - too small'.
-                          format(centre_x, centre_y))
-                    self.status.append([blob, 'too small', centre_x, centre_y])
-                continue
             if self.debug:
                 perspected.unload('target-flat-{:.0f}x{:.0f}y-{}'.format(centre_x, centre_y, self.original.source))
                 perspected.show()
 
             # find the bit segment boundaries
             segments, reason = self._find_segment_edges(perspected,
-                                                        start_at + (new_width * timing_ring_centre), centre_x, centre_y)
+                                                        start_at + (new_width * timing_ring_centre), new_width,
+                                                        centre_x, centre_y)
             if segments is None:
                 # failed - this means some constraint was not met
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}x, {:4.1f}y - {}'.
+                    print('Blob {:.0f}x{:.0f}y - {} - rejecting'.
                           format(centre_x, centre_y, reason))
                     self.status.append([blob, reason, centre_x, centre_y])
                 continue
@@ -1838,8 +1843,8 @@ class Scan:
             if not self.image.inimage(int(round(centre_x)), int(round(centre_y)), int(round(width * self.num_rings))):
                 # whole code would go off the image edge
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f}, overflows image edge'.
-                          format(centre_x, centre_y, width))
+                    print('Blob {:.0f}x{:.0f}y - overflows image edge - rejecting'.
+                          format(centre_x, centre_y))
                     self.status.append([blob, 'over edge', width])
                 continue
             white_level = self._luminance(centre_x, centre_y, rings[0][0], rings[1][1])
@@ -1850,8 +1855,8 @@ class Scan:
             if level_range < self.min_black_white_diff:
                 # luminance levels too close (or even reversed!)
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f}, luminance diff black to white is too small {:4.1f}'.
-                          format(centre_x, centre_y, width, level_range))
+                    print('Blob {:.0f}x{:.0f}y - luminance diff black to white is too small {:4.1f} - rejecting'.
+                          format(centre_x, centre_y, level_range))
                     self.status.append([blob, 'black/white diff too small', width])
                 continue
             # determine the grey thresholds
@@ -1863,8 +1868,8 @@ class Scan:
             if white_ratio < self.min_white_ratio:
                 # central circle has too many non-white pixels
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f}, too many non-white central pixels {:4.1f}% (b={},g={},w={})'.
-                          format(centre_x, centre_y, width, white_ratio*100, black, grey, white))
+                    print('Blob {:.0f}x{:.0f}x - too many non-white central pixels {:4.1f}% (b={},g={},w={}) - rejecting'.
+                          format(centre_x, centre_y, white_ratio*100, black, grey, white))
                     self.status.append([blob, 'centre not white enough', width])
                 continue
             # check threshold on inner black ring
@@ -1873,13 +1878,13 @@ class Scan:
             if black_ratio < self.min_black_ratio:
                 # inner ring has too many non-black pixels
                 if self.debug:
-                    print('Rejecting blob at {:4.1f}, {:4.1f}, radius {:4.1f}, too many non-black inner ring pixels {:4.1f}% (b={},g={},w={})'.
-                          format(centre_x, centre_y, width, black_ratio*100, black, grey, white))
+                    print('Blob {:.0f}x{:.0f}y - too many non-black inner ring pixels {:4.1f}% (b={},g={},w={}) - rejecting'.
+                          format(centre_x, centre_y, black_ratio*100, black, grey, white))
                     self.status.append([blob, 'inner ring not black enough', width])
                 continue
             """
             if self.debug:
-                print('**** Accepting blob at {:4.1f}x, {:4.1f}y, min_grey={}, max_grey={}, white={:4.1f}%, black={:4.1f}%'.
+                print('**** Blob {:.0f}x{:.0f}y - min_grey={}, max_grey={}, white={:4.1f}%, black={:4.1f}% - accepting ****'.
                       format(centre_x, centre_y, min_grey, max_grey, white_ratio*100, black_ratio*100))
                 self.status.append([blob, None, centre_x, centre_y])
             self.targets.append([centre_x, centre_y, new_width, min_grey, max_grey])
@@ -2179,12 +2184,12 @@ test = Test(code_bits, min_num, max_num, parity, edges, rings)
 #test.codes(test_num_set, test_ring_width)
 #test.scan(999, '15-segment-angle-test.png')
 #test.scan(101, '15-segment-101.png')
-test.scan(365, '15-segment-365.png')
+#test.scan(365, '15-segment-365.png')
 #test.scan(101, 'photo-101.jpg')
 #test.scan(365, 'photo-365-oblique.jpg')
 #test.scan(101, 'photo-all-test-set.jpg')
 #test.scan(999, 'photo-angle-test-flat.jpg')
-#test.scan(999, 'photo-angle-test-curved-flat.jpg')
+test.scan(999, 'photo-angle-test-curved-flat.jpg')
 #test.scan(999, 'photo-angle-test-oblique.jpg')
 #test.scan(999, 'photo-angle-test-small-curve.jpg')
 #test.scan(999, 'photo-angle-test-big-curve.jpg')
