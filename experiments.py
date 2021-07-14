@@ -1224,7 +1224,7 @@ class Scan:
         return edge
 
     def _find_edge_limits_in_y(self, target, x, y, start_y=None, end_y=None):
-        """ find the edge limits in y at at x,y,
+        """ find the edge limits in y at x,y,
             returns the min/max y that is over the threshold,
             the pixel at x,y must be over else 0,0 is returned,
             start_y/end_y are the limit radii to stop at, None means at the image edge
@@ -1239,7 +1239,7 @@ class Scan:
     def _find_radius_edge(self, target, direction, centre_x, centre_y):
         """ look for a continuous edge in the given target either top-down (inner) or bottom-up (outer),
             direction is top-down or bottom-up, an 'edge' is vertical, i.e along the radius,
-            centre_x/y are purely diagnostic reporting,
+            centre_x/y are purely for diagnostic reporting,
             to qualify as an 'edge' it must be continuous across all angles (i.e. no dis-connected jumps)
             to find the edge we scan the radius at angle 0 looking for a pixel above our edge threshold,
             then follow that along the angle axis, if we get to 360 without a break we've found it
@@ -1258,6 +1258,34 @@ class Scan:
         # we did not find one
         return None
 
+    def _interpolate_across_gap(self, edge, start_x, stop_x, start_y, stop_y):
+        """ interpolate across a gap in edge, the gap may wrap the given vector
+            """
+        max_x = len(edge)
+        if stop_x < start_x:
+            # this gap wraps
+            span = stop_x + max_x - start_x
+        else:
+            span = stop_x - start_x
+        if stop_y > start_y:
+            # edge is going downwards (i.e. increment is +ve)
+            distance = stop_y - start_y
+            increment = distance / (span + 1)
+        elif start_y > stop_y:
+            # edge is going upwards (i.e. increment is -ve)
+            distance = start_y - stop_y
+            increment = 0 - (distance / (span + 1))
+        else:
+            # same all the way
+            increment = 0
+        y = start_y
+        x = start_x
+        for _ in range(span):
+            y += increment
+            edge[(x % max_x)] = int(round(y))
+            x += 1
+        return edge
+
     def _find_radius_timing_edge(self, target, inner_edge, outer_edge, centre_x, centre_y):
         """ given a vertical black/white edges image and the radius limits for every angle, find the
             'true' outer edge as the outer edge of the timing ring, the centre_x and centre_y params
@@ -1273,36 +1301,92 @@ class Scan:
         max_x, max_y = target.size()
 
         # find all the edge segments that are over our length threshold
-        edge = []
-        segments = 0
-        x = 0
-        # ToDo: must start looking for segments at the start of one else first segment found may be seen as too short
-        # ToDo: must allow for 'higher' segment running past the start of a 'lower' segment
-        while x < max_x:
+        # but first find a segment edge, any edge, to start the proper search from
+        start_x = None
+        for x in range(max_x):
             # ToDo: generate another array of 'clear' space around edges instead of this constant
             start_y = int(round(outer_edge[x] - self.max_edge_width))  # get clear of outer edge
             end_y = int(round(inner_edge[x] + self.max_edge_width))    # get clear of inner edge
-            found_segment = False
+            # ToDo: need to use the gap search algorithm (as below) else we might find a segment too high up
             for y in range(start_y, end_y, -1):
                 segment = self._follow_edge_in_x(target, x, y, end_y, self.BOTTOM_UP)
                 if segment is not None and len(segment) > self.min_timing_width:
-                    # found a qualifying segment edge, keep it
-                    found_segment = True
+                    # found one, start from the end of this
+                    start_x = (x + len(segment)) % max_x
                     break
-            if found_segment:
-                segments += 1
-                edge.extend(segment)
-                x += len(segment)
-                if x >= max_x:
-                    if self.debug:
-                        print('Blob {:.0f}x{:.0f}y - segments extend beyond {} to {} - truncating'.
-                              format(centre_x, centre_y, max_x, x))
-                    edge = edge[:max_x]
-            else:
-                edge.append(None)
-                x += 1
-        if segments == 0:
+            if start_x is not None:
+                break
+        if start_x is None:
+            # no segments found
             return None, 'no timing ring edges detected'
+
+        # now scan from here until we get back to here (NB: we now there is at least one segment detectable)
+        # we scan in the y direction (radius) from the outer edge until we have found all the segments we expect
+        edge = [None for _ in range(max_x)]
+        segments = 0
+        for gap in range(max_y):
+            is_gap = False               # if do a complete loop without finding any scope in y, we're done
+            x = start_x
+            while x - start_x < max_x:
+                # ToDo: generate another array of 'clear' space around edges instead of this constant
+                start_y = int(round(outer_edge[x % max_x] - self.max_edge_width))  # get clear of outer edge
+                end_y = int(round(inner_edge[x % max_x] + self.max_edge_width))    # get clear of inner edge
+                y = start_y - gap
+                if y < end_y:
+                    # we've gone off the top, so no segment here, move on
+                    x += 1
+                    continue
+                is_gap = True            # note still scope to carry on
+                if edge[x % max_x] is not None:
+                    # already got a segment here, move on to end of that
+                    for _ in range(max_x):
+                        x += 1
+                        if edge[x % max_x] is None:
+                            # found the end, carry on from here
+                            break
+                    continue
+                # no segment here yet, see if we've got one now
+                # we look ahead in y to find the bright spot provided its not too far away
+                # ToDo: this is too crude, need to look-backwards in x and up in y when we find a segment
+                #       do that by following the found segment backwards until drop off end,
+                #       once we do that we also drop the initial look for an edge, every segment is found
+                #       by following forward, then backward and check the total length as the criteria
+                brightest_y, limit_y = self._find_brightest_radii(
+                                        target, x % max_x, y, y + self.min_timing_height, self.BOTTOM_UP)
+                if brightest_y is None:
+                    # nothing here, move on
+                    x += 1
+                else:
+                    # find a potential that is reachable
+                    segment = self._follow_edge_in_x(target, x % max_x, y, end_y, self.BOTTOM_UP)
+                    if segment is not None and len(segment) > self.min_timing_width:
+                        overlap = False
+                        for dx in range(len(segment)):
+                            if edge[(x + dx) % max_x] is not None:
+                                # this is an overlap, we're just extending the existing edge,
+                                # so its not a new segment
+                                overlap = True
+                            edge[(x + dx) % max_x] = segment[dx]
+                        if not overlap:
+                            segments += 1
+                        if self.debug:
+                            print('Blob {:.0f}x{:.0f}y - segment:{} x:{}..{}, y:{}, gap{}, overlap:{}'.
+                                  format(centre_x, centre_y, segments, x, x + len(segment), y, gap, overlap))
+                        if segments >= self.size:
+                            # we've found enough, go with it, if there are more its a junk code
+                            # and some subsequent constraint will fail, be optimistic for now
+                            break
+                        # need more, keep going
+                        x += len(segment)
+                    else:
+                        x += 1
+            if segments >= self.size:
+                # we've found enough,
+                # NB: we *must* bang out when we've got enough else we start finding higher up stuff
+                break
+            if not is_gap:
+                # we've gone right round and probed y is now off the top of everything, so that's it
+                break
 
         if self.debug:
             plots = []
@@ -1341,109 +1425,35 @@ class Scan:
             plot.unload('target-timing-{:.0f}x{:.0f}y-{}'.format(centre_x, centre_y, self.original.source))
             plot.show()
 
-        # find the maximum edge, this is needed so we start from a known inside timing ring segment
-        # NB: due to noise removal it may have moved from the initial detection above
-        max_level = 0
-        max_at = 0
-        for x in range(max_x):
-            if edge[x] is not None and edge[x] > max_level:
-                max_level = edge[x]
-                max_at = x
+        if segments != self.size:
+            return None, 'found {} segments when {} expected'.format(segments, self.size)
 
-        # reject edges that are outside the timing ring
-        keep = True                            # we know we're starting inside the timing ring
-        gap_edge = []                          # x,y (out) and x,y (in) for each gap found
-        x = (max_at - 1) % max_x               # start at max-1 'cos we do +1 immediately inside the loop
-        y = edge[max_at]                       # initial reference is self
-        for _ in range(max_x + 1):             # overshoot by 1 to ensure we get rollovers
-            last_y = y
-            x = int((x + 1) % max_x)
-            y = edge[x]
-            if y is None:
-                # this means there was no edge detected at all before we got to the inner edge or it
-                # was rejected for being too small
-                if keep:
-                    # we're inside the timing ring, so treat this as going out
-                    y = last_y - self.min_timing_height * 2
-                else:
-                    # we're outside, so stay outside
-                    y = 0
-                    continue
-            if last_y - y > self.min_timing_height:
-                # this is a segment that is moving inwards, so we may be moving to the outside of the timing ring
-                if keep:
-                    # we were inside, so we're now moving outside, note it
-                    keep = False         # signal to start dropping samples
-                    gap_edge.append([x, last_y, None, None])   # where we went out and previous y at that point
-                else:
-                    # we're already outside and moving further out, do nothing
+        # edge is now None for all the gaps, extrapolate across the gaps to find the true edge
+        x = 0
+        edge_y = None
+        gap_x = None
+        while segments > 0:
+            x += 1
+            y = edge[x % max_x]
+            if y is not None:
+                if gap_x is None:
+                    # we haven't found a leading gap edge yet
                     pass
-            elif y - last_y > self.min_timing_height:
-                # this is a segment that is moving outwards, so we may be moving to the inside of the timing ring
-                if keep:
-                    # we're already inside and going further in, this means the previous outward edge was
-                    # not to the timing ring but to some step on the way down, so reset to this edge,
-                    # this involves zapping the samples from where we thought we where going in to here
-                    dx = gap_edge[-1][2]       # get where we must zap from
-                    while dx != x:
-                        edge[dx] = None
-                        dx = (dx + 1) % max_x
-                # we're outside and may be moving inside, we tentatively go inside
-                keep = True
-                # add gap edge co-ords of where we jump back in
-                # (we're updating the record created when we jumped out - see above)
-                gap_edge[-1][2] = x        # where we went back in
-                gap_edge[-1][3] = y        # and y at that point
-            if keep:
-                # this one is inside the timing ring, so keep it
+                elif edge_y is not None:
+                    # this is the trailing edge of a gap, extrapolate across it
+                    # y is the end value, edge_y is the start value,
+                    # x-1 is the end co-ord, gap_x is the start
+                    edge = self._interpolate_across_gap(edge, (gap_x % max_x), (x - 1) % max_x, edge_y, y)
+                    gap_x = None         # not in a gap any more
+                    segments -= 1        # done (another) segment
+                # note last y encountered
+                edge_y = y
+            elif gap_x is None:
+                # this is the leading edge of a gap, note it
+                gap_x = x
+            else:
+                # we're continuing in a gap
                 pass
-            else:
-                # this one is outside the timing ring, so drop it
-                edge[x] = None
-
-        if self.debug:
-            gaps = []
-            for gap in gap_edge:
-                gaps.append(gap[0])
-            grid = self._draw_grid(target, None, gaps, colour=(0, 255, 0))
-            gaps = []
-            for gap in gap_edge:
-                gaps.append(gap[2])
-            grid = self._draw_grid(grid, None, gaps, colour=(0, 0, 255))
-            grid.unload('target-gaps-{:.0f}x{:.0f}y-{}'.format(centre_x, centre_y, self.original.source))
-            grid.show()
-
-        # interpolate across all the gaps we found, all the required info is in gap_edge
-        # NB: a gap may span the angle edges
-        for gap in gap_edge:
-            x_out = gap[0]
-            y_out = gap[1]
-            x_in = gap[2]
-            y_in = gap[3]
-            if x_in is None or y_in is None:
-                # got an unfinished gap, that's a screw up!
-                if self.debug:
-                    print('Unfinished gap[{}]!'.format(gap))
-                if x_in is None:
-                    x_in = x_out + 1
-                if y_in is None:
-                    y_in = y_out
-            x_in = (x_in - 1) % max_x
-            span = x_in - x_out + 1
-            if y_in > y_out:
-                # edge is going downwards (i.e. increment is +ve)
-                distance = y_in - y_out
-                increment = distance / span
-            else:
-                # edge is going upwards (i.e. increment is -ve)
-                distance = y_out - y_in
-                increment = 0 - (distance / span)
-            y = y_out
-            x = (x_out - 1) % max_x
-            while x != x_in:
-                x = (x + 1) % max_x
-                y += increment
-                edge[x] = int(round(y))
 
         # smooth the edge
         edge = self._smooth_edge(edge, centre_x, centre_y)
