@@ -1207,8 +1207,11 @@ class Scan:
             but err on the side of going too big,
             when projecting small radii the same pixel will be sampled several times,
             when projecting large radii some pixels may be missed,
-            when pixels are missed we do a mean of the immediate neighbours that were missed
+            we just sample a straight line between the last x,y co-ordinate pair to the next for each angle
+            and calculate the mean of those
             """
+
+        # calculate the maximum radius to go out to
         max_x, max_y = self.image.size()
         edge_top = centre_y
         edge_left = centre_x
@@ -1219,11 +1222,13 @@ class Scan:
         if blob_radius < limit_radius:
             # max possible size is less than the image edge, so use the blob size
             limit_radius = blob_radius
+
+        # iterate every angle at every radius (ToDo: optimise angle per radius? Its wasteful to do all at small radii)
         angle_delta = 360 / self.angle_steps
         code = self.original.instance().new(self.angle_steps, limit_radius, min_luminance)
-        last_dx = int(round(centre_x))
-        last_dy = int(round(centre_y))
         for radius in range(limit_radius):
+            last_dx = int(round(centre_x))
+            last_dy = int(round(centre_y))
             for angle in range(self.angle_steps):
                 degrees = angle * angle_delta
                 x, y = self.angle_xy(degrees, radius)
@@ -1232,76 +1237,33 @@ class Scan:
                 else:
                     dx = int(round(centre_x + x))
                     dy = int(round(centre_y + y))
-                    skipped_x = max(int(math.fabs(dx - last_dx)) - 1, 0)   # number of x pixels skipped
-                    skipped_y = max(int(math.fabs(dy - last_dy)) - 1, 0)   # number of y pixels skipped
-                    if skipped_x > 0:
-                        if skipped_y > 0:
-                            # got a rectangle to make up
-                            if last_dx < dx:
-                                if last_dy < dy:
-                                    # dx, dy is the south-east corner
-                                    start_x = last_dx + 1
-                                    end_x = dx
-                                    start_y = last_dy + 1
-                                    end_y = dy
-                                else:
-                                    # dx, dy is the north-east corner
-                                    start_x = last_dx + 1
-                                    end_x = dx
-                                    start_y = dy
-                                    end_y = last_dy - 1
-                            else:
-                                if last_dy < dy:
-                                    # dx, dy is the south-west corner
-                                    start_x = dx
-                                    end_x = last_dx - 1
-                                    start_y = last_dy + 1
-                                    end_y = dy
-                                else:
-                                    # dx, dy is the north-west corner
-                                    start_x = dx
-                                    end_x = last_dx - 1
-                                    start_y = dy
-                                    end_y = last_dy - 1
-                        else:
-                            # got just a strip in x to make up
-                            if last_dx < dx:
-                                start_x = last_dx + 1
-                                end_x = dx
-                                start_y = dy
-                                end_y = dy
-                            else:
-                                start_x = dx
-                                end_x = last_dx - 1
-                                start_y = dy
-                                end_y = dy
+                    if last_dy < dy:
+                        start_y = last_dy + 1
+                        stop_y = dy
+                    elif last_dy > dy:
+                        start_y = dy
+                        stop_y = last_dy - 1
                     else:
-                        if skipped_y > 0:
-                            # got just a strip in y to make up
-                            if last_dy < dy:
-                                start_x = dx
-                                end_x = dx
-                                start_y = last_dy + 1
-                                end_y = dy
-                            else:
-                                start_x = dx
-                                end_x = dx
-                                start_y = dy
-                                end_y = last_dy - 1
-                        else:
-                            # nothing skipped
-                            start_x = dx
-                            end_x = dx
-                            start_y = dy
-                            end_y = dy
+                        start_y = dy
+                        stop_y = dy
+                    if last_dx < dx:
+                        start_x = last_dx + 1
+                        stop_x = dx
+                    elif last_dx > dx:
+                        start_x = dx
+                        stop_x = last_dx - 1
+                    else:
+                        start_x = dx
+                        stop_x = dx
+                    samples = max((stop_y - start_y) + (stop_x - start_x) + 1, 2)
+                    line = np.linspace((start_x, start_y), (stop_x, stop_y), samples)
                     pixel = 0
                     count = 0
-                    for sample_x in range(start_x, end_x + 1):
-                        for sample_y in range(start_y, end_y + 1):
-                            sample = self.image.getpixel(sample_x, sample_y)
-                            if sample is not None:
-                                pixel += sample
-                                count += 1
+                    for sample_x, sample_y in line:
+                        sample = self.image.getpixel(int(round(sample_x)), int(round(sample_y)))
+                        if sample is not None:
+                            pixel += sample
+                            count += 1
                     if count > 0:
                         pixel = int(round(pixel / count))
                     else:
@@ -1534,42 +1496,46 @@ class Scan:
             the inner edge is the first white to black transition that goes all the way around,
             the outer edge is the first black to white transition that goes all the way around,
             the centre_x and centre_y params are only present for naming the debug image files created,
-            returns two vectors, y co-ord for every angle of the edges, or a reason if one or both not found
+            returns two vectors, y co-ord for every angle of the edges, or a reason if one or both not found,
+            we look for the outer first as that will fail when looking at junk whereas the inner may not
             """
 
-        # find our marker edges in the radius
-        # Note: for a valid target there is only a single transition in each direction that goes all around
-        v_w2b_edge = self.transform.edges(target, 0, 1, 3, True)
+        # create a vector of the outer edge radius for every angle (this can be distorted by curvature)
         v_b2w_edge = self.transform.edges(target, 0, 1, 3, False)
-
-        w2b_mean = self._get_edge_threshold(v_w2b_edge)
         b2w_mean = self._get_edge_threshold(v_b2w_edge)
-        w2b_threshold_x = int(round(w2b_mean * self.edge_threshold_x))
-        w2b_threshold_y = int(round(w2b_mean * self.edge_threshold_y))
         b2w_threshold_x = int(round(b2w_mean * self.edge_threshold_x))
         b2w_threshold_y = int(round(b2w_mean * self.edge_threshold_y))
+        ring_outer_edge = self._find_radius_edge(v_b2w_edge, self.TOP_DOWN,
+                                                 centre_x, centre_y, b2w_threshold_x, b2w_threshold_y)
 
-        # create a vector of the inner edge radius for every angle (this is usually accurate)
-        ring_inner_edge = self._find_radius_edge(v_w2b_edge, self.TOP_DOWN, centre_x, centre_y, w2b_threshold_x, w2b_threshold_y)
+        if ring_outer_edge is None:
+            # don't bother looking for the inner if there is no outer
+            ring_inner_edge = None
+        else:
+            # found an outer, so worth looking for an inner
+            # create a vector of the inner edge radius for every angle (this is usually accurate)
+            v_w2b_edge = self.transform.edges(target, 0, 1, 3, True)
+            w2b_mean = self._get_edge_threshold(v_w2b_edge)
+            w2b_threshold_x = int(round(w2b_mean * self.edge_threshold_x))
+            w2b_threshold_y = int(round(w2b_mean * self.edge_threshold_y))
+            ring_inner_edge = self._find_radius_edge(v_w2b_edge, self.TOP_DOWN,
+                                                     centre_x, centre_y, w2b_threshold_x, w2b_threshold_y)
 
-        # create a vector of the outer edge radius for every angle (this can be distorted by curvature)
-        ring_outer_edge = self._find_radius_edge(v_b2w_edge, self.TOP_DOWN, centre_x, centre_y, b2w_threshold_x, b2w_threshold_y)
-
-        if ring_inner_edge is None:
-            reason = 'no inner edge'
-        elif ring_outer_edge is None:
+        if ring_outer_edge is None:
             reason = 'no outer edge'
+        elif ring_inner_edge is None:
+            reason = 'no inner edge'
         else:
             reason = None
 
         if self.debug:
-            plot = self._draw_plots(v_w2b_edge, [[0, ring_inner_edge]], None, (0, 255, 0))
-            plot.unload(self.original.source, '{:.0f}x{:.0f}y-inner'.format(centre_x, centre_y))
-            # plot.show()
+            if ring_inner_edge is not None:
+                plot = self._draw_plots(v_w2b_edge, [[0, ring_inner_edge]], None, (0, 255, 0))
+                plot.unload(self.original.source, '{:.0f}x{:.0f}y-inner'.format(centre_x, centre_y))
 
-            plot = self._draw_plots(v_b2w_edge, [[0, ring_outer_edge]], None, (0, 0, 255))
-            plot.unload(self.original.source, '{:.0f}x{:.0f}y-outer'.format(centre_x, centre_y))
-            # plot.show()
+            if ring_outer_edge is not None:
+                plot = self._draw_plots(v_b2w_edge, [[0, ring_outer_edge]], None, (0, 0, 255))
+                plot.unload(self.original.source, '{:.0f}x{:.0f}y-outer'.format(centre_x, centre_y))
 
             plot = target
             if ring_inner_edge is not None:
@@ -1577,7 +1543,6 @@ class Scan:
             if ring_outer_edge is not None:
                 plot = self._draw_plots(plot, [[0, ring_outer_edge]], None, (0, 0, 255))
             plot.unload(self.original.source, '{:.0f}x{:.0f}y-wavy'.format(centre_x, centre_y))
-            # plot.show()
 
         return ring_inner_edge, ring_outer_edge, reason
 
@@ -2721,6 +2686,7 @@ test_noise = mid_luminance >> 1
 test_angle_steps = 256
 
 test = Test(code_bits, min_num, max_num, parity, edges, rings)
+
 #test.coding()
 #test.decoding(test_black, test_white, test_noise)
 #test.circles()
@@ -2728,15 +2694,17 @@ test = Test(code_bits, min_num, max_num, parity, edges, rings)
 #test.code_words(test_num_set)
 #test.rings(test_ring_width)
 #test.codes(test_num_set, test_ring_width)
-test.scan(test_angle_steps, [999], '15-segment-angle-test.png')
-test.scan(test_angle_steps, [999], 'photo-angle-test-flat.jpg')
-test.scan(test_angle_steps, [999], 'photo-angle-test-curved-flat.jpg')
-test.scan(test_angle_steps, [101], '15-segment-101.png')
-test.scan(test_angle_steps, [102], '15-segment-102.png')
-test.scan(test_angle_steps, [365], '15-segment-365.png')
-test.scan(test_angle_steps, [640], '15-segment-640.png')
-test.scan(test_angle_steps, [658], '15-segment-658.png')
-test.scan(test_angle_steps, [828], '15-segment-828.png')
+
+#test.scan(test_angle_steps, [999], '15-segment-angle-test.png')
+#test.scan(test_angle_steps, [999], 'photo-angle-test-flat.jpg')
+#test.scan(test_angle_steps, [999], 'photo-angle-test-curved-flat.jpg')
+
+#test.scan(test_angle_steps, [101], '15-segment-101.png')
+#test.scan(test_angle_steps, [102], '15-segment-102.png')
+#test.scan(test_angle_steps, [365], '15-segment-365.png')
+#test.scan(test_angle_steps, [640], '15-segment-640.png')
+#test.scan(test_angle_steps, [658], '15-segment-658.png')
+#test.scan(test_angle_steps, [828], '15-segment-828.png')
 test.scan(test_angle_steps, [101], 'photo-101.jpg')
 test.scan(test_angle_steps, [102], 'photo-102.jpg')
 test.scan(test_angle_steps, [365], 'photo-365.jpg')
