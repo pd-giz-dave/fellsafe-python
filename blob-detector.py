@@ -1,36 +1,36 @@
 # Standard imports
 import cv2
-import numpy as np;
+import numpy as np
 
 # Read image
-orig = cv2.imread("15-segment-101.jpg", cv2.IMREAD_GRAYSCALE)
-
-# De-noise it
-blurred = cv2.GaussianBlur(orig, (5, 5), 0)
+orig = cv2.imread("photo-658-crumbled-dim.jpg", cv2.IMREAD_GRAYSCALE)
 
 # Downsize it
-width, height = blurred.shape
+width, height = orig.shape
 aspect_ratio = width / height
 new_width = 1024
 new_height = int(new_width * aspect_ratio)
-shrunk = cv2.resize(blurred, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+shrunk = cv2.resize(orig, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
-# Reverse it
-#im = 255-shrunk
-im = shrunk
+# De-noise it
+blurred = shrunk #cv2.medianBlur(shrunk, 3)
+
+# Reverse it - not if filter by colour == 255
+#im = 255-blurred
+im = blurred
 
 # Setup SimpleBlobDetector parameters.
 params = cv2.SimpleBlobDetector_Params()
 
 # Change thresholds
-params.minThreshold = 0
-params.maxThreshold = 256
-params.thresholdStep = 16
+params.minThreshold = 0 + 32
+params.maxThreshold = 256 - 32
+params.thresholdStep = 2
 
 # Filter by Area.
-params.filterByArea = False
+params.filterByArea = True
 params.minArea = 100
-params.maxArea = 100000
+params.maxArea = 10000
 
 # Filter by Circularity
 params.filterByCircularity = False
@@ -44,6 +44,10 @@ params.minConvexity = 0.8
 params.filterByInertia = False
 params.minInertiaRatio = 0.8
 
+# Filter by Colour
+params.filterByColor = True
+params.blobColor = 255
+
 # Create a detector with the parameters
 detector = cv2.SimpleBlobDetector_create(params)
 
@@ -56,5 +60,6 @@ im_with_keypoints = cv2.drawKeypoints(shrunk, keypoints, np.array([]), (0, 0, 25
                                       cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 # Show keypoints
+cv2.imwrite('blobs.jpg', im_with_keypoints)
 cv2.imshow("Keypoints", im_with_keypoints)
 cv2.waitKey(0)
