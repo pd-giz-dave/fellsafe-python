@@ -1,4 +1,5 @@
-import os.path
+import os
+import glob
 
 import cv2
 import numpy as np
@@ -493,11 +494,14 @@ class Angle:
         """ get the x,y co-ordinates on the circumference of a circle of radius 'r' for angle 'a'
             'a' is in degrees (0..360), 'r' is in pixels
             'a' of 0 is 12 o'clock and increases clockwise
+            if a < 0 or > 360 it 'wraps'
             """
-        if a < 0 or a > 360:
-            return None, None
         if r == 0:
             return 0, 0
+        while a < 0:
+            a += 360
+        while a > 360:
+            a -= 360
         for octant in self.octants:
             if a <= octant[0]:
                 ratio = self.ratios[int(round((octant[1] + (a * octant[2])) / self.step_angle))]
@@ -863,7 +867,7 @@ class Frame:
             image = self.buffer
         filename, ext = os.path.splitext(image_file)
         if suffix is not None:
-            cv2.imwrite('_{}-{}.png'.format(filename, suffix), image)
+            cv2.imwrite('_{}_{}.png'.format(filename, suffix), image)
         else:
             cv2.imwrite('{}.png'.format(filename), image)
 
@@ -928,15 +932,21 @@ class Transform:
         target.set(cv2.medianBlur(source.get(), size))
         return target
 
-    def downSize(self, source):
-        """ blur and downsize (by half in both directions) the given image """
+    def upsize(self, source, new_height):
+        """ upsize the given image such that its height (y) is at least that given,
+            the width is preserved,
+            """
+        width, height = source.size()
+        if height >= new_height:
+            # its already big enough
+            return source
         target = source.instance()
-        target.set(cv2.pyrDown(source.get()))
+        target.set(cv2.resize(source.get(), (width, new_height), interpolation=cv2.INTER_LINEAR))
         return target
 
-    def resize(self, source, new_size):
-        """ resize the given image such that either its width or height is at most that given,
-            the aspect ration is preserved,
+    def downsize(self, source, new_size):
+        """ downsize the given image such that either its width or height is at most that given,
+            the aspect ratio is preserved,
             """
         width, height = source.size()
         if width <= new_size or height <= new_size:
@@ -951,7 +961,7 @@ class Transform:
             new_width = new_size
             new_height = int(height / (width / new_size))
         target = source.instance()
-        target.set(cv2.resize(source.get(), (new_width, new_height), interpolation=cv2.INTER_LINEAR))
+        target.set(cv2.resize(source.get(), (new_width, new_height), interpolation=cv2.INTER_AREA))
         return target
 
     def merge(self, image_1, image_2):
@@ -967,11 +977,13 @@ class Transform:
         target.set(source.get().copy())
         return target
 
-    def blobs(self, source, low=min_luminance, high=max_luminance, levels=32):
+    def blobs(self, source, threshold, circularity, convexity, inertia, area, gaps, colour):
         """ find bright blobs in the given image,
-            low, high are the min and max thresholds for the blob detector,
-            levels is how many binarizations to perform (used to calculate threshold step)
-            returns a keypoints array, each keypoint has:
+            parameters are those required by opencv.SimpleBlobDetector_create,
+            see https://learnopencv.com/blob-detection-using-opencv-python-c/
+            if None that parameter is not set,
+            each is a multi-element tuple (colour),
+            returns a keypoints array (which may be empty), each keypoint has:
                 .pt[1] = x co-ord of the centre
                 .pt[0] = y co-ord of centre
                 .size = diameter of blob
@@ -979,28 +991,76 @@ class Transform:
             """
 
         # Setup SimpleBlobDetector parameters.
-        # These have been tuned for detecting circular blobs of a certain size range
         params = cv2.SimpleBlobDetector_Params()
-        params.minThreshold = low
-        params.maxThreshold = high
-        params.thresholdStep = int(round((high - low) / levels))
-        params.filterByCircularity = True      # needed to stop detection of blobs that go off the image edge
-        params.minCircularity = 0.8
-        params.filterByConvexity = False       # we want to find distorted blobs, so do not filter on this
-        params.minConvexity = 0.9
-        params.filterByInertia = False         # we want to find stretched out blobs, so do not filter on this
-        params.minInertiaRatio = 0.5
-        params.filterByArea = True
-        params.minArea = 30                    # needed to stop detection of very small blobs
-        params.maxArea = 500000                # needed to make sure we find huge ones (whole image is one blob)
-        params.filterByColor = True
-        params.blobColor = max_luminance       # we want bright blobs
+        if threshold is not None:
+            if threshold[0] is not None:
+                params.minThreshold = threshold[0]         # default is 10
+            if threshold[1] is not None:
+                params.maxThreshold = threshold[1]         # default is 220
+            if threshold[2] is not None:
+                params.thresholdStep = threshold[2]        # default is 10
+        if circularity is not None:
+            params.filterByCircularity = True
+            if circularity[0] is not None:
+                params.filterByCircularity = True
+                params.minCircularity = circularity[0]
+            if circularity[1] is not None:
+                params.filterByCircularity = True
+                params.maxCircularity = circularity[1]     # default 3.4
+        if convexity is not None:
+            if convexity[0] is not None:
+                params.filterByConvexity = True
+                params.minConvexity = convexity[0]
+            if convexity[1] is not None:
+                params.filterByConvexity = True
+                params.maxConvexity = convexity[1]         # default 3.4
+        if inertia is not None:
+            if inertia[0] is not None:
+                params.filterByInertia = True
+                params.minInertiaRatio = inertia[0]
+            if inertia[1] is not None:
+                params.filterByInertia = True
+                params.maxInertiaRatio = inertia[1]        # default 3.4
+        if area is not None:
+            if area[0] is not None:
+                params.filterByArea = True
+                params.minArea = area[0]
+            if area[1] is not None:
+                params.filterByArea = True
+                params.maxArea = area[1]
+        if gaps is not None:
+            if gaps[0] is not None:
+                params.minDistBetweenBlobs = gaps[0]       # default is 10
+            if gaps[1] is not None:
+                params.minRepeatability = gaps[1]          # default is 2
+        if colour is not None:
+            params.filterByColor = True
+            params.blobColor = colour
 
         # Create a detector with the parameters
         detector = cv2.SimpleBlobDetector_create(params)
 
         # Detect blobs
         return detector.detect(source.get())
+
+    def warpPolar(self, source, centre_x, centre_y, radius, width, height):
+        """ warp the disc defined by centre_x/y and radius in the source image
+            into a rectangular image of width (angle) x height (radius)
+            """
+        polar = (cv2.warpPolar(source.get(), (height, width),
+                               (centre_x, centre_y), radius,
+                               cv2.INTER_LINEAR + cv2.WARP_POLAR_LINEAR))
+
+        # cv2 produces an image of width=radius, height=angle,
+        # so we rotate it 90 degrees clockwise to get width=angle, height=radius
+        # ToDo: this could be optimised out by tweaking the rest of my algorithms to work radius x angle
+        #       the reason I work angle x radius is I only discovered warpPolar after I'd done it all DIY!
+        rotated = cv2.transpose(polar)
+
+        target = source.instance()
+        target.set(rotated)
+
+        return target
 
     def canny(self, source, min_val, max_val, size=3):
         """ perform a 'canny' edge detection on given source,
@@ -1116,12 +1176,15 @@ class Scan:
         self.blob_radius_stretch = 1.6     # how much to stretch blob radius to ensure always cover the whole lot
         self.min_timing_length = 3         # min length of a segment edge in the timing ring
         self.min_edge_thickness = 2        # minimum timing ring edge thickness
-        self.min_timing_gap = 0.4          # the fraction of the timing ring mean edge gap that is 'too-close'
+        self.timing_gap_tolerance = 0.25   # the fraction of the nominal timing gap that is tolerated before 'too-close'
+        self.min_timing_gap = 0.4          # ToDo: remove when re-done _find_segments
         self.sample_width_factor = 0.4     # fraction of a segment width that is probed for a luminance value
         self.sample_height_factor = 0.3    # fraction of a ring height that is probed for a luminance value
         self.min_run_length = 4            # minimum consecutive samples when looking for ring edges
         self.min_slope = 3                 # minimum slope when looking for ring edge maxima
         self.min_ring_image_gap = 3        # minimum gap between image edge and start of ring edge probing
+        self.max_samples_per_angle = 4     # used to threshold the radius when projecting
+        self.min_target_radius = 6 * self.NUM_RINGS  # upsize target radius to at least this (6 pixels per ring)
 
         # ring position fudge factors,
         # the inner white ring end-y is moved up a bit to get it away from the white/black edge,
@@ -1144,7 +1207,7 @@ class Scan:
         self.min_edge_threshold = int(round(max_luminance * 0.1))  # ignore edge pixels below this when getting mean
 
         # minimum luminance for an edge pixel to qualify as an edge when following in x
-        self.edge_threshold_x = 0.6
+        self.edge_threshold_x = 0.4
 
         # minimum luminance for an edge pixel to qualify as an edge when following in y
         self.edge_threshold_y = 0.9
@@ -1154,6 +1217,7 @@ class Scan:
 
         # params
         self.angle_steps = angles                          # angular resolution when 'projecting'
+        self.max_angle_samples = self.angle_steps * self.max_samples_per_angle
         self.original = frame
         self.debug = debug
         self.c = code
@@ -1161,9 +1225,7 @@ class Scan:
 
         # context
         self.transform = Transform()                       # make a new frame instance
-        max_circumference = 3600                           # good enough for 0.1 degree resolution
-        angle = Angle(int(round(max_circumference)))
-        self.angle_xy = angle.polarToCart
+        self.angle_xy = None                               # see _find_blobs
 
         # samples probed (x,y offsets from self) when following for edges
         # the samples are arranged in an order that tends to keep things in a straight line
@@ -1187,16 +1249,43 @@ class Scan:
 
     def _find_blobs(self):
         """ find the target blobs in our image,
+            this must be the first function called to process our image,
             creates a blob list each of which is a 'keypoint' tuple of:
                 .pt[1] = x co-ord of the centre
                 .pt[0] = y co-ord of centre
                 .size = diameter of blob
             returns a list of blobs found
+            also builds a polar-to-cartesian co-ordinate translation table of sufficient accuracy
+            to cope with the largest blob detected
             """
 
+        # prepare image
         blurred = self.transform.blur(self.original)           # de-noise
-        self.image = self.transform.resize(blurred, 1080)      # re-size (to HD video convention)
-        blobs = self.transform.blobs(self.image)               # find the blobs
+        self.image = self.transform.downsize(blurred, 1080)      # re-size (to HD video convention)
+
+        # set filter parameters
+        # ToDo: these need tuning to hell and back to optimise for our context
+        threshold = (min_luminance, max_luminance, 8)  # min, max luminance, luminance step and repeatability
+        circularity = (0.75, None)             # min, max 'corners' in blob edge or None
+        convexity = (0.5, None)                # min, max 'gaps' in blob edge or None
+        inertia = (0.4, None)                  # min, max 'squashed-ness' or None
+        area = (30, 250000)                    # min, max area in pixels, or None for no area filter
+        gaps = (None, None)                    # how close blobs have to be to be merged and min number
+        colour = max_luminance                 # we want bright blobs, use min_luminance for dark blobs
+
+        # find the blobs
+        blobs = self.transform.blobs(self.image, threshold, circularity, convexity, inertia, area, gaps, colour)
+
+        # build the polar to cartesian translation table
+        max_size = 3                                           # do one for at least 3 pixels
+        for blob in blobs:
+            if blob.size > max_size:
+                max_size = blob.size
+
+        max_radius = (max_size / 4) * self.NUM_RINGS * self.blob_radius_stretch
+        max_circumference = min(2 * math.pi * max_radius, 3600)  # good enough for 0.1 degree resolution
+        angle = Angle(int(round(max_circumference)))
+        self.angle_xy = angle.polarToCart
 
         return blobs
 
@@ -1205,10 +1294,12 @@ class Scan:
             blob_size is used as a guide to limit the radius projected,
             we assume the blob-size is (roughly) the diameter of the inner two white rings
             but err on the side of going too big,
-            when projecting small radii the same pixel will be sampled several times,
-            when projecting large radii some pixels may be missed,
-            we just sample a straight line between the last x,y co-ordinate pair to the next for each angle
-            and calculate the mean of those
+            when projecting small radii the angle resolution is low,
+            when projecting large radii the angle resolution is high,
+            the angle probed at each radius is such that each radius circumference pixel is sampled,
+            however many that is is then mapped onto the angle resolution requested by the user (self.angle_steps),
+            when too few, the sample is replicated, when too many their mean is used,
+            the objective is to minimise loss of information and blurring of edges
             """
 
         # calculate the maximum radius to go out to
@@ -1223,54 +1314,12 @@ class Scan:
             # max possible size is less than the image edge, so use the blob size
             limit_radius = blob_radius
 
-        # iterate every angle at every radius (ToDo: optimise angle per radius? Its wasteful to do all at small radii)
-        angle_delta = 360 / self.angle_steps
-        code = self.original.instance().new(self.angle_steps, limit_radius, min_luminance)
-        for radius in range(limit_radius):
-            last_dx = int(round(centre_x))
-            last_dy = int(round(centre_y))
-            for angle in range(self.angle_steps):
-                degrees = angle * angle_delta
-                x, y = self.angle_xy(degrees, radius)
-                if x is None:
-                    pixel = mid_luminance
-                else:
-                    dx = int(round(centre_x + x))
-                    dy = int(round(centre_y + y))
-                    if last_dy < dy:
-                        start_y = last_dy + 1
-                        stop_y = dy
-                    elif last_dy > dy:
-                        start_y = dy
-                        stop_y = last_dy - 1
-                    else:
-                        start_y = dy
-                        stop_y = dy
-                    if last_dx < dx:
-                        start_x = last_dx + 1
-                        stop_x = dx
-                    elif last_dx > dx:
-                        start_x = dx
-                        stop_x = last_dx - 1
-                    else:
-                        start_x = dx
-                        stop_x = dx
-                    samples = max((stop_y - start_y) + (stop_x - start_x) + 1, 2)
-                    line = np.linspace((start_x, start_y), (stop_x, stop_y), samples)
-                    pixel = 0
-                    count = 0
-                    for sample_x, sample_y in line:
-                        sample = self.image.getpixel(int(round(sample_x)), int(round(sample_y)))
-                        if sample is not None:
-                            pixel += sample
-                            count += 1
-                    if count > 0:
-                        pixel = int(round(pixel / count))
-                    else:
-                        pixel = mid_luminance
-                last_dx = dx
-                last_dy = dy
-                code.putpixel(angle, radius, pixel)
+        # do the projection
+        code = self.transform.warpPolar(self.image, centre_x, centre_y, limit_radius, self.angle_steps, limit_radius)
+
+        # upsize small targets
+        code = self.transform.upsize(code, self.min_target_radius)
+
         return code
 
     def _smooth_edge(self, edge, centre_x, centre_y):
@@ -1648,6 +1697,9 @@ class Scan:
 
         code.set(new_buffer)
 
+        # upsize small targets
+        code = self.transform.upsize(code, self.min_target_radius)
+
         rings = self._find_ring_edges(code, one_ring, centre_x, centre_y)
 
         # return flattened image
@@ -1669,7 +1721,7 @@ class Scan:
     def _find_ring_edges(self, target, one_ring, centre_x, centre_y):
         """ find the ring edges in the given target,
             the target must have been perspective corrected and cropped,
-            estimated_width is an initial guess at where the ring edges might be,
+            one_ring is the nominal ring width,
             the centre_x, and centre_y params are only present for naming the debug image files created,
             this deduces the ring edges by finding all horizontal edges, both white to black and black to white,
             in the radius range and building a histogram of edges values, the image given is almost flat so
@@ -1681,6 +1733,11 @@ class Scan:
         all_edges = self._get_horizontal_edges(target, centre_x, centre_y)
 
         threshold_ring = int(round(self._get_edge_threshold(all_edges) * self.edge_threshold_ring))
+
+        # ToDo: this counting samples algorithm is not good enough, do a follow edges algorithm to build
+        #       a list of candidate edges then filter them on a 'good-ness' criteria of some sort,
+        #       when following an edge must allow for merging vertically, so don't follow vertically very far,
+        #       or note vertical range and split if too much
 
         # count samples at each radii that are over our edge threshold where there is a run length of at least N
         # the extremities are ignored
@@ -1947,10 +2004,14 @@ class Scan:
             the centre_x, and centre_y params are only present for naming the debug image files created,
             this function is only concerned with the bit timing ring, it returns a vector of the angle
             co-ordinate of each bit centre, it calculates these by looking for edges in the timing ring,
-            there must be an edge per bit else we're looking at junk, the timing ring has a white to black
-            transition in the centre of each bit segment, its assumed any angular distortion is constant
-            at these edges so the data bits should lie across these edges, only the best edges are returned,
-            if too many are found the weakest are dropped
+            there should be an edge per bit, the timing ring has a white to black transition in the centre
+            of each bit segment, its assumed any angular distortion is constant at these edges so the data
+            bits should lie across these edges, only the best edges are returned,
+            if too many are found the weakest are dropped,
+            if not enough are found gap analysis is used to insert missing ones,
+            NB: We go to these lengths to extract the bit centre edges 'cos image distortion can stretch
+                and shrink the segments significantly, which moves the edges from their expected positions,
+                also as a minimum we need a reference within the image of where the first one is
             """
 
         # get white to black edges for every angle
@@ -2006,14 +2067,47 @@ class Scan:
             edge_span += 1
             edge_x = int(round(min_edge_x + (edge_span / 2)))
             bit_edges.append(edge_x)
-            bit_edge_metrics.append([edge_start, edge_length, edge_span, max(brightest_up, brightest_down), None])
+            bit_edge_metrics.append([edge_start, edge_length, edge_span, max(brightest_up, brightest_down), None, None])
             if self.debug:
                 up_edge.reverse()
                 grid = self._draw_plots(grid, None, [[y, down_edge], [y-(len(up_edge)-1), up_edge]], (0, 255, 0))
             # we move on from this edge
             x = max_edge_x + self.min_edge_thickness
 
-        # we've now found *all* edges, if got too many filter out the worst ones
+        if len(bit_edges) == 0:
+            # no edges detected at all, we need at least one to find bit centres
+            return None, 'found no bit edges when expecting {}'.format(self.size)
+
+        # we've now found *all* edges, filter out those that are 'too-close' to their neighbours
+        # we know what the approximate edge separation should be, so chuck anything that is too far from that
+        # """ ToDo
+        expected_separation = max_x / self.size
+        min_separation = expected_separation - (expected_separation * self.timing_gap_tolerance)
+        max_separation = expected_separation + (expected_separation * self.timing_gap_tolerance)
+        dropped = True
+        while dropped:
+            dropped = False
+            # we find the separation of each edge from its left and right neighbour
+            # gap at wrap around is first to last
+            wrap_gap = bit_edge_metrics[0][0] + self.angle_steps - bit_edge_metrics[-1][0]
+
+            # first left separation is the wrap around from the first to the last
+            bit_edge_metrics[0][4] = wrap_gap
+            for edge in range(1, len(bit_edge_metrics)):
+                left_gap = (bit_edge_metrics[edge][0] - bit_edge_metrics[edge - 1][0])
+                bit_edge_metrics[edge][4] = left_gap                # note how close it is to its right neighbour
+
+            # last right separation is the wrap around from the last to the first
+            bit_edge_metrics[-1][5] = wrap_gap
+            for edge in range(len(bit_edge_metrics) - 1):
+                right_gap = (bit_edge_metrics[edge + 1][0] - bit_edge_metrics[edge][0])
+                bit_edge_metrics[edge][5] = right_gap                # note how close it is to its right neighbour
+
+            # anything too close to either of its neighbours needs scrutiny
+            # ToDo: implement the above
+        # """
+
+        # if got too many filter out the worst ones
         while len(bit_edges) > self.size:
             # got too many keep the best ones, each edge is assessed for its robustness based on:
             #   its length - longer is better
@@ -2022,16 +2116,18 @@ class Scan:
             #   its proximity - further from a neighbour is better
             # the weakest one is dropped until we have the number we want
             # edge metrics array is: start-x, length, width, brightness, space for neighbour gap
+
             # step 1 - find the median separation
             # first separation is the wrap around from the last to the first
-            separation = bit_edge_metrics[0][0] + self.angle_steps - bit_edge_metrics[len(bit_edge_metrics) - 1][0]
-            bit_edge_metrics[len(bit_edge_metrics) - 1][4] = separation
+            separation = bit_edge_metrics[0][0] + self.angle_steps - bit_edge_metrics[-1][0]
+            bit_edge_metrics[-1][4] = separation
             for edge in range(len(bit_edge_metrics) - 1):
                 gap = (bit_edge_metrics[edge + 1][0] - bit_edge_metrics[edge][0])
                 separation += gap
                 bit_edge_metrics[edge][4] = gap                        # note how close it is to its next neighbour
             separation /= len(bit_edge_metrics)                        # this is now the mean separation
             too_close = int(round(separation * self.min_timing_gap))   # min neighbour gap tolerated
+
             # step 2 - find closest neighbours
             smallest_gap = self.angle_steps
             smallest_edge = 0
@@ -2108,6 +2204,9 @@ class Scan:
                 # everything is spaced out sufficiently, give up
                 break
 
+        # if not found enough work out what is missing an insert it
+        # we know the approximate bit spacing from our code size, so look for excessive gaps and insert
+        # in there to make the gap approx the right size
         if self.debug:
             grid.unload(self.original.source, '{:.0f}x{:.0f}y-segments'.format(centre_x, centre_y))
             # grid.show()
@@ -2242,7 +2341,10 @@ class Scan:
         if len(targets) == 0:
             if self.debug:
                 print('Image {} does not contain any target candidates'.format(self.original.source))
-                self.image.unload(self.original.source, 'targets')
+                if labels is not None:
+                    labels.unload(self.original.source, 'targets')
+                else:
+                    self.image.unload(self.original.source, 'targets')
             return []
 
         numbers = []
@@ -2306,11 +2408,11 @@ class Scan:
             if self.debug:
                 print('Blob {:.0f}x{:.0f}y - number:{}, bits:{}'.format(centre_x, centre_y, number, bits))
                 if number is None:
-                    print('**Blob {:.0f}x{:.0f}y - white samples:{}'.format(centre_x, centre_y, white_level))
-                    print('**Blob {:.0f}x{:.0f}y - black samples:{}'.format(centre_x, centre_y, black_level))
-                    print('**Blob {:.0f}x{:.0f}y - ring1 samples:{}'.format(centre_x, centre_y, data_ring_1))
-                    print('**Blob {:.0f}x{:.0f}y - ring2 samples:{}'.format(centre_x, centre_y, data_ring_2))
-                    print('**Blob {:.0f}x{:.0f}y - ring3 samples:{}'.format(centre_x, centre_y, data_ring_3))
+                    print('__Blob {:.0f}x{:.0f}y - white samples:{}'.format(centre_x, centre_y, white_level))
+                    print('__Blob {:.0f}x{:.0f}y - black samples:{}'.format(centre_x, centre_y, black_level))
+                    print('__Blob {:.0f}x{:.0f}y - ring1 samples:{}'.format(centre_x, centre_y, data_ring_1))
+                    print('__Blob {:.0f}x{:.0f}y - ring2 samples:{}'.format(centre_x, centre_y, data_ring_2))
+                    print('__Blob {:.0f}x{:.0f}y - ring3 samples:{}'.format(centre_x, centre_y, data_ring_3))
                     colour = (0, 0, 255, 0)  # red
                     label = 'invalid code'
                 else:
@@ -2642,6 +2744,7 @@ class Test:
         print('******************')
         print('Scan image {} for codes {}'.format(image, numbers))
         try:
+            self._remove_derivatives(image)
             self.frame.load(image)
             scan = Scan(self.c, self.frame, angles, True)
             results = scan.decode_targets()
@@ -2669,6 +2772,18 @@ class Test:
         except:
             traceback.print_exc()
         print('******************')
+
+    def _remove_derivatives(self, filename):
+        """ remove all the diagnostic image derivatives of the given file name
+            a derivative is that file name prefixed by '_', suffixed by anything with any file extension
+            """
+        filename, _ = os.path.splitext(filename)
+        filelist = glob.glob('_{}_*.*'.format(filename))
+        for f in filelist:
+            try:
+                os.remove(f)
+            except:
+                print('Could not remove {}'.format(f))
 
 
 # parameters
@@ -2699,12 +2814,12 @@ test = Test(code_bits, min_num, max_num, parity, edges, rings)
 #test.scan(test_angle_steps, [999], 'photo-angle-test-flat.jpg')
 #test.scan(test_angle_steps, [999], 'photo-angle-test-curved-flat.jpg')
 
-#test.scan(test_angle_steps, [101], '15-segment-101.png')
-#test.scan(test_angle_steps, [102], '15-segment-102.png')
-#test.scan(test_angle_steps, [365], '15-segment-365.png')
-#test.scan(test_angle_steps, [640], '15-segment-640.png')
-#test.scan(test_angle_steps, [658], '15-segment-658.png')
-#test.scan(test_angle_steps, [828], '15-segment-828.png')
+test.scan(test_angle_steps, [101], '15-segment-101.png')
+test.scan(test_angle_steps, [102], '15-segment-102.png')
+test.scan(test_angle_steps, [365], '15-segment-365.png')
+test.scan(test_angle_steps, [640], '15-segment-640.png')
+test.scan(test_angle_steps, [658], '15-segment-658.png')
+test.scan(test_angle_steps, [828], '15-segment-828.png')
 test.scan(test_angle_steps, [101], 'photo-101.jpg')
 test.scan(test_angle_steps, [102], 'photo-102.jpg')
 test.scan(test_angle_steps, [365], 'photo-365.jpg')
