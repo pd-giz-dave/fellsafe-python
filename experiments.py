@@ -10,6 +10,7 @@ import traceback
 # ToDo:
 #   1. try black centre not white - in an attempt to get blob detector more reliable (i.e. bb-wdddw-bb)
 #   2. use opencv threshold instead of DIY and tweak 'followers' to follow mid-point not brightest
+#   3. create a new set of test photos with no timing ring
 
 """ coding scheme
     
@@ -1861,22 +1862,21 @@ class Scan:
 
         return all_edges
 
-    def _find_ring_edges(self, target, centre_x, centre_y):
-        """ find the ring edges in the given target,
-            the target must have been perspective corrected and cropped,
-            the centre_x, and centre_y params are only present for naming the debug image files created,
-            this deduces the ring edges by finding all horizontal edges, both white to black and black to white,
-            in the image given, the image given is almost flat so there should be distinct edge radii that fall
-            on the ring edges, the data coding is such that there will be at least one edge per ring, we know
-            how many rings we expect so from all the edges we find a best fit to our expectation, we go to this
-            trouble because image distortion can squash and stretch the rings (in particular white tends to bleed
-            into black which shrinks mostly black rings and expands mostly white rings),
-            returns a vector of y co-ords for the ring edges or a reason if failed
+    def _get_ring_edges(self, target, centre_x, centre_y, grid=None):
+        """ return a vector of the ring edges in the given target,
+            the target must consist of either white-to-black edges or black-to-white edges or both
+            each edge consists of:
+                x,
+                edge_y,
+                edge_length in x,
+                edge_span in y,
+                brightest level in the edge,
+                None, None, None - space for stuff to come later
+            grid, when not None, is an image to draw our detections on,
+            centre_x/y are purely for diagnostic messages
             """
 
-        # get edges for every radii
-        all_edges = self._get_horizontal_edges(target, centre_x, centre_y)
-        max_x, max_y = all_edges.size()
+        max_x, max_y = target.size()
 
         # initial estimate of ring widths
         nominal_width = max_y / self.NUM_RINGS
@@ -1885,10 +1885,7 @@ class Scan:
         low_margin = int(nominal_width * self.actual_width_tolerance) + 1
         high_margin = int(max(max_y - low_margin, 0))
 
-        if self.debug:
-            grid = target
-
-        edge_mean = self._get_edge_threshold(all_edges)
+        edge_mean = self._get_edge_threshold(target)
         threshold_x = int(round(edge_mean * self.edge_threshold_x))
         threshold_y = int(round(edge_mean * self.edge_threshold_y))
 
@@ -1902,7 +1899,7 @@ class Scan:
         while y < high_margin:
             y += 1
             for x in range(delta_x, max_x - delta_x, delta_x):
-                left_edge, brightest_left = self._follow_edge_in_x(all_edges, x, y,
+                left_edge, brightest_left = self._follow_edge_in_x(target, x, y,
                                                                    self.RIGHT_TO_LEFT, self.TOP_DOWN,
                                                                    threshold_x, threshold_y,
                                                                    self.edge_kernel_tight,
@@ -1912,7 +1909,7 @@ class Scan:
                     right_edge = []
                     brightest_right = min_luminance
                 else:
-                    right_edge, brightest_right = self._follow_edge_in_x(all_edges, x, y,
+                    right_edge, brightest_right = self._follow_edge_in_x(target, x, y,
                                                                          self.LEFT_TO_RIGHT, self.TOP_DOWN,
                                                                          threshold_x, threshold_y,
                                                                          self.edge_kernel_tight,
@@ -1952,7 +1949,7 @@ class Scan:
                 edge_y = int(round(edge_y / (len(left_edge) + len(right_edge))))
                 ring_edges.append([x, edge_y, edge_length, edge_span, max(brightest_left, brightest_right),
                                    None, None, None])          # space for stuff to come later
-                if self.debug:
+                if grid is not None:
                     # draw the edge we detected in green
                     left_edge.reverse()
                     grid = self._draw_plots(grid, [[x, right_edge], [x-(len(left_edge)-1), left_edge]], None, (0, 255, 0))
@@ -1960,16 +1957,47 @@ class Scan:
                 # coincident ring edges in x do not add any new information, so once we've found one, move on in y
                 y = max_edge_y + edge_span + self.edge_kernel_tight_width  # move the y loop on
                 break                                                      # skip remaining x probes
-        if len(ring_edges) == 0:
-            return None, 'found no ring edges'
 
-        # we've now found at least one edge but usually we will find more (ideally 7)
-        # the nominal ring width is image height divided by number of rings in that height
-        # but this can be vary slightly across our image due to distortion effects
-        # this distortion is assumed to have limits that prevents the distortion exceeding a certain threshold
-        # for each edge detected we do a 'best fit' of the other edges to our expectation
-        # the best fit is the most edges that are within the threshold of our expectation
-        # those edges then become the reference points for determining all the ring edges
+        return ring_edges
+
+    def _find_ring_edges(self, target, centre_x, centre_y):
+        """ find the ring edges in the given target,
+            the target must have been perspective corrected and cropped,
+            the centre_x, and centre_y params are only present for naming the debug image files created,
+            this deduces the ring edges by finding all horizontal edges, both white to black and black to white,
+            in the image given, the image given is almost flat so there should be distinct edge radii that fall
+            on the ring edges, the data coding is such that there will be at least one edge per ring, we know
+            how many rings we expect so from all the edges we find a best fit to our expectation, we go to this
+            trouble because image distortion can squash and stretch the rings (in particular white tends to bleed
+            into black which shrinks mostly black rings and expands mostly white rings),
+            returns a vector of y co-ords for the ring edges or a reason if failed
+            """
+
+        max_x, max_y = target.size()
+
+        # initial estimate of ring widths
+        nominal_width = max_y / self.NUM_RINGS
+
+        # margins within which we do not want edges (first and last edge must be outside these margins)
+        low_margin = int(nominal_width * self.actual_width_tolerance) + 1
+        high_margin = int(max(max_y - low_margin, 0))
+
+        if self.debug:
+            grid = target
+        else:
+            grid = None
+
+        # get black-to-white edges for every radii
+        b2w_edges = self.transform.edges(target, 0, 1, 3, False)
+        if self.debug:
+            b2w_edges.unload(self.original.source, '{:.0f}x{:.0f}y-h-b2w-edges'.format(centre_x, centre_y))
+        ring_edges_up = self._get_ring_edges(b2w_edges, centre_x, centre_y, grid)
+
+        # get white_to_black edges for every radii
+        w2b_edges = self.transform.edges(target, 0, 1, 3, True)
+        if self.debug:
+            w2b_edges.unload(self.original.source, '{:.0f}x{:.0f}y-h-w2b-edges'.format(centre_x, centre_y))
+        ring_edges_down = self._get_ring_edges(w2b_edges, centre_x, centre_y, grid)
 
         # indices into ring_edges (Python is a crappy language and IMO promotes bad practices)
         # I want the equivalent of a struct(), no such thing in Python!
@@ -1981,6 +2009,59 @@ class Scan:
         EDGE_MATCH = 5
         EDGE_IDEAL = 6
         EDGE_ACTUAL = 7
+
+        # merge the two sets of edges so that got a single list in ascending y, each is separately in order now
+        # we get them separately and merge rather than do both at once 'cos they can get very close in small images
+        # we assume b2w and w2b edges are not co-incident
+        ring_edges = []
+        up_edge = None
+        down_edge = None
+        while True:
+            if up_edge is None and len(ring_edges_up) > 0:
+                up_edge = ring_edges_up.pop(0)
+            if down_edge is None and len(ring_edges_down) > 0:
+                down_edge = ring_edges_down.pop(0)
+            if up_edge is None and down_edge is None:
+                # run out, so we're done
+                break
+            if up_edge is None:
+                # got a down and no up
+                ring_edges.append(down_edge)
+                down_edge = None
+                continue
+            if down_edge is None:
+                # got an up edge and no down edge
+                ring_edges.append(up_edge)
+                up_edge = None
+                continue
+            # got both, add lowest y one
+            if up_edge[EDGE_Y] < down_edge[EDGE_Y]:
+                # up is earlier than down, add that
+                ring_edges.append(up_edge)
+                up_edge = None
+                continue
+            if down_edge[EDGE_Y] < up_edge[EDGE_Y]:
+                # down is earlier than up, add that
+                ring_edges.append(down_edge)
+                down_edge = None
+                continue
+            # both the same,put them both in (ideal matcher will pick the best one)
+            # this can happen 'cos they are in different x segments (different bit positions)
+            ring_edges.append(down_edge)
+            down_edge = None
+            ring_edges.append(up_edge)
+            up_edge = None
+
+        if len(ring_edges) == 0:
+            return None, 'found no ring edges'
+
+        # we've now found at least one edge but usually we will find more (ideally 7)
+        # the nominal ring width is image height divided by number of rings in that height
+        # but this can be vary slightly across our image due to distortion effects
+        # this distortion is assumed to have limits that prevents the distortion exceeding a certain threshold
+        # for each edge detected we do a 'best fit' of the other edges to our expectation
+        # the best fit is the most edges that are within the threshold of our expectation
+        # those edges then become the reference points for determining all the ring edges
 
         # build vectors of ideal and actual edges for every edge we found
         for edge in ring_edges:
