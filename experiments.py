@@ -1836,6 +1836,7 @@ class Scan:
         max_x, max_y = target.size()
 
         if direction == self.TOP_DOWN:
+            context = 'bit'
             x_inc = 0
             y_inc = +1
             probe_range = max_y - 1
@@ -1844,6 +1845,7 @@ class Scan:
             if span_limit is None:
                 span_limit = max_y
         elif direction == self.BOTTOM_UP:
+            context = 'bit'
             x_inc = 0
             y_inc = -1
             probe_range = max_y - 1
@@ -1852,6 +1854,7 @@ class Scan:
             if span_limit is None:
                 span_limit = max_y
         elif direction == self.LEFT_TO_RIGHT:
+            context = 'ring'
             x_inc = +1
             y_inc = 0
             probe_range = max_x - 1
@@ -1860,6 +1863,7 @@ class Scan:
             if span_limit is None:
                 span_limit = max_y
         elif direction == self.RIGHT_TO_LEFT:
+            context = 'ring'
             x_inc = -1
             y_inc = 0
             probe_range = max_x - 1
@@ -1870,10 +1874,10 @@ class Scan:
         else:
             raise Exception('illegal direction: {}'.format(direction))
 
-        start = best
         edge = [self.EdgePoint(best, first, last)]
         xy = [x, y]
         best_xy = [0, 0]
+        start = best
         for _ in range(probe_range):
             xy[0] = (xy[0] + x_inc) % max_x
             xy[1] += y_inc
@@ -1886,6 +1890,9 @@ class Scan:
             elif math.fabs(start - best) > span_limit:
                 # span reached its limit, stop here
                 # this is limiting how far the edge can drift away from horizontal or vertical
+                if self.show_log:
+                    self._log('truncating wandering {} edge spanning {} ({}..{}) at {},{}, limit is {}'.
+                              format(context, math.fabs(start - best), start, best, best_xy[0], best_xy[1], span_limit))
                 break
             else:
                 edge.append(self.EdgePoint(best, first, last))
@@ -2314,8 +2321,8 @@ class Scan:
             # looking for ring edges
             context = 'ring'
             max_length = max_x
-            min_length = int(max((max_x / self.size) * self.min_ring_edge_length, 1))
-            span_limit = int(max((max_y / self.NUM_RINGS) * self.ring_edge_span_limit, 1))
+            min_length = int(max((max_x / self.size) * self.min_ring_edge_length, 2))
+            span_limit = int(max((max_y / self.NUM_RINGS) * self.ring_edge_span_limit, 2))
             down = self.LEFT_TO_RIGHT
             up = self.RIGHT_TO_LEFT
             scan_coord = 1
@@ -2325,8 +2332,8 @@ class Scan:
             # looking for bit edges
             context = 'bit'
             max_length = max_y
-            min_length = int(max((max_y / self.NUM_RINGS) * self.min_bit_edge_length, 1))
-            span_limit = int(max((max_x / self.size) * self.bit_edge_span_limit, 1))
+            min_length = int(max((max_y / self.NUM_RINGS) * self.min_bit_edge_length, 2))
+            span_limit = int(max((max_x / self.size) * self.bit_edge_span_limit, 2))
             down = self.TOP_DOWN
             up = self.BOTTOM_UP
             scan_coord = 0
@@ -2429,16 +2436,20 @@ class Scan:
             a single vector for returning to the caller, an empty vector is returned if no edges found,
             """
 
+        max_x, max_y = target.size()
+
         if direction == self.TOP_DOWN:
             # looking for ring edges in y
+            context = 'ring'
             x_order = 0
             y_order = 1
-            context = 'ring'
+            span_limit = int(max((max_y / self.NUM_RINGS) * self.ring_edge_span_limit, 2))
         elif direction == self.LEFT_TO_RIGHT:
             # looking for bit edges in x
+            context = 'bit'
             x_order = 1
             y_order = 0
-            context = 'bit'
+            span_limit = int(max((max_x / self.size) * self.bit_edge_span_limit, 2))
         else:
             raise Exception('illegal direction {}'.format(direction))
 
@@ -2505,12 +2516,12 @@ class Scan:
             # if they overlap keep the 'best', if that is the one we are holding then replace end of list
             # else just ignore the one we are holding
             # the one we are holding is referred to as 'this' and the one already there as 'that'
-            # we know 'that' is <= 'this', thus an overlap occurs if end 'that' >= start 'this'
-            start_this_span = this_edge.position - (this_edge.span / 2)
-            end_this_span = start_this_span + this_edge.span
-            start_that_span = that_edge.position - (that_edge.span / 2)
-            end_that_span = start_that_span + that_edge.span
-            if end_that_span < start_this_span:
+            # for the purposes here an 'overlap' is a position +/- N of another
+            # we know 'that' is <= 'this', thus an overlap occurs if position 'that' + N > position 'this'
+            if that_edge.position + span_limit > this_edge.position:
+                # got an 'overlap', pick best to keep
+                pass
+            else:
                 # no overlap, add it
                 edges.append(this_edge)
                 continue
