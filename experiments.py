@@ -9,7 +9,7 @@ import traceback
 import copy
 
 """ coding scheme
-    
+
     This coding scheme is intended to be easy to detect and robust against noise, distortion and luminance artifacts.
     The code is designed for use as competitor numbers in club level fell races, as such the number range
     is limited to between 101 and 999 inclusive, i.e. always a 3 digit number and max 899 competitors.
@@ -18,8 +18,9 @@ import copy
         a solid circular centre of 'white' with a radius 2R,
         surrounded by a solid ring of 'black' and width R,
         surrounded by 3 concentric data rings of width R and divided into N (typically 14..16) equal segments,
+        surrounded by a segment timing ring of equally spaced one bits of radius R,
         enclosed by a solid 'black' ring of width R and, finally, a solid 'white' ring of radius R. 
-    Total radius is 8R.
+    Total radius is 9R.
     The radial segments include 3 data rings, which are used as a triple redundant data bit copy, the middle
     data ring is inverted (to spectrum spread the luminance).
     Segments around the ring provide for N bits. Each ring is skewed clockwise by n bits (a kind of interleave).
@@ -30,11 +31,17 @@ import copy
     The payload is N data-bits and an optional parity bit and may be constrained to have at least N bit transitions.
     The 3 payload rings are skewed round by n bits so that the alignment marker is not aligned radially. This 
     evens out the luminance levels and also has the effect of interleaving the redundant bits.
-    The central 'bullseye' candidates are detected using a 'blob detector' (via opencv).
+    The inner white-to-black and outer black-to-white ring transitions are used to synchronise ring boundaries
+    and calculate ring widths. White ring preceding the inner white-to-black transition is used to set the
+    white luminance threshold, the black ring preceding the outer black-to-white transition is used to set the
+    black luminance. These are divided into bit segments to allow for luminance variation around the rings.
+    The timing ring is used to synchronise bit boundaries and calculate bit widths at various angles. 
+    The central 'bullseye' candidates are detected using a 'blob detector' (via opencv), then the area around
+    that is polar to cartesian 'warped' (via opencv) into a rectangle. All further processing is on that rectangle.
     The bits are extracted by thresholding. There are two thresholds, min-grey and max-grey, which are determined
-    by dividing the luminance range detected across the radius for each bit by three.  The result of the
-    thresholding is 3 levels: black (0), white (1), grey (?).  The bit skew between rings is known, so all 
-    three rings can be decoded into these three levels. They are then decoded as follows:
+    by dividing the black to white luminance range for each bit by three. The result of the thresholding is 3
+    levels: black (0), white (1), grey (?).  The bit skew between rings is known, so all three rings can be 
+    decoded into these three levels. They are then decoded as follows:
         three 0's             = 0
         three 1's             = 1
         two zeroes + one grey = probably 0
@@ -57,7 +64,6 @@ import copy
 # ToDo: generate some more extreme examples to decode, and drop the old images with the timing ring
 # ToDo: don't look for ring edges, just probe for bit edges every 1/3rd nominal width between limits
 # ToDo: don't rely on ring boundaries, try every sample combo in decode_targets and pick result with least doubt
-# ToDo: re-introduce a timing ring but as bit edges not centres and one every N such that evenly spaced
 
 # colours
 max_luminance = 255
@@ -188,6 +194,8 @@ class Codes:
             is considered to be the outer ring, ring 3 the inner (just means unbuild() must be given
             rings in the same order), ring 2 is inverted (to spectrum spread the luminance).
             """
+        if num is None:
+            return None
         code_word = self.encode(num)
         if code_word is None:
             return None
@@ -448,20 +456,6 @@ class Codes:
         else:
             return self.GREY
 
-    def check(self, num):
-        """ check encode/decode is symmetric
-            returns None if check fails or the given number if OK
-            """
-        encoded = self.encode(num)
-        if encoded is None:
-            print('{} encodes as None'.format(num))
-            return None
-        decoded = self.decode(encoded)
-        if decoded != num:
-            print('{} encodes to {} but decodes as {}'.format(num, encoded, decoded))
-            return None
-        return num
-
 class Angle:
     """ a fast mapping (i.e. uses lookup tables and not math functions) from angles to co-ordinates
         and co-ordinates to angles for a circle, also for the arc length of an ellipsis
@@ -661,13 +655,14 @@ class Angle:
 
 class Ring:
     """ this class knows how to draw the marker and data rings according to its constructor parameters
+        see description above for the overall target structure
         """
 
     NUM_RINGS = 9                        # total rings in our complete code
 
-    def __init__(self, centre_x, centre_y, segments, width, frame, contrast, offset):
+    def __init__(self, centre_x, centre_y, bits, width, frame, contrast, offset):
         # set constant parameters
-        self.s = segments          # how many bits in each ring
+        self.s = bits              # how many bits in each ring
         self.w = width             # width of each ring in pixels
         self.c = frame             # where to draw it
         self.x = centre_x          # where the centre of the rings are
@@ -687,6 +682,9 @@ class Ring:
         scale = 2 * math.pi * width * self.NUM_RINGS
         self.angle_xy = Angle(scale).polarToCart
         self.edge = 360 / self.s   # the angle at which a bit edge occurs (NB: not an int)
+
+        # setup the timing ring stride
+        self.stride = self._timing_stride(self.s)
 
     def _pixel(self, x, y, colour):
         """ draw a pixel at x,y from the image centre with the given luminance and opaque,
@@ -715,6 +713,44 @@ class Ring:
             colour = mid_luminance
         self._pixel(x, y, colour)
 
+    def _timing_stride(self, bits):
+        """ calculate the timing ring 'stride' for the given number of bits and return it,
+            the 'stride' is the number of bits for each timing ring 1 bit,
+            the stride is calculated from the bits per ring such that they are evenly spaced around the ring,
+            when the bits per ring is even the stride is two (every other bit), when its odd its the smallest
+            integer divisor of the bits per ring that yields no remainder, the method used here is trial division
+            with all numbers from 3 to floor(sqrt(bits per ring))
+            """
+        if (bits & 1) == 0:
+            # its even
+            return 2
+        # its odd, do trial division
+        limit = int(math.floor(math.sqrt(bits)))
+        if limit < 3:
+            # there isn't a suitable number, return the whole size
+            return bits
+        for trial in range(3, limit + 1):
+            if (bits % trial) == 0:
+                # found one
+                return trial
+        # there isn't one
+        return bits
+
+    def border(self, ring_num):
+        """ draw a thin black border circle at the given ring_num,
+            this is only intended as a visual marker to stop people cutting into important parts of the code
+            """
+
+        radius = ring_num * self.w
+
+        scale = 2 * math.pi * radius  # step the angle such that 1 pixel per increment
+        for step in range(int(round(scale))):
+            a = (step / scale) * 360
+            x, y = self.angle_xy(a, radius)
+            x = int(round(x))
+            y = int(round(y))
+            self._point(x, y, 0)
+
     def _draw(self, radius, bits):
         """ draw a ring at radius of bits, a 1-bit is white, 0 black, if bits is None the bit timing ring is drawn
             the bits are drawn big-endian and clockwise , i.e. MSB first (0 degrees), LSB last (360 degrees)
@@ -731,19 +767,16 @@ class Ring:
                 x = int(round(x))
                 y = int(round(y))
                 if a > 0:
-                    if bits is None:
-                        segment = int(a / (self.edge / 2))     # want half-bit segments for the timing ring
-                    else:
-                        segment = int(a / self.edge)           # full-bit segments for data (or one colour) rings
+                    segment = int(a / self.edge)
                 else:
                     segment = 0
                 mask = msb >> segment
                 if bits is None:
-                    if (segment & 1) == 0:
-                        # white for even half bits
+                    if (segment % self.stride) == 0:
+                        # time for a 1 bit
                         self._point(x, y, 1)
                     else:
-                        # black for odd half bits
+                        # continue with a 0 bit
                         self._point(x, y, 0)
                 elif bits & mask:
                     self._point(x, y, 1)
@@ -848,10 +881,15 @@ class Ring:
         self.draw(4, rings[1])
         self.draw(5, rings[2])
 
+        # draw the timing ring
+        self.draw(6, None)
+
         # draw the outer black/white rings
-        self.draw(6,  0)
         self.draw(7,  0)
         self.draw(8, -1)
+
+        # draw a border
+        self.border(9)
 
         # draw a human readable label
         self.label(number)
@@ -1351,7 +1389,7 @@ class Transform:
 
 class Target:
     """ struct to hold info about a Scan detected target """
-    def __init__(self, centre_x, centre_y, blob_size, number, doubt, target_size):
+    def __init__(self, number, doubt, centre_x, centre_y, target_size, blob_size):
         self.centre_x    = centre_x
         self.centre_y    = centre_y
         self.blob_size   = blob_size
@@ -1381,7 +1419,7 @@ class Scan:
     DATA_RING_1 = 3
     DATA_RING_2 = 4
     DATA_RING_3 = 5
-    DODGY_BLACK = 6
+    TIMING_RING = 6
     OUTER_BLACK = 7            # used for black level detection
     OUTER_WHITE = 8
 
@@ -2433,7 +2471,7 @@ class Scan:
         ring_sizes[self.DATA_RING_1] = outer_ring_size
         ring_sizes[self.DATA_RING_2] = outer_ring_size
         ring_sizes[self.DATA_RING_3] = outer_ring_size
-        ring_sizes[self.DODGY_BLACK] = outer_ring_size
+        ring_sizes[self.TIMING_RING] = outer_ring_size
         ring_sizes[self.OUTER_BLACK] = outer_ring_size
         # outer edge is here
         ring_sizes[self.OUTER_WHITE] = outer_ring_size
@@ -2789,7 +2827,7 @@ class Scan:
         else:
             joined_edge.span = max(this_edge.span, that_edge.span)
 
-        # number of segments is the sum of those being joined minus one (the join itself is considered a single segment)
+        # overlap count is the sum of those being joined minus one (the join itself is considered a single edge)
         joined_edge.count = this_edge.count + that_edge.count - 1
 
         if int(round(joined_end)) == int(round(joined_start)):
@@ -3758,6 +3796,7 @@ class Scan:
             and when debugging an image with all rejects labelled with why rejected (None if not debugging)
             """
 
+        # find the blobs in the image
         blobs = self._find_blobs()
         if len(blobs) == 0:
             # no blobs here
@@ -3818,8 +3857,8 @@ class Scan:
 
             # get the bit edges
             probe_width = max(int(nominal_width * self.min_bit_edge_length), 1)
-            probe_min = int(nominal_width * 2) + probe_width
-            probe_max = int(max_y - nominal_width) - probe_width
+            probe_min = int(nominal_width * (self.TIMING_RING - 1)) + probe_width
+            probe_max = int(nominal_width * (self.TIMING_RING + 1)) + probe_width + 1
             probe_centres = [y for y in range(probe_min, probe_max, probe_width)]
             bits, rejected_bits = self._get_combined_edges(flattened, self.LEFT_TO_RIGHT, probe_centres)
             if len(bits) == 0:
@@ -3964,7 +4003,7 @@ class Scan:
             target_size *= target_scale                   # scale to size in original image
 
             # add this result
-            numbers.append(Target(self.centre_x, self.centre_y, blob_size, number, doubt, target_size))
+            numbers.append(Target(number, doubt, self.centre_x, self.centre_y, target_size, blob_size))
 
             if self.show_log:
                 number = numbers[-1]
@@ -4175,31 +4214,46 @@ class Test:
     EXIT_FAILED = 1            # did not find what was expected
     EXIT_EXCEPTION = 2         # an exception was raised
 
-    def __init__(self, code_bits, min_num, max_num, parity, edges, rings, contrast, offset):
-        self.code_bits = code_bits
+    def __init__(self, bits, min_num, max_num, parity, edges, rings, contrast, offset):
+        self.bits = bits
         self.min_num = min_num
-        self.c = Codes(self.code_bits, min_num, max_num, parity, edges)
+        self.c = Codes(bits, min_num, max_num, parity, edges)
         self.frame = Frame()
         self.max_num = min(max_num, self.c.num_limit)
         self.num_rings = rings
         self.contrast = contrast
         self.offset = offset
-        print('With {} code bits, {} parity, {} edges available numbers are {}..{}'.format(code_bits,
+        print('With {} code bits, {} parity, {} edges available numbers are {}..{}'.format(self.bits,
                                                                                            parity,
                                                                                            edges,
                                                                                            self.min_num,
                                                                                            self.max_num))
 
     def coding(self):
-        """ test for encode/decode symmetry """
+        """ test for encode uniqueness and encode/decode symmetry """
         print('')
         print('******************')
         print('Check encode/decode from {} to {}'.format(self.min_num, self.max_num))
+
+        def check(num):
+            """ check encode/decode is symmetric
+                returns None if check fails or the coded number if OK
+                """
+            encoded = self.c.encode(num)
+            if encoded is None:
+                print('{} encodes as None'.format(num))
+                return None
+            decoded = self.c.decode(encoded)
+            if decoded != num:
+                print('{} encodes to {} but decodes as {}'.format(num, encoded, decoded))
+                return None
+            return encoded
+
         try:
             good = 0
             bad = 0
             for n in range(self.min_num, self.max_num + 1):
-                if self.c.check(n) is None:
+                if check(n) is None:
                     bad += 1
                 else:
                     good += 1
@@ -4225,8 +4279,8 @@ class Test:
             good = 0
             fail = 0
             bad = 0
-            levels = [[None for _ in range(self.code_bits)] for _ in range(2)]
-            for bit in range(self.code_bits):
+            levels = [[None for _ in range(self.bits)] for _ in range(2)]
+            for bit in range(self.bits):
                 levels[0][bit] = white
                 levels[1][bit] = black
             for n in range(self.min_num, self.max_num + 1):
@@ -4234,7 +4288,7 @@ class Test:
                 samples = [[] for _ in range(len(rings))]
                 for ring in range(len(rings)):
                     word = rings[ring]
-                    for bit in range(self.code_bits):
+                    for bit in range(self.bits):
                         # NB: Being encoded big-endian (MSB first)
                         samples[ring].insert(0, max(min(colours[word & 1] + (random.randrange(0, noise+1) - (noise >> 1)),
                                                         max_luminance), min_luminance))
@@ -4264,20 +4318,21 @@ class Test:
             """
         max_ones = -1
         max_zeroes = -1
+        num_set = [self.min_num, self.max_num]
         max_ones_num = None
         max_zeroes_num = None
-        alt_ones_num = None
-        alt_zeroes_num = None
-        num_bits = self.code_bits - 4
+        num_bits = self.bits - 4
         all_bits_mask = (1 << num_bits) - 1
         alt_ones = 0x55555555 & all_bits_mask
         alt_zeroes = 0xAAAAAAAA & all_bits_mask
-        for num in range(self.min_num+1, self.max_num):
+        for num in range(self.min_num+1, self.max_num-1):
             code = self.c.encode(num)
+            if code is None:
+                continue
             if code == alt_ones:
-                alt_ones_num = num
+                num_set.append(num)
             if code == alt_zeroes:
-                alt_zeroes_num = num
+                num_set.append(num)
             ones = 0
             zeroes = 0
             for bit in range(num_bits):
@@ -4292,9 +4347,17 @@ class Test:
                 if zeroes > max_zeroes:
                     max_zeroes = zeroes
                     max_zeroes_num = num
-        num_set = [self.min_num, self.max_num, max_ones_num, max_zeroes_num, alt_ones_num, alt_zeroes_num]
-        for _ in range(size-6):
-            num_set.append(random.randrange(self.min_num+1, self.max_num-1))
+        if max_ones_num is not None:
+            num_set.append(max_ones_num)
+        if max_zeroes_num is not None:
+            num_set.append(max_zeroes_num)
+        while len(num_set) < size:
+            num = random.randrange(self.min_num+1, self.max_num-1)
+            if num in num_set:
+                # don't want a duplicate
+                continue
+            num_set.append(num)
+        num_set.sort()
         return num_set
 
     def code_words(self, numbers):
@@ -4302,11 +4365,14 @@ class Test:
         print('')
         print('******************')
         print('Check code-words (visual)')
-        bin = '{:0'+str(self.code_bits)+'b}'
+        bin = '{:0'+str(self.bits)+'b}'
         frm_ok = '{}('+bin+')=('+bin+', '+bin+', '+bin+')'
         frm_bad = '{}('+bin+')=(None)'
         try:
             for n in numbers:
+                if n is None:
+                    # this means a test code pattern is not available
+                    continue
                 rings = self.c.build(n)
                 if rings is None:
                     print(frm_bad.format(n, n))
@@ -4380,16 +4446,16 @@ class Test:
         print('******************************************')
 
     def rings(self, width):
-        """ draw angle test ring segments (visual) """
+        """ draw angle test rings (visual) """
         print('')
         print('******************')
         print('Draw an angle test ring (visual)')
         try:
-            self.frame.new(width * self.num_rings * 2, width * self.num_rings * 2, max_luminance)
+            self.frame.new(width * self.num_rings * 2, width * self.num_rings * 2, mid_luminance)
             x, y = self.frame.size()
-            ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.frame, self.contrast, self.offset)
+            ring = Ring(x >> 1, y >> 1, self.bits, width, self.frame, self.contrast, self.offset)
             ring.code(000, [0x5555, 0xAAAA, 0x5555])
-            self.frame.unload('{}-segment-angle-test'.format(self.code_bits))
+            self.frame.unload('test-angles')
         except:
             traceback.print_exc()
         print('******************')
@@ -4399,20 +4465,33 @@ class Test:
         print('')
         print('******************')
         print('Draw test codes (visual)')
+        self._remove_test_codes('test-code-')
         try:
             for n in numbers:
+                if n is None:
+                    # this means a test code pattern is not available
+                    continue
                 rings = self.c.build(n)
                 if rings is None:
                     print('{}: failed to generate the code rings'.format(n))
                 else:
-                    self.frame.new(width * self.num_rings * 2, width * self.num_rings * 2, max_luminance)
+                    self.frame.new(width * self.num_rings * 2, width * self.num_rings * 2, mid_luminance)
                     x, y = self.frame.size()
-                    ring = Ring(x >> 1, y >> 1, self.code_bits, width, self.frame, self.contrast, self.offset)
+                    ring = Ring(x >> 1, y >> 1, self.bits, width, self.frame, self.contrast, self.offset)
                     ring.code(n, rings)
-                    self.frame.unload('{}-segment-{}'.format(self.code_bits, n))
+                    self.frame.unload('test-code-{}'.format(n))
         except:
             traceback.print_exc()
         print('******************')
+
+    def scan_codes(self, angles, noisy=Scan.DEBUG_NONE):
+        """ find all the test codes and scan them """
+
+        filelist = glob.glob('test-code-*.*')
+        filelist.sort()
+        for f in filelist:
+            num = int(''.join([s for s in f if s.isdigit()]))
+            self.scan(angles, [num], f, noisy)
 
     def scan(self, angles, numbers, image, noisy=Scan.DEBUG_NONE):
         """ do a scan for the code set in image and expect the number given,
@@ -4515,6 +4594,16 @@ class Test:
         print('******************')
         return exit_code
 
+    def _remove_test_codes(self, pattern):
+        """ remove all the test code images with file names containing the given pattern
+            """
+        filelist = glob.glob('*{}*.*'.format(pattern))
+        for f in filelist:
+            try:
+                os.remove(f)
+            except:
+                print('Could not remove {}'.format(f))
+
     def _remove_derivatives(self, filename):
         """ remove all the diagnostic image derivatives of the given file name
             a derivative is that file name prefixed by '_', suffixed by anything with any file extension
@@ -4531,7 +4620,7 @@ class Test:
 # parameters
 min_num = 101                            # min number we want
 max_num = 999                            # max number we want (may not be achievable)
-code_bits = 15                           # number of bits in our code word
+bits = 15                                # number of bits in our code word
 parity = None                            # code word parity to apply (None, 0=even, 1=odd)
 edges = 4                                # how many bit transitions we want per code word
 rings = 9                                # how many rings are in our code
@@ -4544,10 +4633,10 @@ test_white = max_luminance - 64 #- 32
 test_noise = mid_luminance >> 1
 test_scan_angle_steps = 64
 test_debug_mode = Scan.DEBUG_IMAGE
-test_debug_mode = Scan.DEBUG_VERBOSE
+#test_debug_mode = Scan.DEBUG_VERBOSE
 
-test = Test(code_bits, min_num, max_num, parity, edges, rings, contrast, offset)
-test_num_set = test.test_set(6)
+test = Test(bits, min_num, max_num, parity, edges, rings, contrast, offset)
+test_num_set = test.test_set(10)
 
 #test.coding()
 #test.decoding(test_black, test_white, test_noise)
@@ -4556,16 +4645,12 @@ test_num_set = test.test_set(6)
 #test.rings(test_ring_width)
 #test.codes(test_num_set, test_ring_width)
 
-#test.scan(test_scan_angle_steps, [000], '15-segment-angle-test.png', test_debug_mode)
+test.scan(test_scan_angle_steps, [000], 'test-angles.png', test_debug_mode)
+test.scan_codes(test_scan_angle_steps, test_debug_mode)
+
 #test.scan(test_scan_angle_steps, [000], 'photo-angle-test-flat.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [000], 'photo-angle-test-curved-flat.jpg', test_debug_mode)
 
-#test.scan(test_scan_angle_steps, [101], '15-segment-101.png', test_debug_mode)
-#test.scan(test_scan_angle_steps, [102], '15-segment-102.png', test_debug_mode)
-#test.scan(test_scan_angle_steps, [365], '15-segment-365.png', test_debug_mode)
-#test.scan(test_scan_angle_steps, [640], '15-segment-640.png', test_debug_mode)
-#test.scan(test_scan_angle_steps, [658], '15-segment-658.png', test_debug_mode)
-#test.scan(test_scan_angle_steps, [828], '15-segment-828.png', test_debug_mode)
 #test.scan(test_scan_angle_steps, [101], 'photo-101.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [102], 'photo-102.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [365], 'photo-365.jpg', test_debug_mode)
@@ -4573,7 +4658,7 @@ test_num_set = test.test_set(6)
 #test.scan(test_scan_angle_steps, [658], 'photo-658.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [828], 'photo-828.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [102], 'photo-102-distant.jpg', test_debug_mode)
-test.scan(test_scan_angle_steps, [365], 'photo-365-oblique.jpg', test_debug_mode)
+#test.scan(test_scan_angle_steps, [365], 'photo-365-oblique.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [365], 'photo-365-blurred.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [658], 'photo-658-small.jpg', test_debug_mode)
 #test.scan(test_scan_angle_steps, [658], 'photo-658-crumbled-bright.jpg', test_debug_mode)
