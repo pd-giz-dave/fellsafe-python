@@ -57,6 +57,7 @@ import copy
 # ToDo: generate some more extreme examples to decode, and drop the old images with the timing ring
 # ToDo: don't look for ring edges, just probe for bit edges every 1/3rd nominal width between limits
 # ToDo: don't rely on ring boundaries, try every sample combo in decode_targets and pick result with least doubt
+# ToDo: re-introduce a timing ring but as bit edges not centres and one every N such that evenly spaced
 
 # colours
 max_luminance = 255
