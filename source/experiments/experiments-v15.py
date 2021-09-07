@@ -2018,7 +2018,7 @@ class Scan:
                 # can't get here!
                 raise Exception('unreachable code reached!')
 
-    def __init__(self, code, frame, angles=360, video_mode=VIDEO_FHD, debug=DEBUG_NONE, log=None):
+    def __init__(self, code, frame, angles=360, video_mode=VIDEO_FHD, debug=DEBUG_NONE):
         """ code is the code instance defining the code structure,
             frame is the frame instance containing the image to be scanned,
             angles is the angular resolution to use
@@ -2080,15 +2080,7 @@ class Scan:
         self.centre_y = 0
 
         # logging context
-        self._log_file = None
-        self._log_folder = log
         self._log_prefix = '{}: Blob'.format(self.original.source)
-
-    def __del__(self):
-        """ close our log file """
-        if self._log_file is not None:
-            self._log_file.close()
-            self._log_file = None
 
     def _find_blobs(self):
         """ find the target blobs in our image,
@@ -4486,12 +4478,6 @@ class Scan:
             message = '{} {:.0f}x{:.0f}y - {}'.format(self._log_prefix, centre_x, centre_y, message)
         else:
             message = '{} {}'.format(self._log_prefix, message)
-        if self._log_folder:
-            # we're also logging to a file
-            if self._log_file is None:
-                filename, ext = os.path.splitext(self.original.source)
-                self._log_file = open('{}/{}.log'.format(self._log_folder, filename), 'w')
-            self._log_file.write('{}\n'.format(message))
         if fatal:
             raise Exception(message)
         else:
@@ -4524,12 +4510,12 @@ class Scan:
         if centre_y is None:
             centre_y = self.centre_y
         if centre_x > 0 and centre_y > 0:
-            name = '{:.0f}x{:.0f}y-'.format(centre_x, centre_y)
+            name = '{:.0f}x{:.0f}y-{}'.format(centre_x, centre_y, suffix)
         else:
-            name = ''
+            name = suffix
 
         # save the image
-        filename = image.unload(self.original.source, '{}{}'.format(name, suffix))
+        filename = image.unload(self.original.source, name)
         if self.show_log:
             self._log('{}: image saved as: {}'.format(suffix, filename), centre_x, centre_y)
 
@@ -4676,7 +4662,7 @@ class Test:
     EXIT_FAILED = 1            # did not find what was expected
     EXIT_EXCEPTION = 2         # an exception was raised
 
-    def __init__(self, log=None):
+    def __init__(self):
         self.min_num = None
         self.coder = None
         self.max_num = None
@@ -4689,39 +4675,24 @@ class Test:
         self.contrast = None
         self.offset = None
         self.debug_mode = None
-        self.log_folder = log
-        self.log_file = None
-        self._log('')
-        self._log('******************')
-        self._log('Rings: {}, Total bits: {}, Marker bits: {}'.format(self.num_rings, self.bits, self.marker_bits))
-
-    def __del__(self):
-        if self.log_file is not None:
-            self.log_file.close()
-            self.log_file = None
-
-    def _log(self, message):
-        """ print a log message and maybe write it to a file too """
-        print(message)
-        if self.log_folder is not None:
-            if self.log_file is None:
-                self.log_file = open('{}/test.log'.format(self.log_folder), 'w')
-            self.log_file.write('{}\n'.format(message))
+        print('')
+        print('******************')
+        print('Rings: {}, Total bits: {}, Marker bits: {}'.format(self.num_rings, self.bits, self.marker_bits))
 
     def encoder(self, min_num, max_num, parity, edges):
         """ create the coder/decoder and set its parameters """
         self.min_num = min_num
         self.coder = Codes(min_num, max_num, parity, edges)
         self.max_num = min(max_num, self.coder.num_limit)
-        self._log('Coder: {} parity, {} edges, available numbers are {}..{}'.
-                  format(parity, edges, min_num, self.max_num))
+        print('Coder: {} parity, {} edges, available numbers are {}..{}'.
+              format(parity, edges, min_num, self.max_num))
 
     def folders(self, read=None, write=None):
         """ create an image frame and set the folders to read input media and write output media """
         self.frame = Frame(read, write)
-        self._log('Frame: media in: {}, media out: {}'.format(read, write))
+        print('Frame: media in: {}, media out: {}'.format(read, write))
 
-    def options(self, angles=None, mode=None, contrast=None, offset=None, debug=None, log=None):
+    def options(self, angles=None, mode=None, contrast=None, offset=None, debug=None):
         """ set processing options, only given options are changed """
         if angles is not None:
             self.angles = angles
@@ -4733,16 +4704,14 @@ class Test:
             self.offset = offset
         if debug is not None:
             self.debug_mode = debug
-        if log is not None:
-            self.log_folder = log
-        self._log('Options: angles {}, video mode {}, contrast {}, offset {}, debug {}'.
-                  format(self.angles, self.video_mode, self.contrast, self.offset, self.debug_mode))
+        print('Options: angles {}, video mode {}, contrast {}, offset {}, debug {}'.
+              format(self.angles, self.video_mode, self.contrast, self.offset, self.debug_mode))
 
     def coding(self):
         """ test for encode uniqueness and encode/decode symmetry """
-        self._log('')
-        self._log('******************')
-        self._log('Check encode/decode from {} to {}'.format(self.min_num, self.max_num))
+        print('')
+        print('******************')
+        print('Check encode/decode from {} to {}'.format(self.min_num, self.max_num))
 
         def check(num):
             """ check encode/decode is symmetric
@@ -4750,11 +4719,11 @@ class Test:
                 """
             encoded = self.coder.encode(num)
             if encoded is None:
-                self._log('{} encodes as None'.format(num))
+                print('{} encodes as None'.format(num))
                 return None
             decoded = self.coder.decode(encoded)
             if decoded != num:
-                self._log('{} encodes to {} but decodes as {}'.format(num, encoded, decoded))
+                print('{} encodes to {} but decodes as {}'.format(num, encoded, decoded))
                 return None
             return encoded
 
@@ -4766,10 +4735,10 @@ class Test:
                     bad += 1
                 else:
                     good += 1
-            self._log('{} good, {} bad'.format(good, bad))
+            print('{} good, {} bad'.format(good, bad))
         except:
             traceback.print_exc()
-        self._log('******************')
+        print('******************')
 
     def decoding(self, black=MIN_LUMINANCE, white=MAX_LUMINANCE, noise=0):
         """ test build/unbuild symmetry
@@ -4779,9 +4748,9 @@ class Test:
             subtracted, this is intended to test the 'maybe' logic, the grey thresholds
             are set such that the middle 1/3rd of the luminance range is considered 'grey'
             """
-        self._log('')
-        self._log('******************')
-        self._log('Check build/unbuild from {} to {} with black={}, white={} and noise {}'.
+        print('')
+        print('******************')
+        print('Check build/unbuild from {} to {} with black={}, white={} and noise {}'.
               format(self.min_num, self.max_num, black, white, noise))
         try:
             colours = [black, white]
@@ -4807,17 +4776,17 @@ class Test:
                     # failed to decode
                     fail += 1
                     if noise == 0:
-                        self._log('    FAIL: {:03}-->{}, build={}, bits={}, samples={}'.format(n, m, rings, bits, samples))
+                        print('    FAIL: {:03}-->{}, build={}, bits={}, samples={}'.format(n, m, rings, bits, samples))
                 elif m != n:
                     # incorrect decode
                     bad += 1
-                    self._log('****BAD!: {:03}-->{} , build={}, bits={}, samples={}'.format(n, m, rings, bits, samples))
+                    print('****BAD!: {:03}-->{} , build={}, bits={}, samples={}'.format(n, m, rings, bits, samples))
                 else:
                     good += 1
-            self._log('{} good, {} bad, {} fail'.format(good, bad, fail))
+            print('{} good, {} bad, {} fail'.format(good, bad, fail))
         except:
             traceback.print_exc()
-        self._log('******************')
+        print('******************')
 
     def test_set(self, size):
         """ make a set of test codes,
@@ -4871,9 +4840,9 @@ class Test:
 
     def code_words(self, numbers):
         """ test code-word rotation with given set plus the extremes (visual) """
-        self._log('')
-        self._log('******************')
-        self._log('Check code-words (visual)')
+        print('')
+        print('******************')
+        print('Check code-words (visual)')
         bin = '{:0'+str(self.bits)+'b}'
         frm_ok = '{}('+bin+')=('+bin+', '+bin+', '+bin+')'
         frm_bad = '{}('+bin+')=(None)'
@@ -4884,20 +4853,20 @@ class Test:
                     continue
                 rings = self.coder.build(n)
                 if rings is None:
-                    self._log(frm_bad.format(n, n))
+                    print(frm_bad.format(n, n))
                 else:
-                    self._log(frm_ok.format(n, n, rings[0], rings[1], rings[2]))
+                    print(frm_ok.format(n, n, rings[0], rings[1], rings[2]))
         except:
             traceback.print_exc()
-        self._log('******************')
+        print('******************')
 
     def circles(self):
         """ test accuracy of co-ordinate conversions - polar to/from cartesian,
             also check polarToCart goes clockwise
             """
-        self._log('')
-        self._log('******************************************')
-        self._log('Check co-ordinate conversions (radius 100)')
+        print('')
+        print('******************************************')
+        print('Check co-ordinate conversions (radius 100)')
         # check clockwise direction by checking sign and relative size as we go round each octant
         #          angle, x-sign, y-sign, xy-sign
         octants = [[ 45, +1, -1, -1],
@@ -4945,20 +4914,20 @@ class Test:
                 aerr = math.fabs(ca - a)
                 if rerr > 0.01 or aerr > 0.3 or rotation_err is not None:
                     bad += 1
-                    self._log('{:.3f} degrees --> {:.3f}x, {:.3f}y --> {:.3f} degrees, {:.3f} radius: aerr={:.3f}, rerr={:.3f}, rotation={}'.
+                    print('{:.3f} degrees --> {:.3f}x, {:.3f}y --> {:.3f} degrees, {:.3f} radius: aerr={:.3f}, rerr={:.3f}, rotation={}'.
                           format(a, cx, cy, ca, cr, aerr, rerr, rotation_err))
                 else:
                     good += 1
-            self._log('{} good, {} bad'.format(good, bad))
+            print('{} good, {} bad'.format(good, bad))
         except:
             traceback.print_exc()
-        self._log('******************************************')
+        print('******************************************')
 
     def rings(self, folder, width):
         """ draw angle test rings in given folder (visual) """
-        self._log('')
-        self._log('******************')
-        self._log('Draw an angle test ring (visual)')
+        print('')
+        print('******************')
+        print('Draw an angle test ring (visual)')
         self.folders(write=folder)
         try:
             image_width = width * (self.num_rings + 1) * 2
@@ -4969,13 +4938,13 @@ class Test:
             self.frame.unload('test-code-000')
         except:
             traceback.print_exc()
-        self._log('******************')
+        print('******************')
 
     def codes(self, folder, numbers, width):
         """ draw test codes for the given test_set in the given folder """
-        self._log('')
-        self._log('******************')
-        self._log('Draw test codes (visual)')
+        print('')
+        print('******************')
+        print('Draw test codes (visual)')
         self.folders(write=folder)
         self._remove_test_codes(folder, 'test-code-')
         try:
@@ -4985,7 +4954,7 @@ class Test:
                     continue
                 rings = self.coder.build(n)
                 if rings is None:
-                    self._log('{}: failed to generate the code rings'.format(n))
+                    print('{}: failed to generate the code rings'.format(n))
                 else:
                     image_width = width * (self.num_rings + 1) * 2
                     self.frame.new(image_width, image_width, MID_LUMINANCE)
@@ -4995,7 +4964,7 @@ class Test:
                     self.frame.unload('test-code-{}'.format(n))
         except:
             traceback.print_exc()
-        self._log('******************')
+        print('******************')
 
     def scan_codes(self, folder):
         """ find all the test codes in the given folder and scan them,
@@ -5035,17 +5004,16 @@ class Test:
         """ do a scan for the code set in image in the given folder and expect the number given,
             returns an exit code to indicate what happened
             """
-        self._log('')
-        self._log('******************')
-        self._log('Scan image {} for codes {}'.format(image, numbers))
+        print('')
+        print('******************')
+        print('Scan image {} for codes {}'.format(image, numbers))
         debug_folder = 'debug_images'
         self.folders(read=folder, write=debug_folder)
         exit_code = self.EXIT_OK         # be optimistic
         try:
             self._remove_derivatives(debug_folder, image)
             self.frame.load(image)
-            scan = Scan(self.coder, self.frame, self.angles, self.video_mode,
-                        debug=self.debug_mode, log=self.log_folder)
+            scan = Scan(self.coder, self.frame, self.angles, self.video_mode, debug=self.debug_mode)
             results = scan.decode_targets()
             # analyse the results
             found = [False for _ in range(len(numbers))]
@@ -5093,7 +5061,7 @@ class Test:
                             # don't want these in this loop
                             continue
                         # got what we are looking for
-                        self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
+                        print('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
                               format(num, expected, centre_x, centre_y, size, doubt))
                         continue
                     if expected is not None:
@@ -5106,7 +5074,7 @@ class Test:
                             continue
                         else:
                             prefix = '**** '
-                        self._log('{}Failed to find {} ({})'.format(prefix, num, expected))
+                        print('{}Failed to find {} ({})'.format(prefix, num, expected))
                         exit_code = self.EXIT_FAILED
                         continue
                     if True:
@@ -5125,16 +5093,14 @@ class Test:
                             else:
                                 actual_code = '{} ({:b})'.format(num, actual_code)
                                 prefix = '**** UNEXPECTED **** ---> '
-                        self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
+                        print('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
                               format(prefix, num, actual_code, centre_x, centre_y, size, doubt))
                         continue
         except:
             traceback.print_exc()
             exit_code = self.EXIT_EXCEPTION
-        finally:
-            del(scan)                    # needed to close log files
-        self._log('Scan image {} for codes {}'.format(image, numbers))
-        self._log('******************')
+        print('Scan image {} for codes {}'.format(image, numbers))
+        print('******************')
         return exit_code
 
     def _remove_test_codes(self, folder, pattern):
@@ -5145,7 +5111,7 @@ class Test:
             try:
                 os.remove(f)
             except:
-                self._log('Could not remove {}'.format(f))
+                print('Could not remove {}'.format(f))
 
     def _remove_derivatives(self, folder, filename):
         """ remove all the diagnostic image derivatives of the given file name in the given folder,
@@ -5157,7 +5123,7 @@ class Test:
             try:
                 os.remove(f)
             except:
-                self._log('Could not remove {}'.format(f))
+                print('Could not remove {}'.format(f))
 
 
 def verify():
@@ -5172,7 +5138,6 @@ def verify():
 
     test_codes_folder = 'codes'
     test_media_folder = 'media'
-    test_log_folder = 'logs'
     test_ring_width = 32
     test_black = MIN_LUMINANCE + 64  # + 32
     test_white = MAX_LUMINANCE - 64  # - 32
@@ -5184,7 +5149,7 @@ def verify():
     test_debug_mode = Scan.DEBUG_VERBOSE
 
     # setup test params
-    test = Test(log=test_log_folder)
+    test = Test()
     test.encoder(min_num, max_num, parity, edges)
     test.options(angles=test_scan_angle_steps,
                  mode=test_scan_video_mode,
@@ -5228,7 +5193,6 @@ def verify():
     #test.scan(test_media_folder, [658], 'photo-658-crumbled-dark.jpg')
     #test.scan(test_media_folder, [101, 102, 365, 640, 658, 828], 'photo-all-test-set.jpg')
 
-    del(test)                            # needed to close the log file(s)
 
 if __name__ == "__main__":
     verify()
