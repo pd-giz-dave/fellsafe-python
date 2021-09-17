@@ -12,27 +12,28 @@ import traceback
     This coding scheme is intended to be easy to detect and robust against noise, distortion and luminance artifacts.
     The code is designed for use as competitor numbers in club level fell races, as such the number range
     is limited to between 101 and 999 inclusive, i.e. always a 3 digit number and max 899 competitors.
-    The actual implementation limit may be less depending on coding constraints chosen.
+    The actual implementation limit may be less depending on coding constraints chosen (parity, edges, code size).
     The code is circular (so orientation does not matter) and consists of:
         a solid circular centre of 'white' with a radius 2R,
         surrounded by a solid ring of 'black' and width 1R,
         surrounded by 3 concentric data rings of width R and divided into N equal segments,
+        surrounded by a timing ring with edges such that there is an edge for all N segments of width R,
         enclosed by a solid 'black' ring of width 1R and, 
         finally, a solid 'white' ring of radius R. 
-    Total radius is 8R.
+    Total radius is 9R.
     The 3 data rings are used as a triple redundant data bit copy, each consists of a start sync pattern (so bit
     0 can be distinguished in any sequence of bits), and payload bits, each ring is bit shifted right by N bits,
-    and the code word also is constrained to have N bit transitions, N must be the number of bits in the code
-    word divided by number of data rings, this guarantees there is a bit transition for every bit across the
-    data rings, this in turn ensures bit boundaries can always be detected for every bit, each data ring may be
-    XOR'd with a bit pattern (used to invert the middle ring).
+    (so that an image distortion does not hit the same bit in all copies), N is chosen such that the rings are
+    evenly spaced around the circle, each data ring may be XOR'd with a bit pattern (used to invert the middle ring).
     A one-bit is white (i.e. high luminance) and a zero-bit is black (i.e. low luminance).
     The start sync pattern is 0110 (4 bits). The remaining bits are the payload (big-endian) and must not contain
     the start sync pattern and also must not end in 011 and must not start with 110 (else they look like 0110 when
     adjacent to the alignment marker).
+    The payload is N data-bits and an optional parity bit and may be constrained to have at least N bit transitions.
     The inner white-to-black and outer black-to-white ring transitions are used detect the limits of the code in
     the image. The white ring preceding the inner white-to-black transition is used to set the white luminance
     threshold, the black ring succeeding the inner white-to-black transition is used to set the black luminance. 
+    These are divided into bit segments to allow for luminance variation around the rings.
     The central 'bullseye' candidates are detected using a 'blob detector' (via opencv), then the area around
     that is polar to cartesian 'warped' (via opencv) into a rectangle. All further processing is on that rectangle.
     
@@ -62,6 +63,7 @@ OPAQUE = MAX_LUMINANCE
     cv2's cor-ordinates are backwards from our pov, the 'x' co-ordinate is vertical and 'y' horizontal.
     The logic here uses 'x' horizontally and 'y' vertically, swapping as required when dealing with cv2
     """
+
 
 def vstr(vector):
     """ given an array of numbers return a string representing them """
@@ -108,30 +110,22 @@ class Codec:
     MAYBE_ONE = 5
     MAYBE_ONE_OR_ZERO = 6
 
-    def __init__(self, min_num, max_num):
+    def __init__(self, min_num, max_num, parity, edges):
         """ create the valid code set for a number in the range min_num..max_num for code_size
             a valid code is one where there are no embedded start/stop bits bits but contains at least one 1 bit,
             we create two arrays - one maps a number to its code and the other maps a code to its number.
             """
 
-        # setup, and verify, code characteristics
-        self.skew = int(Codec.BITS / 3)  # ring to ring skew in bits
-        self.code_bits = Codec.BITS - Codec.MARKER_BITS  # code word bits is what's left
-        if self.code_bits < 1:
-            raise Exception('BITS must be greater than {}, {} is not'.format(Codec.MARKER_BITS, Codec.BITS))
-
-        self.marker = 6 << self.code_bits  # 0110 in MS 4 bits of code
-        self.code_range = 1 << self.code_bits  # max code range before constraints applied
-        self.bit_mask = (1 << Codec.BITS) - 1  # mask to isolate all bits
-
-        # generate the bit limited version of our XOR masks
-        self.inner_mask = Codec.INNER_MASK & self.bit_mask
-        self.middle_mask = Codec.MIDDLE_MASK & self.bit_mask
-        self.outer_mask = Codec.OUTER_MASK & self.bit_mask
-
         # params
         self.min_num = min_num  # minimum number we want to be able to encode
         self.max_num = max_num  # maximum number we want to be able to encode
+        self.parity = parity  # None, 0 (even) or 1 (odd)
+        self.edges = edges  # how many bit transitions we want per code
+        self.skew = max(int(self.BITS / 3), 1)  # ring to ring skew in bits
+        self.code_bits = self.BITS - self.MARKER_BITS  # code word bits is what's left
+        self.marker = 6 << self.code_bits  # 0110 in MS 4 bits of code
+        self.code_range = 1 << self.code_bits  # max code range before constraints applied
+        self.bit_mask = (1 << self.BITS) - 1  # mask to isolate all bits
 
         # build code tables
         self.codes = [None for _ in range(self.code_range)]  # set all invalid initially
@@ -152,9 +146,18 @@ class Codec:
                         break
                     check >>= 1  # NB: introduces a leading 0 (required, see above)
                 if check is not None:
-                    # got a potential code, check if it meets our edges requirement
-                    if self.missing(code) == 0:
-                        # got enough edges, give it to next number
+                    # got a potential code, check its parity
+                    one_bits = 0
+                    edges = 0
+                    check = code
+                    for bit in range(self.code_bits):
+                        if check & 1 == 1:
+                            one_bits += 1
+                        if (check & 3 == 1) or (check & 3 == 2):
+                            edges += 1
+                        check >>= 1
+                    if (self.parity is None or ((one_bits & 1) == self.parity)) and (edges >= self.edges):
+                        # got a good parity and edges, give it to next number
                         num += 1
                         if num > self.max_num:
                             # found enough, don't use this one
@@ -163,6 +166,11 @@ class Codec:
                             self.codes[code] = num  # decode code as num
                             self.nums[num] = code  # encode num as code
         self.num_limit = num
+
+        # generate the bit limited version of our XOR masks
+        self.inner_mask = Codec.INNER_MASK & self.bit_mask
+        self.middle_mask = Codec.MIDDLE_MASK & self.bit_mask
+        self.outer_mask = Codec.OUTER_MASK & self.bit_mask
 
     def encode(self, num):
         """ get the code for the given number, returns None if number not valid """
@@ -197,7 +205,7 @@ class Codec:
         # for each shift the LS n bits must be moved to the MS n bits
         code_word &= (self.code_range - 1)  # make sure code is in range
         mask = (1 << self.skew) - 1  # mask to isolate the LS n bits
-        shift = (Codec.BITS - (self.skew * 3)) + (self.skew * 2)
+        shift = (self.BITS - (self.skew * 3)) + (self.skew * 2)
         # apply the XOR masks to each ring
         r1 = (self.marker + code_word) ^ (self.inner_mask & self.bit_mask)
         r2 = (self.marker + code_word) ^ (self.middle_mask & self.bit_mask)
@@ -209,44 +217,16 @@ class Codec:
         # return result
         return r1, r2, r3
 
-    def missing(self, code_word):
-        """ given a code word return a mask of missing edges when its 3 rings are constructed,
-            this is used to filter out code_words that do not meet our bit transition requirements
-            """
-
-        msb = 1 << (Codec.BITS - 1)  # 1 in the MSB of a code word
-        all_ones = (1 << Codec.BITS) - 1  # all 1's in the relevant bits
-        rings = self.rings(code_word)
-        edges = 0
-        for ring in rings:
-            mask1 = msb
-            mask2 = mask1 >> 1
-            while mask1 != 0:
-                if mask2 == 0:
-                    # doing last bit, wrap to the first
-                    mask2 = msb
-                if ((ring & mask1 == 0) and (ring & mask2) == 0) or (
-                        (ring & mask1 != 0) and (ring & mask2) != 0):
-                    # there is no edge here, leave edges mask as is
-                    pass
-                else:
-                    # there is an edge here
-                    edges |= mask2
-                mask1 >>= 1
-                mask2 >>= 1
-        missing = (edges ^ all_ones)
-        return missing
-
     def ring_bits_pos(self, n):
         """ given a bit index return a list of the indices of all the same bits from each ring """
         n1 = n
-        n2 = int((n1 + self.skew) % Codec.BITS)
-        n3 = int((n2 + self.skew) % Codec.BITS)
+        n2 = int((n1 + self.skew) % self.BITS)
+        n3 = int((n2 + self.skew) % self.BITS)
         return [n1, n2, n3]
 
     def marker_bits_pos(self, n):
         """ given a bit index return a list of the indices of all the bits that would make a marker """
-        return [int(pos % Codec.BITS) for pos in range(n, n + Codec.MARKER_BITS)]
+        return [int(pos % self.BITS) for pos in range(n, n + self.MARKER_BITS)]
 
     def unbuild(self, samples, levels):
         """ given an array of 3 code-word rings with random alignment return the encoded number or None,
@@ -257,10 +237,10 @@ class Codec:
             """
 
         # step 1 - decode the 3 rings bits
-        bits = [None for _ in range(Codec.BITS)]
-        for n in range(Codec.BITS):
+        bits = [None for _ in range(self.BITS)]
+        for n in range(self.BITS):
             rings = self.ring_bits_pos(n)
-            bit_mask = 1 << (Codec.BITS - (n + 1))
+            bit_mask = 1 << (self.BITS - (n + 1))
             s1_mask = (self.inner_mask & bit_mask)
             s2_mask = (self.middle_mask & bit_mask)
             s3_mask = (self.outer_mask & bit_mask)
@@ -278,7 +258,7 @@ class Codec:
 
         # step 2 - find the alignment marker candidates
         maybe_at = [[] for _ in range(3 * 4)]  # 0..max maybe possibilities (3 per digit, 4 digits), a list for each
-        for n in range(Codec.BITS):
+        for n in range(self.BITS):
             marker = self.is_marker(n, bits)
             if marker is None:
                 continue  # no marker at this bit position, look at next
@@ -407,7 +387,7 @@ class Codec:
             this is effectively rotating the bits array and removing the marker bits such
             that the result is an array with [0] the first data bit and [n] the last
             """
-        return [bits[int(pos % Codec.BITS)] for pos in range(n + Codec.MARKER_BITS, n + Codec.BITS)]
+        return [bits[int(pos % self.BITS)] for pos in range(n + self.MARKER_BITS, n + self.BITS)]
 
     def extract_word(self, n, bits):
         """ given an array of bit values with the alignment marker at position n
@@ -734,7 +714,7 @@ class Ring:
         see description above for the overall target structure
         """
 
-    NUM_RINGS = 8  # total rings in our complete code
+    NUM_RINGS = 9  # total rings in our complete code
 
     def __init__(self, centre_x, centre_y, width, frame, contrast, offset):
         # set constant parameters
@@ -758,6 +738,10 @@ class Ring:
         scale = 2 * math.pi * width * Ring.NUM_RINGS
         self.angle_xy = Angle(scale).polarToCart
         self.edge = 360 / self.b  # the angle at which a bit edge occurs (NB: not an int)
+
+        # stuff needed for the timing ring
+        self.msb = 1 << (self.b - 1)  # the MSB of a code word
+        self.bit_mask = self.msb - 1  # mask to isolate the code word bits
 
     def _pixel(self, x, y, colour):
         """ draw a pixel at x,y from the image centre with the given luminance and opaque,
@@ -785,6 +769,73 @@ class Ring:
         else:
             colour = MID_LUMINANCE
         self._pixel(x, y, colour)
+
+    def timing(self, rings):
+        """ given a set of data rings build the timing ring for them, the timing is only present to
+            ensure there is a bit transition for every bit in the code, this aids the target decode
+            as it ensures every ring boundary and every bit boundary is represented
+        """
+
+        # find out where the missing transitions are
+        edges = 0
+        for ring in rings:
+            mask1 = self.msb
+            mask2 = mask1 >> 1
+            while mask1 != 0:
+                if mask2 == 0:
+                    # doing last bit, wrap to the first
+                    mask2 = self.msb
+                if ((ring & mask1 == 0) and (ring & mask2) == 0) or ((ring & mask1 != 0) and (ring & mask2) != 0):
+                    # there is no edge here, leave gasp bit as is
+                    pass
+                else:
+                    # there is an edge here
+                    edges |= mask2
+                mask1 >>= 1
+                mask2 >>= 1
+            last_ring = ring
+
+        # for every 0 bit in edges we need a bit transition
+        # we do that by inserting a 0 if the preceding bit was 1 or 1 if it was 0
+
+        bits = 0
+        mask1 = self.msb
+        mask2 = 1
+        while mask1 != 0:
+            if mask2 == 0:
+                # we've wrapped
+                mask2 = self.msb
+            prev = bits & mask2
+            if edges & mask1 == 0:
+                # need an edge here, set this bit different to the preceding bit
+                if prev == 0:
+                    # was 0, so put a 1 in
+                    bits |= mask1
+                else:
+                    # was 1, so need a 0, already there
+                    pass
+            elif mask1 == 1:
+                # this is the last bit and we do not need an edge, but we must not compromise the initial edge
+                # so set this the opposite of the first bit
+                if bits & self.msb == 0:
+                    # first bit was 0, so set a 1 here
+                    bits |= mask1
+                else:
+                    # first bit was 1, so set a 0 here (already there)
+                    pass
+            else:
+                # no edge here, set this bit opposite to the same bit in the last ring
+                if last_ring & mask1 == 0:
+                    # was 0 in last ring, so set a 1 here
+                    bits |= mask1
+                else:
+                    # was 1 in last ring, so set a 0 here, already there
+                    pass
+            mask1 >>= 1
+            mask2 >>= 1
+
+        # return the required timing bits
+        return bits
 
     def border(self, ring_num):
         """ draw a thin black/white broken border at the given ring_num,
@@ -914,7 +965,6 @@ class Ring:
                     x += point_size
                 x -= digit_size
                 y += point_size
-        # ToDo: draw a 1 pixel line 1 pixel under the number
 
     def code(self, number, rings):
         """ draw the complete code for the given number and code-words
@@ -931,6 +981,10 @@ class Ring:
         for ring in rings:
             self.draw(draw_at, ring, 1.0)
             draw_at += 1.0
+
+        # draw the timing ring
+        self.draw(draw_at, self.timing(rings), 1.0)
+        draw_at += 1.0
 
         # draw the outer black/white rings
         self.draw(draw_at, 0, 1.0)
@@ -1118,18 +1172,6 @@ class Transform:
         width, height = source.size()
         if height >= new_height:
             # its already big enough
-            return source
-        target = source.instance()
-        target.set(cv2.resize(source.get(), (width, new_height), interpolation=cv2.INTER_LINEAR))
-        return target
-
-    def downheight(self, source, new_height):
-        """ downsize the given image such that its height (y) is at least that given,
-            the width is preserved,
-            """
-        width, height = source.size()
-        if height <= new_height:
-            # its already small enough
             return source
         target = source.instance()
         target.set(cv2.resize(source.get(), (width, new_height), interpolation=cv2.INTER_LINEAR))
@@ -1515,7 +1557,7 @@ class Scan:
     MIN_EDGE_THRESHOLD = int(MAX_LUMINANCE * 0.1)
 
     # minimum luminance relative to the mean for an edge pixel to qualify as an edge when following it
-    EDGE_THRESHOLD = 1.0
+    EDGE_THRESHOLD = 1.2
 
     # direction sensitive tuning params (each is a tuple of ring(0),bit(1) tuning options)
 
@@ -1577,13 +1619,14 @@ class Scan:
     # ring numbers of flattened image
     INNER_POINT = 0  # central bullseye
     INNER_WHITE = 1  # used for white level detection
-    INNER_BLACK = 2  # used for black level detection
+    INNER_BLACK = 2  # used for black level detection (option 1)
     DATA_RING_1 = 3
     DATA_RING_2 = 4
     DATA_RING_3 = 5
-    OUTER_BLACK = 6
-    OUTER_WHITE = 7
-    OUTER_LIMIT = 8  # end of target area
+    TIMING_RING = 6
+    OUTER_BLACK = 7  # used for black level detection (option 2)
+    OUTER_WHITE = 8
+    OUTER_LIMIT = 9  # end of target area
 
     class Stepper:
         """ this class is used to step through an image in a direction,
@@ -2015,7 +2058,7 @@ class Scan:
         self.angle_steps = angles  # angular resolution when 'projecting'
         self.video_mode = video_mode  # actually the downsized image height
         self.original = frame
-        self.decoder = code  # class to decode what we find
+        self.coder = code  # class to decode what we find
 
         # stretch angle steps such that each bit width is an odd number of pixels (so there is always a middle)
         self.angle_steps = max(self.angle_steps, Scan.NUM_BITS * Scan.MIN_PIXELS_PER_BIT)
@@ -2342,33 +2385,26 @@ class Scan:
     def _find_extent(self, target, probe_centre):
         """ find the inner and outer edges of the given target,
             probe_centre is the x co-ordinate to scan at,
-            the inner edge is the first white to black transition that goes most of the way around,
-            the outer edge is the first black to white transition that goes most of the way around,
-            returns two vectors, y co-ord for every angle of the edges, or a reason if one or both
-            not found
+            the inner edge is the first white to black transition that goes all the way around,
+            the outer edge is the first black to white transition that goes all the way around,
+            returns two vectors, y co-ord for every angle of the edges, or a reason if one or both not found
             """
-
-        # we look for the inner edge first as that suffers less distortion when the number has been
-        # screwed up by the wearer (a technique used by runners to minimise wind flapping and noise)
-        # then we look for the outer edge, but tolerate it it being broken up into pieces, due to creasing
-        # and the fact that its near the physical edge of the paper the outer edge can get severely distorted.
 
         max_x, _ = target.size()
 
-        # look for the inner edge (white to black)
-        w2b_edges, threshold = self._get_transitions(target, 0, 1, True)
-        ring_inner_edge, best_inner_partial = self._find_radius_edge(w2b_edges, probe_centre,
-                                                                     Scan.TOP_DOWN, threshold, 'radius-inner')
-
-        if ring_inner_edge is None:
-            # don't bother looking for the outer if there is no inner
-            ring_outer_edge = None
-            b2w_edges = None
-        else:
-            # look for the outer edge (black to white)
-            b2w_edges, threshold = self._get_transitions(target, 0, 1, False)
-            ring_outer_edge, best_outer_partial = self._find_radius_edge(b2w_edges, probe_centre,
+        # look for the outer edge
+        b2w_edges, threshold = self._get_transitions(target, 0, 1, False)
+        ring_outer_edge, best_outer_partial = self._find_radius_edge(b2w_edges, probe_centre,
                                                                      Scan.BOTTOM_UP, threshold, 'radius-outer')
+        if ring_outer_edge is None:
+            # don't bother looking for the inner if there is no outer
+            ring_inner_edge = None
+            w2b_edges = None
+        else:
+            # look for the inner edge
+            w2b_edges, threshold = self._get_transitions(target, 0, 1, True)
+            ring_inner_edge, best_inner_partial = self._find_radius_edge(w2b_edges, probe_centre,
+                                                                         Scan.TOP_DOWN, threshold, 'radius-inner')
         if ring_outer_edge is None:
             reason = 'no outer edge'
         elif ring_inner_edge is None:
@@ -2432,7 +2468,6 @@ class Scan:
             target = edges  # when not showing images, pixel destruction is irrelevant
 
         best_edge = None
-        best_edge_extension = None
 
         stepper = Scan.Stepper(direction, max_x, max_y, step=self.radius_kernel_width)
         stepper.reset(x=probe_centre)
@@ -2441,13 +2476,22 @@ class Scan:
             if xy is None:
                 break
             edge = self._follow_edge(target, xy[0], xy[1], context, Scan.LEFT_TO_RIGHT, threshold, clear=False)
+            if len(edge) == 0:
+                # nothing here, move on
+                # NB: if nothing going forwards there will also be nothing going backwards
+                continue
             if len(edge) == max_x:
                 # found an edge that goes all the way, so that's it
                 if self.logging:
                     self._log('{}: full radius edge length: {} from {},{:.2f} (as 0 backwards + {} forwards)'.
                               format(prefix, len(edge), probe_centre, edge[0].midpoint, len(edge)))
                 edge_points = [edge[x].midpoint for x in range(max_x)]
-                return self._smooth_edge(edge_points, True), None
+                return self._smooth_edge(edge_points, True), (None, None)
+
+            if best_edge is None:
+                best_edge = edge
+            elif len(edge) > len(best_edge):
+                best_edge = edge
 
             # forward edge too short, see if a backward edge will do it
             # ToDo: is this necessary anymore? its a crude attempt to cope with forking edges,
@@ -2457,45 +2501,31 @@ class Scan:
             #       by interpolating across the ends?
             edge_extension = self._follow_edge(target, xy[0], xy[1], context, Scan.RIGHT_TO_LEFT, threshold,
                                                clear=False)
+            if len(edge_extension) == 0:
+                if self.logging:
+                    self._log('{}: partial radius edge length: {} from 0,{:.2f} (as 0 backwards + {} forwards)'.
+                              format(prefix, len(edge), edge[0].midpoint, len(edge)))
+                continue
             if len(edge_extension) == max_x:
-                # the extension went all the way around, use that - but put it the right way round
+                # the extension went all the way around, use that
                 if self.logging:
                     self._log('{}: full radius edge length: {} from 0,{:.2f} (as {} backwards + 0 forwards)'.
                               format(prefix, len(edge_extension), edge_extension[0].midpoint, len(edge_extension)))
-                edge_extension.reverse()
                 edge_points = [edge_extension[x].midpoint for x in range(max_x)]
-                return self._smooth_edge(edge_points, True), None
+                return self._smooth_edge(edge_points, True)
 
-            if best_edge is None:
-                best_edge = edge
-                best_edge_extension = edge_extension
-            elif len(edge) + len(edge_extension) > len(best_edge) + len(best_edge_extension):
-                best_edge = edge
-                best_edge_extension = edge_extension
-
-            # backward edge too short as well, continue looking
+            # backward edge too short as well, give up
             if self.logging:
-                if len(edge) + len(edge_extension) > 0:
-                    self._log('{}: partial radius edge length: {} from {},{:.2f} (as {} backwards + {} forwards)'.
-                              format(prefix, len(edge) + len(edge_extension), probe_centre, edge[0].midpoint,
-                                     len(edge_extension), len(edge)))
+                self._log('{}: partial radius edge length: {} from {},{:.2f} (as {} backwards + {} forwards)'.
+                          format(prefix, len(edge) + len(edge_extension), probe_centre, edge[0].midpoint,
+                                 len(edge_extension), len(edge)))
             continue
 
-        # we did not find one that went all the way on its own, check the partials
+        # we did not find one
         if best_edge is not None:
-            # join the two partials - the extension is backwards and they overlap on the first pixel
-            best_edge = best_edge[1:]  # remove the overlap
-            best_edge_extension.reverse()
-            best_edge += best_edge_extension
             best_edge_points = [best_edge[x].midpoint for x in range(len(best_edge))]
-            if len(best_edge) == max_x:
-                # this means forwards and backwards went right round but there is a vertical gap between the ends,
-                # consider that good enough
-                return self._smooth_edge(best_edge_points, True), None
-            # return the best we found as a diagnostic aid
             return None, best_edge_points
         else:
-            # found nothing at all
             return None, None
 
     def _midpoint(self, start_at, end_at):
@@ -2955,6 +2985,7 @@ class Scan:
         ring_sizes[self.DATA_RING_1] = outer_ring_size
         ring_sizes[self.DATA_RING_2] = outer_ring_size
         ring_sizes[self.DATA_RING_3] = outer_ring_size
+        ring_sizes[self.TIMING_RING] = outer_ring_size
         ring_sizes[self.OUTER_BLACK] = outer_ring_size
         # outer edge is here
         ring_sizes[self.OUTER_WHITE] = outer_ring_size
@@ -2963,8 +2994,8 @@ class Scan:
 
     def _get_start(self, edge, max_length):
         """ work out the edge start from a consideration of the .where co-ordinates in the given edge,
-            the edge must be a vector of EdgePoints,
-            max_length is the length limit and is used to detect wrapping,
+            that edge must be a vector of EdgePoints,
+            max_length is the length limit and used to detect wrapping,
             returns the start co-ordinate or -1 if the edge is empty
             """
 
@@ -3012,6 +3043,28 @@ class Scan:
         #     however that does not affect the logic here as they are only used to calculate widths and they
         #     are valid wrapping or not.
 
+        # set edge start
+        down_start = self._get_start(down_edge, max_length)
+        up_start = self._get_start(up_edge, max_length)
+        if down_start < 0 and up_start < 0:
+            # both edges are empty
+            return []
+        elif down_start < 0:
+            # down empty, up not
+            edge_start = up_start
+        elif up_start < 0:
+            # up empty, down not
+            edge_start = down_start
+        elif up_start + len(up_edge) > max_length:
+            # up edge wraps, they can't both wrap, so up must be the start
+            edge_start = up_start
+        elif down_start + len(down_edge) > max_length:
+            # down edge wraps, they can't both wrap, so down must be the start
+            edge_start = down_start
+        else:
+            # got both and neither wrap, so start is the min of down and up
+            edge_start = min(down_start, up_start)
+
         max_edge = 0
         min_edge = 31 * 1024  # arbitrary large number bigger than any legit co-ord
         max_bright_edge = max_edge
@@ -3038,34 +3091,9 @@ class Scan:
         for edge_point in down_edge:
             update_edge(edge_point)
 
-        # determine start
-        if edge_length == 0:
-            # nothing here
-            return []
-        elif edge_length == max_length:
+        if edge_length == max_length:
             # consider max length edges to always start at 0
             edge_start = 0
-        else:
-            # set edge start (NB: we know at least one is not empty to get here, 'cos the edge length is non-zero)
-            down_start = self._get_start(down_edge, max_length)
-            up_start = self._get_start(up_edge, max_length)
-            if down_start < 0:
-                # down empty, up not
-                edge_start = up_start
-            elif up_start < 0:
-                # up empty, down not
-                edge_start = down_start
-            else:
-                # got both, we know they abutt, so the combined start is the one whose end
-                # is the start of the other taking wrapping into consideration
-                if self._measure_gap(up_start + len(up_edge), down_start, 1, max_length) == 0:
-                    # up joins down, so up must be the start
-                    edge_start = up_start
-                elif self._measure_gap(down_start + len(down_edge), up_start, 1, max_length) == 0:
-                    # down joins up, so down must be the start
-                    edge_start = down_start
-                else:
-                    raise Exception('up_edge does not abutt down_edge')
 
         # set midpoint
         midpoint = midpoints / edge_length
@@ -3325,9 +3353,6 @@ class Scan:
         # merge near neighbour edges, this can happen if we get a 'saddle' in a very blurred edge
         merged_edges = self._merge_neighbours(context, edges_up_down)
 
-        # re-sort as merge_neighbours may have moved thing around
-        merged_edges.sort(key=lambda e: (int(round(e.position)), int(round(e.start)), int(round(e.length))))
-
         return merged_edges
 
     def _merge_neighbours(self, context, edges):
@@ -3351,7 +3376,6 @@ class Scan:
                 if self.logging:
                     self._log('{}: ignoring near full edge {}, limit is {}'.
                               format(context.prefix, this_edge, max_useful_length))
-                done_edges.append(this)        # stop it being seen again
                 continue
             # ToDo: is there a wrapping issue here?
             for that in range(this + 1, len(edges)):
@@ -3364,7 +3388,6 @@ class Scan:
                     if self.logging:
                         self._log('{}: ignoring near full edge {}, limit is {}'.
                                   format(context.prefix, that_edge, max_useful_length))
-                    done_edges.append(that)  # stop it being seen again
                     continue
                 if self._measure_gap(this_edge.position, that_edge.position, min_width, max_width) != 0:
                     # gone far enough to have found all our close neighbours
@@ -3617,6 +3640,7 @@ class Scan:
             probe_width = ring_context.min_length
             ring_width = ring_context.nominal_width
             min_length = ring_context.min_length
+            max_useful_length = ring_context.length_limit
             inner_position = int(math.floor(ring_width * Scan.INNER_BLACK))
             outer_position = int(math.ceil(ring_width * Scan.OUTER_WHITE))
 
@@ -3823,17 +3847,14 @@ class Scan:
             image = target.image
             slices = target.slices
 
-            if self.save_images:
-                grid = image
-
             # what we have now is a list of potential targets, each target consists of a list of bit edges
             # (a slice) and the ring edges within those edges, the first edge is the inner ring and the last
             # the outer, in between are the black-to-white and white-to-black transitions, we know the first
             # is black (the inner black ring) and the last is black (the outer black ring), in between there
-            # are 3 data rings, the nominal width of each ring is outer edge minus inner edge over five, the
-            # nominal ring before the inner is used to get the white level, and the nominal ring before the
-            # outer edge is used to get the black level, we sample the centre of the 3 data rings for decoding,
-            # to get here we know we have found the correct number of bit edges
+            # are 4 rings, 3 data rings and a timing ring, the nominal width of each ring is outer edge minus
+            # inner edge over six, the nominal ring before the inner is used to get the white level, and the
+            # nominal ring before the outer edge is used to get the black level, we sample the centre of the
+            # 3 data rings for decoding, to get here we know we have found the correct number of bit edges
 
             # get all the samples
             white_level = []
@@ -3841,34 +3862,29 @@ class Scan:
             data_ring_1 = []
             data_ring_2 = []
             data_ring_3 = []
-            if self.logging:
-                self._log('samples:')
-            for bit in range(len(slices)):
-                slice = slices[bit]
-                sample_boxes = self._sample_boxes(slice)
-                white_level.append(self._get_sample(image, sample_boxes[0]))
-                black_level.append(self._get_sample(image, sample_boxes[1]))
-                data_ring_1.append(self._get_sample(image, sample_boxes[2]))
-                data_ring_2.append(self._get_sample(image, sample_boxes[3]))
-                data_ring_3.append(self._get_sample(image, sample_boxes[4]))
-                if self.logging:
-                    self._log('    bit {}:'.format(bit))
-                    self._log('        white_cell: at {} = {}'.format(vstr(sample_boxes[0]), white_level[-1]))
-                    self._log('        black_cell: at {} = {}'.format(vstr(sample_boxes[1]), black_level[-1]))
-                    self._log('        data_cell_1: at {} = {}'.format(vstr(sample_boxes[2]), data_ring_1[-1]))
-                    self._log('        data_cell_2: at {} = {}'.format(vstr(sample_boxes[3]), data_ring_2[-1]))
-                    self._log('        data_cell_3: at {} = {}'.format(vstr(sample_boxes[4]), data_ring_3[-1]))
-                if self.save_images:
-                    # draw sampling points on our flattened image
-                    boxes = [sample_boxes[0], sample_boxes[1], sample_boxes[2], sample_boxes[3], sample_boxes[4]]
-                    grid = self._draw_boxes(grid, boxes)
-
-            if self.save_images:
-                self._unload(grid, 'samples')
+            for slice in slices:
+                slice_start = slice[0][0]      # x co-ord
+                slice_width = slice[0][1]      # pixels
+                slice_centre = slice_start + (slice_width / 2)
+                slice_edges = slice[1]         # list of y co-ords (at least 2 - inner and outer edge)
+                ring_width = (slice_edges[-1] - slice_edges[0]) / (Scan.NUM_RINGS - 3)
+                white_cell = (slice_edges[0] - ring_width) + (ring_width / 2)
+                black_cell = (slice_edges[-1] - ring_width) + (ring_width / 2)
+                # ToDo: use the slice edges to get a better ring position estimate
+                data_cell_1 = (slice_edges[0] + ring_width) + (ring_width / 2)
+                data_cell_2 = data_cell_1 + ring_width
+                data_cell_3 = data_cell_2 + ring_width
+                sample_height = ring_width * Scan.SAMPLE_HEIGHT_FACTOR
+                sample_width = slice_width * Scan.SAMPLE_WIDTH_FACTOR
+                white_level.append(self._get_sample(image, slice_centre, white_cell, sample_width, sample_height))
+                black_level.append(self._get_sample(image, slice_centre, black_cell, sample_width, sample_height))
+                data_ring_1.append(self._get_sample(image, slice_centre, data_cell_1, sample_width, sample_height))
+                data_ring_2.append(self._get_sample(image, slice_centre, data_cell_2, sample_width, sample_height))
+                data_ring_3.append(self._get_sample(image, slice_centre, data_cell_3, sample_width, sample_height))
 
             # decode our bits
-            number, doubt, bits = self.decoder.unbuild([data_ring_1, data_ring_2, data_ring_3],
-                                                       [white_level, black_level])
+            number, doubt, bits = self.coder.unbuild([data_ring_1, data_ring_2, data_ring_3],
+                                                     [white_level, black_level])
 
             # calculate the target size relative to the original image (as the largest outer edge)
             target_size = 0
@@ -3909,65 +3925,24 @@ class Scan:
 
         return numbers
 
-    def _sample_boxes(self, slice):
-        """ given a bit slice return the sample boxes for the luminance levels and the data bits,
-            slice is one the slices as returned from _find_cells,
-            returns a tuple of start_x, start_y, stop_x, stop_y for each of the white_ring, black_ring
-            and data_ring_1/2/3, in a form that can be passed to _get_sample
-            """
-
-        def sample_box(start_x, start_y, width, height):
-            """ given the whole cell start and size return the sample area within it """
-            sample_height = height * Scan.SAMPLE_HEIGHT_FACTOR
-            sample_width = width * Scan.SAMPLE_WIDTH_FACTOR
-            height_margin = (height - sample_height) / 2
-            width_margin = (width - sample_width) / 2
-            box_start_x = start_x + width_margin
-            box_start_y = start_y + height_margin
-            box_stop_x = box_start_x + sample_width
-            box_stop_y = box_start_y + sample_height
-            return math.ceil(box_start_x), math.ceil(box_start_y), math.floor(box_stop_x), math.floor(box_stop_y)
-
-        # ToDo: use the slice edges to get a better ring position and width estimate,
-        #       the issue is there are missing edges in slice when two consecutive rings have the same luminance level
-        #       this version is just a crude pro-rata on expected ring positions
-
-        slice_start = slice[0][0]  # x co-ord
-        slice_width = slice[0][1]  # pixels
-
-        slice_edges = slice[1]  # list of y co-ords (at least 2 - inner and outer edge)
-        ring_width = (slice_edges[-1] - slice_edges[0]) / (Scan.NUM_RINGS - 3)  # dead-reckoning width
-
-        # we use the ring before the inner edge for the white levels and the at the inner edge for the black levels
-        # the inner edge is always known as its the first after the initial blob detection
-        white_cell = slice_edges[0] - ring_width     # one ring back for the white
-        black_cell = slice_edges[0]                  # inner edge for the black
-
-        data_cell_1 = slice_edges[0] + ring_width    # first ring after the inner black ring (dead-reckoning)
-        data_cell_2 = data_cell_1 + ring_width       # ..then the next
-        data_cell_3 = data_cell_2 + ring_width       # ....then the next
-
-        white_box = sample_box(slice_start, white_cell, slice_width, ring_width)
-        black_box = sample_box(slice_start, black_cell, slice_width, ring_width)
-        data_box_1 = sample_box(slice_start, data_cell_1, slice_width, ring_width)
-        data_box_2 = sample_box(slice_start, data_cell_2, slice_width, ring_width)
-        data_box_3 = sample_box(slice_start, data_cell_3, slice_width, ring_width)
-
-        return white_box, black_box, data_box_1, data_box_2, data_box_3
-
-    def _get_sample(self, target, box):
-        """ given an image and a box, get the luminance sample within that box,
-            the box is the top left x,y and the bottom right x,y co-ordinates within the image,
+    def _get_sample(self, target, centre_x, centre_y, sample_width, sample_height):
+        """ given a perspective corrected image, a bit number, data and a box, get the luminance sample,
+            centre_x specifies the centre of the sample box in the x direction in the target,
+            centre_y specifies the centre of the sample box in the y direction in the target,
+            sample_width and sample_height is the width (x) and height (y) of the area to sample,
             returns the average luminance level in the sample box
             """
 
         max_x, _ = target.size()
 
-        start_x = box[0]
-        stop_x = box[2]
+        x_width = sample_width / 2
+        y_width = sample_height / 2
 
-        start_y = box[1]
-        stop_y = box[3]
+        start_x = math.ceil(centre_x - x_width)
+        stop_x = math.floor(centre_x + x_width)
+
+        start_y = math.ceil(centre_y - y_width)
+        stop_y = math.floor(centre_y + y_width)
 
         luminance_accumulator = 0
         pixels_found = 0
@@ -4092,16 +4067,15 @@ class Scan:
 
     def _draw_boxes(self, source, boxes, colour=(0, 0, 255)):
         """ draw boxes in the image of the given colour,
-            boxes is an array of rectangle corners: top-left and bottom-right as (x,y,x,y) tuples,
-            the boxes represent what is being enclosed and we draw a border *inside* that enclosure
+            boxes is an array of rectangle corners: top-left and bottom-right as (x,y,x,y) tuples
             """
         objects = []
         for box in boxes:
             if box is not None:
                 objects.append({"colour": colour,
                                 "type": self.transform.RECTANGLE,
-                                "start": (box[0]+1, box[1]+1),      # we're only drawing a border and we want that
-                                "end": (box[2]-1, box[3]-1)})       # border to be inside the rectangle
+                                "start": (box[0], box[1]),
+                                "end": (box[2], box[3])})
         target = self.transform.copy(source)
         return self.transform.annotate(target, objects)
 
@@ -4220,13 +4194,13 @@ class Test:
                 self.log_file = open('{}/test.log'.format(self.log_folder), 'w')
             self.log_file.write('{}\n'.format(message))
 
-    def encoder(self, min_num, max_num):
+    def encoder(self, min_num, max_num, parity, edges):
         """ create the coder/decoder and set its parameters """
         self.min_num = min_num
-        self.codec = Codec(min_num, max_num)
+        self.codec = Codec(min_num, max_num, parity, edges)
         self.max_num = min(max_num, self.codec.num_limit)
-        self._log('Codec: {} bits, available numbers are {}..{}'.
-                  format(Codec.BITS, min_num, self.max_num))
+        self._log('Coder: {} parity, {} edges, available numbers are {}..{}'.
+                  format(parity, edges, min_num, self.max_num))
 
     def folders(self, read=None, write=None):
         """ create an image frame and set the folders to read input media and write output media """
@@ -4276,51 +4250,6 @@ class Test:
             for n in range(self.min_num, self.max_num + 1):
                 if check(n) is None:
                     bad += 1
-                else:
-                    good += 1
-            self._log('{} good, {} bad'.format(good, bad))
-        except:
-            traceback.print_exc()
-        self._log('******************')
-
-    def edges(self):
-        """ check the code rings meet the edge transitions for every bit requirement """
-        self._log('')
-        self._log('******************')
-        self._log('Check code ring edge requirements met for {} to {}'.
-                  format(self.min_num, self.max_num))
-        try:
-            msb = 1 << (Codec.BITS - 1)        # 1 in the MSB of a code word
-            all_ones = (1 << Codec.BITS) - 1   # all 1's in the relevant bits
-            good = 0
-            bad = 0
-            bin = '{:0' + str(self.bits) + 'b}'
-            frm_bad = '{}(' + bin + ')=(' + bin + ', ' + bin + ', ' + bin + ') missing edges=' + bin
-            for n in range(self.min_num, self.max_num + 1):
-                rings = self.codec.build(n)
-                # find out if there are any the missing transitions
-                edges = 0
-                for ring in rings:
-                    mask1 = msb
-                    mask2 = mask1 >> 1
-                    while mask1 != 0:
-                        if mask2 == 0:
-                            # doing last bit, wrap to the first
-                            mask2 = msb
-                        if ((ring & mask1 == 0) and (ring & mask2) == 0) or (
-                                (ring & mask1 != 0) and (ring & mask2) != 0):
-                            # there is no edge here, leave edges mask as is
-                            pass
-                        else:
-                            # there is an edge here
-                            edges |= mask2
-                        mask1 >>= 1
-                        mask2 >>= 1
-                # for there to be no missing edges, edges must not contain any 0's
-                if (edges ^ all_ones) != 0:
-                    # there are missing edges
-                    bad += 1
-                    self._log(frm_bad.format(n, n, rings[0], rings[1], rings[2], edges ^ all_ones))
                 else:
                     good += 1
             self._log('{} good, {} bad'.format(good, bad))
@@ -4605,107 +4534,101 @@ class Test:
         self._log('')
         self._log('******************')
         self._log('Scan image {} for codes {}'.format(image, numbers))
-        if not os.path.isfile('{}/{}'.format(folder, image)):
-            self._log('Image {} does not exist in {}'.format(image, folder))
-            exit_code = self.EXIT_FAILED
-        else:
-            debug_folder = 'debug_images'
-            self.folders(read=folder, write=debug_folder)
-            exit_code = self.EXIT_OK  # be optimistic
-            scan = None
-            try:
-                self._remove_derivatives(debug_folder, image)
-                self.frame.load(image)
-                scan = Scan(self.codec, self.frame, self.angles, self.video_mode,
-                            debug=self.debug_mode, log=self.log_folder)
-                results = scan.decode_targets()
-                # analyse the results
-                found = [False for _ in range(len(numbers))]
-                analysis = []
-                for result in results:
-                    centre_x = result.centre_x
-                    centre_y = result.centre_y
-                    num = result.number
-                    doubt = result.doubt
-                    size = result.target_size
-                    expected = None
-                    found_num = None
-                    for n in range(len(numbers)):
-                        if numbers[n] == num:
-                            # found another expected number
-                            found[n] = True
-                            found_num = num
-                            expected = '{:b}'.format(self.codec.encode(num))
-                            break
-                    analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected])
-                # create dummy result for those not found
+        debug_folder = 'debug_images'
+        self.folders(read=folder, write=debug_folder)
+        exit_code = self.EXIT_OK  # be optimistic
+        try:
+            self._remove_derivatives(debug_folder, image)
+            self.frame.load(image)
+            scan = Scan(self.codec, self.frame, self.angles, self.video_mode,
+                        debug=self.debug_mode, log=self.log_folder)
+            results = scan.decode_targets()
+            # analyse the results
+            found = [False for _ in range(len(numbers))]
+            analysis = []
+            for result in results:
+                centre_x = result.centre_x
+                centre_y = result.centre_y
+                num = result.number
+                doubt = result.doubt
+                size = result.target_size
+                expected = None
+                found_num = None
                 for n in range(len(numbers)):
-                    if not found[n]:
-                        # this one is missing
-                        num = numbers[n]
-                        expected = self.codec.encode(num)
-                        if expected is None:
-                            # not a legal code
-                            expected = 'not-valid'
+                    if numbers[n] == num:
+                        # found another expected number
+                        found[n] = True
+                        found_num = num
+                        expected = '{:b}'.format(self.codec.encode(num))
+                        break
+                analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected])
+            # create dummy result for those not found
+            for n in range(len(numbers)):
+                if not found[n]:
+                    # this one is missing
+                    num = numbers[n]
+                    expected = self.codec.encode(num)
+                    if expected is None:
+                        # not a legal code
+                        expected = 'not-valid'
+                    else:
+                        expected = '{:b}'.format(expected)
+                    analysis.append([None, 0, 0, numbers[n], 0, 0, expected])
+            # print the results
+            for loop in range(3):
+                for result in analysis:
+                    found = result[0]
+                    centre_x = result[1]
+                    centre_y = result[2]
+                    num = result[3]
+                    doubt = result[4]
+                    size = result[5]
+                    expected = result[6]
+                    if found is not None:
+                        if loop != 0:
+                            # don't want these in this loop
+                            continue
+                        # got what we are looking for
+                        self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
+                                  format(num, expected, centre_x, centre_y, size, doubt))
+                        continue
+                    if expected is not None:
+                        if loop != 1:
+                            # don't want these in this loop
+                            continue
+                        # did not get what we are looking for
+                        if num == 0:
+                            # this is used when we don't expect to find anything
+                            continue
                         else:
-                            expected = '{:b}'.format(expected)
-                        analysis.append([None, 0, 0, numbers[n], 0, 0, expected])
-                # print the results
-                for loop in range(3):
-                    for result in analysis:
-                        found = result[0]
-                        centre_x = result[1]
-                        centre_y = result[2]
-                        num = result[3]
-                        doubt = result[4]
-                        size = result[5]
-                        expected = result[6]
-                        if found is not None:
-                            if loop != 0:
-                                # don't want these in this loop
-                                continue
-                            # got what we are looking for
-                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
-                                      format(num, expected, centre_x, centre_y, size, doubt))
+                            prefix = '**** '
+                        self._log('{}Failed to find {} ({})'.format(prefix, num, expected))
+                        exit_code = self.EXIT_FAILED
+                        continue
+                    if True:
+                        if loop != 2:
+                            # don't want these in this loop
                             continue
-                        if expected is not None:
-                            if loop != 1:
-                                # don't want these in this loop
-                                continue
-                            # did not get what we are looking for
-                            if num == 0:
-                                # this is used when we don't expect to find anything
-                                continue
-                            else:
-                                prefix = '**** '
-                            self._log('{}Failed to find {} ({})'.format(prefix, num, expected))
-                            exit_code = self.EXIT_FAILED
-                            continue
-                        if True:
-                            if loop != 2:
-                                # don't want these in this loop
-                                continue
-                            # found something we did not expect
-                            if num is None:
+                        # found something we did not expect
+                        if num is None:
+                            actual_code = 'not-valid'
+                            prefix = ''
+                        else:
+                            actual_code = self.codec.encode(num)
+                            if actual_code is None:
                                 actual_code = 'not-valid'
                                 prefix = ''
                             else:
-                                actual_code = self.codec.encode(num)
-                                if actual_code is None:
-                                    actual_code = 'not-valid'
-                                    prefix = ''
-                                else:
-                                    actual_code = '{} ({:b})'.format(num, actual_code)
-                                    prefix = '**** UNEXPECTED **** ---> '
-                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
-                                      format(prefix, num, actual_code, centre_x, centre_y, size, doubt))
-                            continue
-            except:
-                traceback.print_exc()
-                exit_code = self.EXIT_EXCEPTION
-            finally:
-                if scan is not None:
-                    del (scan)  # needed to close log files
+                                actual_code = '{} ({:b})'.format(num, actual_code)
+                                prefix = '**** UNEXPECTED **** ---> '
+                        self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt level {}'.
+                                  format(prefix, num, actual_code, centre_x, centre_y, size, doubt))
+                        continue
+        except:
+            traceback.print_exc()
+            exit_code = self.EXIT_EXCEPTION
+        finally:
+            del (scan)  # needed to close log files
         self._log('Scan image {} for codes {}'.format(image, numbers))
         self._log('******************')
         return exit_code
@@ -4737,6 +4660,8 @@ def verify():
     # parameters
     min_num = 101  # min number we want
     max_num = 999  # max number we want (may not be achievable)
+    parity = None  # code word parity to apply (None, 0=even, 1=odd)
+    edges = 5  # how many bit transitions we want per code word
     contrast = 1.0  # reduce dynamic luminance range when drawing to minimise 'bleed' effects
     offset = 0.0  # offset luminance range from the mid-point, -ve=below, +ve=above
 
@@ -4755,7 +4680,7 @@ def verify():
 
     # setup test params
     test = Test(log=test_log_folder)
-    test.encoder(min_num, max_num)
+    test.encoder(min_num, max_num, parity, edges)
     test.options(angles=test_scan_angle_steps,
                  mode=test_scan_video_mode,
                  contrast=contrast,
@@ -4763,21 +4688,40 @@ def verify():
                  debug=test_debug_mode)
 
     # build a test code set
-    # test_num_set = test.test_set(10)
+    test_num_set = test.test_set(10)
 
-    # test.coding()
-    # test.edges()
-    # test.decoding(test_black, test_white, test_noise)
-    # test.circles()
-    # test.code_words(test_num_set)
-    # test.codes(test_codes_folder, test_num_set, test_ring_width)
+    test.coding()
+    test.decoding(test_black, test_white, test_noise)
+    test.circles()
+    test.code_words(test_num_set)
+    test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
     # test.scan_codes(test_codes_folder)
     # test.scan_media(test_media_folder)
 
-    # test.scan(test_media_folder, [101], 'photo-101.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 565], 'photo-many-v1.jpg')
+    # test.scan(test_media_folder, [000], 'photo-angle-test-flat.jpg')
+    # test.scan(test_media_folder, [000], 'photo-angle-test-curved-flat.jpg')
+
+    #test.scan(test_codes_folder, [101], 'test-code-101.png')
+
+    # test.scan(test_media_folder, [365], 'photo-658-crumbled-very-distant.jpg')
+    # test.scan(test_media_folder, [102], 'photo-102.jpg')
+    # test.scan(test_media_folder, [365], 'photo-365.jpg')
+    # test.scan(test_media_folder, [640], 'photo-640.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658.jpg')
+    # test.scan(test_media_folder, [828], 'photo-828.jpg')
+    # test.scan(test_media_folder, [102], 'photo-102-distant.jpg')
+    # test.scan(test_media_folder, [365], 'photo-365-oblique.jpg')
+    # test.scan(test_media_folder, [365], 'photo-365-blurred.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-small.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-bright.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-dim.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-close.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-very-distant.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-blurred.jpg')
+    # test.scan(test_media_folder, [658], 'photo-658-crumbled-dark.jpg')
+    # test.scan(test_media_folder, [101, 102, 365, 640, 658, 828], 'photo-all-test-set.jpg')
 
     del (test)  # needed to close the log file(s)
 
