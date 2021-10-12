@@ -1,6 +1,6 @@
 import numpy as np
 import cv2 as cv
-im = cv.imread('photo-101.jpg', cv.IMREAD_GRAYSCALE)
+im = cv.imread('photos/photo-101.jpg', cv.IMREAD_GRAYSCALE)
 #imgray = cv.cvtColor(im, cv.COLOR_BGR2GRAY)
 imgray = cv.pyrDown(im)
 imgray = cv.resize(imgray, (1440, 1080), interpolation=cv.INTER_LINEAR)

@@ -1,6 +1,6 @@
 import numpy as np
 import cv2 as cv
-img = cv.imread('photo-all-test-set.jpg',0)
+img = cv.imread('photos/photo-all-test-set.jpg', 0)
 img = cv.pyrDown(img)
 cimg = cv.cvtColor(img,cv.COLOR_GRAY2BGR)
 circles = cv.HoughCircles(img,cv.HOUGH_GRADIENT,2,36,

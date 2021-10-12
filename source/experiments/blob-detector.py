@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 # Read image
-orig = cv2.imread("photo-658-crumbled-dim.jpg", cv2.IMREAD_GRAYSCALE)
+orig = cv2.imread("_photo-365-oblique_756x401y-flat.png", cv2.IMREAD_GRAYSCALE)
 
 # Downsize it
 width, height = orig.shape
