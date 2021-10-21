@@ -280,7 +280,7 @@ class Codec:
             bits[n] = self.bit(s1, s1_mask, s2, s2_mask, s3, s3_mask)
 
         # step 2 - find the alignment marker candidates
-        maybe_at = [[] for _ in range(3 * 4)]  # 0..max maybe possibilities (3 per digit, 4 digits), a list for each
+        maybe_at = [[] for _ in range(4*5)]  # 0..max maybe possibilities, worst case is 4 missing (at 5 each)
         for n in range(Codec.BITS):
             marker = self.is_marker(n, bits)
             if marker is None:
@@ -288,11 +288,12 @@ class Codec:
             # got a potential marker with marker maybe values, 0 == exact, 4 == all maybe
             maybe_at[marker].append(n)
         # maybe_at now contains a list of all possibilities for all maybe options
+        # the array is organised such that the best choice is first
 
         # step 3 - extract all potential code words for each candidate alignment for each maybe level
         # any that yield more than one are crap and a give-up condition
         found = None
-        for maybe in maybe_at:
+        for maybe in maybe_at:           # NB: must consider in array index order (best choice first)
             for n in maybe:
                 # n is the next one we are going to try, demote all others
                 word = [bit for bit in bits]  # make a copy
@@ -339,10 +340,9 @@ class Codec:
 
     def is_marker(self, n, bits):
         """ given a set of bits and a bit position check if an alignment marker is present there
-            the function returns a doubt level (0==exact match, 12==no match), no match is returned as None
+            the function returns a doubt level (0==exact match, >0 increasing levels of doubt, None=no match)
             """
         exact = 0
-        maybe = 0
         likely = 0
         missing = 0
         i = self.marker_bits_pos(n)
@@ -354,41 +354,31 @@ class Codec:
             exact += 1
         elif b1 == self.LIKELY_ZERO:
             likely += 1
-        elif b1 == self.UNKNOWN:
-            missing += 1
         else:
-            return None
+            missing += 1
         if b2 == self.IS_ONE:
             exact += 1
         elif b2 == self.LIKELY_ONE:
             likely += 1
-        elif b2 == self.UNKNOWN:
-            missing += 1
         else:
-            return None
+            missing += 1
         if b3 == self.IS_ONE:
             exact += 1
         elif b3 == self.LIKELY_ONE:
             likely += 1
-        elif b3 == self.UNKNOWN:
-            missing += 1
         else:
-            return None
+            missing += 1
         if b4 == self.IS_ZERO:
             exact += 1
         elif b4 == self.LIKELY_ZERO:
             likely += 1
-        elif b4 == self.UNKNOWN:
-            missing += 1
         else:
-            return None
-        if exact == 4:
-            return 0  # exact match
+            missing += 1
         if missing > 1:
-            return None  # too ambiguous
-        if missing > 0 and maybe > 2:
-            return None  # also too ambiguous
-        return (1 * likely) + (2 * maybe) + (3 * missing)
+            # too much to tolerate
+            return None
+        # NB: if exact is 4 then likely and missing are both 0
+        return likely + (5 * missing)    # 1 missing is worse than 4 likely
 
     def data_bits(self, n, bits):
         """ return an array of the data-bits from bits array starting at bit position n,
@@ -414,6 +404,25 @@ class Codec:
                 return None  # got junk
         return self.decode(code)
 
+    def classify(self, sample, invert):
+        """ given a bit value and its inversion mask determine its classification,
+            the returned bit classification is one of IS_ZERO, IS_ONE or UNKNOWN
+            """
+
+        if invert != 0:
+            if sample == Codec.BLACK:
+                return Codec.IS_ONE
+            elif sample == Codec.WHITE:
+                return Codec.IS_ZERO
+        else:
+            if sample == Codec.BLACK:
+                return Codec.IS_ZERO
+            elif sample == Codec.WHITE:
+                return Codec.IS_ONE
+
+        # anything else is junk (means caller gave us samples that were not 0 or 1)
+        return self.UNKNOWN
+
     def bit(self, s1, m1, s2, m2, s3, m3):
         """ given 3 bit values and their inversion masks determine the most likely overall bit value,
             bit values must be 'black' or 'white',
@@ -422,32 +431,25 @@ class Codec:
 
         zeroes = 0
         ones = 0
-        greys = 0
 
-        def normal(sample):
-            nonlocal zeroes, ones, greys
-            if sample == self.BLACK:
-                zeroes += 1
-            elif sample == self.WHITE:
-                ones += 1
+        c1 = self.classify(s1, m1)
+        c2 = self.classify(s2, m2)
+        c3 = self.classify(s3, m3)
 
-        def inverted(sample):
-            nonlocal zeroes, ones, greys
-            if sample == self.BLACK:
-                ones += 1
-            elif sample == self.WHITE:
-                zeroes += 1
+        if c1 == Codec.IS_ZERO:
+            zeroes += 1
+        elif c1 == Codec.IS_ONE:
+            ones += 1
 
-        def count(sample, invert):
-            if invert != 0:
-                inverted(sample)
-            else:
-                normal(sample)
+        if c2 == Codec.IS_ZERO:
+            zeroes += 1
+        elif c2 == Codec.IS_ONE:
+            ones += 1
 
-        # count states
-        count(s1, m1)
-        count(s2, m2)
-        count(s3, m3)
+        if c3 == Codec.IS_ZERO:
+            zeroes += 1
+        elif c3 == Codec.IS_ONE:
+            ones += 1
 
         # test ideal cases
         if zeroes == 3:
@@ -461,7 +463,7 @@ class Codec:
         elif ones == 2:
             return self.LIKELY_ONE
 
-        # the rest are junk
+        # the rest are junk (means caller gave us samples that were not 0 or 1)
         return self.UNKNOWN
 
 
@@ -1469,9 +1471,7 @@ class Scan:
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance of each other are dropped
     BLOB_RADIUS_STRETCH = 4  # how much to stretch blob radius to ensure always cover the whole lot
     RING_RADIUS_STRETCH = 1.5  # how much stretch nominal ring size to ensure encompass the outer edge
-    RADIUS_PROBE_CENTRES = 8  # how many probes in x to make when looking for inner/outer edges
-    MIN_RADIUS_EDGE_LENGTH = 1/3  # minimum length of a radius edge fragment as a fraction of nominal bit width
-    MIN_RADIUS_EDGE_PIXELS = 4  # min radius edge length must be at least this many pixels (if above is too small)
+    RADIUS_PROBE_CENTRES = 10  # how many probes in x to make when looking for inner/outer edges
     MAX_EDGE_PROBE_FRAGMENTS = 4  # don't look for more edge fragments once got this many per probe
     MAX_RADIUS_EDGE_GAP = 1/5  # max gap/distance between radius edge fragments in x as a fraction of the max
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
@@ -1535,7 +1535,7 @@ class Scan:
     # these are the levels used when detecting radius edges, only 'not-black' is relevant here
     EDGE_THRESHOLD_LEVELS = (0.3, )      # trailing , is required to sure make its a tuple and not a number
     # these are the levels used when translating an image into 'buckets'
-    # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white, white in _binarize
+    # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white, white in _compress
     BUCKET_THRESHOLD_LEVELS = (0.25, 0.25, 0.25)
 
     # ring numbers of flattened image
@@ -1776,21 +1776,21 @@ class Scan:
 
             self.kernel = kernel
 
-            if direction == Scan.LEFT_TO_RIGHT:
+            if direction == Scan.LEFT_TO_RIGHT:  # 0 degrees
                 self.delta_x = 1
                 self.delta_y = 1
                 self.swapped = False
-            elif direction == Scan.RIGHT_TO_LEFT:
+            elif direction == Scan.TOP_DOWN:  # 90 degrees
                 self.delta_x = -1
                 self.delta_y = 1
+                self.swapped = True
+            elif direction == Scan.RIGHT_TO_LEFT:  # 180 degrees
+                self.delta_x = -1
+                self.delta_y = -1
                 self.swapped = False
-            elif direction == Scan.BOTTOM_UP:
+            elif direction == Scan.BOTTOM_UP:  # 270 degrees
                 self.delta_x = 1
                 self.delta_y = -1
-                self.swapped = True
-            elif direction == Scan.TOP_DOWN:
-                self.delta_x = 1
-                self.delta_y = 1
                 self.swapped = True
             else:
                 raise Exception('illegal direction: {}'.format(direction))
@@ -1987,16 +1987,15 @@ class Scan:
             a vector of SlicePoints makes up a Slice,
             """
 
-        def __init__(self, x, y, type=None, slope=None):
-            self.x = x  # x co-ord (only here as a diagnostic aid)
-            self.where = int(round(y))  # pixel y co-ord
+        def __init__(self, x, y, type=None):
+            self.x = x          # x co-ord (only here as a diagnostic aid)
+            self.where = y      # pixel y co-ord
             self.type = type    # either leading or trailing
-            self.slope = slope  # the pixel values either side of the edge
             self.dead = False   # set True if point should be ignored
 
         def __str__(self):
-            return '(at {},{}: type={}, slope={}, dead={})'.\
-                    format(self.x, self.where, self.type, self.slope, self.dead)
+            return '(at {},{}: type={}, dead={})'.\
+                    format(self.x, self.where, self.type, self.dead)
 
     class SliceBits:
         """ this is the bit pattern across a slice, sequence length, size and error for the bits of a slice """
@@ -2317,7 +2316,8 @@ class Scan:
 
         return edge
 
-    def _find_radius_fragments(self, target, context, probe_centre, threshold, inner_limit=None, outer_limit=None):
+    def _find_radius_fragments(self, target, context, probe_centre, threshold,
+                               min_length=0, inner_limit=None, outer_limit=None):
         """ look for edges in the given edges image either top-down (inner) or bottom-up (outer),
             probe_centre is the x co-ord centre to scan up/down at,
             inner/outer_limit when present limit the y indices probed,
@@ -2339,9 +2339,6 @@ class Scan:
         else:
             max_y = min(outer_limit + 1, context.max_y)
 
-        bit_length = max_x / Scan.NUM_BITS
-        min_length = max(int(round(bit_length * Scan.MIN_RADIUS_EDGE_LENGTH)), Scan.MIN_RADIUS_EDGE_PIXELS)
-
         fragments = []
 
         stepper = Scan.Stepper(direction, max_x, max_y, min_y=min_y)
@@ -2359,15 +2356,15 @@ class Scan:
             if len(edge) == 0:
                 # nothing here, keep looking (nb: if nothing going forwards there'll also be nothing backwards)
                 continue
-            # we this initial edge probe to find the end of a 'strong' edge, once we've done that we look
-            # the other from the end and follow this strong edge to its other end, that is then the edge
+            # we use this initial edge probe to find the end of a 'strong' edge, once we've done that we look
+            # the other way from the end and follow this strong edge to its other end, that is then the edge
             # we want, the reason for doing this is to handle the case where an initially found weak edge
             # runs into some part of a strong edge, when we come back along that strong edge the weak one
             # joining it will not be noticed and we'll find the true beginning of the strong edge
             # ToDo: implement the above
             edge_points = [edge[x].midpoint for x in range(len(edge))]
             edge_where = edge[0].where
-            if len(edge_points) < max_x:
+            if False:  # ToDo: HACK-->len(edge_points) < max_x:
                 # see if can extend it by going the other way
                 extension = self._follow_edge(target, context, xy[0], xy[1], Scan.RIGHT_TO_LEFT, threshold)
                 if len(extension) > 1:   # NB: edges overlap by 1, so need 2+ for extension
@@ -2598,6 +2595,7 @@ class Scan:
             else:
                 outer_y = None
             fragments = self._find_radius_fragments(target, context, probe_centre, threshold,
+                                                    min_length=probe_width,
                                                     inner_limit=inner_y, outer_limit=outer_y)
             edges = edges + fragments
 
@@ -2605,7 +2603,9 @@ class Scan:
             self._log('{}: found {} edge fragments:'.format(prefix, len(edges)))
             for e in range(len(edges)):
                 edge = edges[e]
-                self._log('    {}: for {} from {},{}'.format(e, len(edge[1]), edge[0], edge[1][0]))
+                self._log('    {}: for {} from {},{} to {},{}'.
+                          format(e, len(edge[1]), edge[0], edge[1][0],
+                                 (edge[0] + len(edge[1])) % max_x, edge[1][-1]))
 
         if len(edges) == 0:
             # did not find any partials
@@ -2698,6 +2698,11 @@ class Scan:
 
                 if next_start_x == start_x:
                     # this means we've got back to the start, so that's it
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    stopping, gone full circle from {}'.format(start_x))
                     break
 
                 (end_x, end_y), done, first_y = add_edge(full_edge, slices, next_edge_num, next_start_x, final_x)
@@ -2709,6 +2714,10 @@ class Scan:
                         header = None
                     self._log('    edge {} from {} at {}..{} ({} gap={:.2f})'.
                               format(next_edge_num, first_y, next_start_x, end_x, reason, math.sqrt(next_gap)))
+
+            if self.logging:
+                if header is not None:
+                    self._log('{} nothing'.format(header))
 
         if len(full_edges) == 0:
             # no full edges found
@@ -3376,7 +3385,6 @@ class Scan:
         bright_level = brightest * Scan.BRIGHTER_THRESHOLD
 
         # find first and last pixel that is within the 'bright' threshold of the brightest
-        # ToDo: when edges merge there can be two bright patches, how to detect and deal with that?
         brightest_first = None
         brightest_last = None
         for x in range(len(pixels)):
@@ -3476,7 +3484,6 @@ class Scan:
                 if previous is not None:
                     # check if this new best represents a merging edge, when two edges merge the span
                     # of the edge increases dramatically, we stop if we see that (by returning None here)
-                    # ToDo: measure bright span or the full span?
                     this_span = (best.bright_last - best.bright_first) + 1
                     last_span = (previous.bright_last - previous.bright_first) + 1
                     if (this_span / last_span) > Scan.MAX_EDGE_WIDTH_GROWTH:
@@ -3488,7 +3495,6 @@ class Scan:
                                              this_span / last_span, Scan.MAX_EDGE_WIDTH_GROWTH))
                         return None
                     # the other thing that can happen is the midpoint jumps a long way, we stop on that too
-                    # ToDo: use min bright span mid gap ('cos find_width_midpoint picked an extreme as the midpoint)
                     midpoint_span = best.midpoint - previous.midpoint
                     midpoint_jump = midpoint_span * midpoint_span      # get rid of the sign
                     if midpoint_jump > max_jump:
@@ -3531,8 +3537,8 @@ class Scan:
 
         return target
 
-    def _binarize(self, context, inner_edge, outer_edge):
-        """ binarize the context target pixel luminance range into black and white,
+    def _compress(self, context, inner_edge, outer_edge):
+        """ compress the context target pixel luminance range into just black and white,
             inner/outer_edge is a list of y's for the target inner and outer edges,
             returns the modified image such that pixels before the inner or after the outer edge are white,
             this is important to ensure the first edge is the trailing edge of the inner target extent and
@@ -3708,7 +3714,32 @@ class Scan:
         if migrated > 0:
             passes.append(migrated)
 
-        # suppress 'nibbles'
+        # suppress 'nipples' and 'corners'
+        nipple_kernel = ((0, 0), (0, 1))
+        nipple_neighbours = ((-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0))
+        corner_kernel = ((0, 0), (-1, 1), (1, -1))
+        corner_neighbours = ((-1, 0), (-1, -1), (0, -1))
+        directions = (Scan.LEFT_TO_RIGHT, Scan.TOP_DOWN, Scan.RIGHT_TO_LEFT, Scan.BOTTOM_UP)
+        artifacts = ((nipple_kernel, nipple_neighbours), (corner_kernel, corner_neighbours), )
+        migrated = 0
+        for x in range(max_x):
+            for y in range(max_y):
+                changed = 0
+                for direction in directions:
+                    for artifact in artifacts:
+                        pixel = self._is_artifact(compressed, x, y, artifact[0], artifact[1], direction, max_x, max_y)
+                        if pixel is None:
+                            continue
+                        else:
+                            # got an artifact - change its colour
+                            compressed.putpixel(x, y, pixel)
+                            changed += 1
+                            break
+                    if changed > 0:
+                        break
+                migrated += changed
+        if migrated > 0:
+            passes.append(migrated)
 
         if self.logging:
             self._log('pixel migrations in {} passes: {}'.format(len(passes), passes))
@@ -3716,6 +3747,49 @@ class Scan:
             self._unload(compressed, '07-binary')
 
         return compressed
+
+    def _is_artifact(self, target, x, y, kernel, neighbours, direction, max_x, max_y):
+        """ determine if we have an 'artifact' at x,y in the given target image in the given direction,
+            the given target image must be a binary one (i.e. all pixels black or white)
+            kernel defines the pixels that must all be black or all white,
+            neighbours defines the pixels that must be all the other colour,
+            an artifact is when both the above criteria are met,
+            returns MAX_LUMINANCE for a black artifact, MIN_LUMINANCE for a white one, or None if no artifact
+            """
+
+        blacks, whites = self._count_bw(target, x, y, kernel, direction, max_x, max_y)
+        if whites == len(kernel):
+            # found a potential white artifact
+            blacks, whites = self._count_bw(target, x, y, neighbours, direction, max_x, max_y)
+            if blacks == len(neighbours):
+                # got a white artifact
+                return MIN_LUMINANCE
+
+        elif blacks == len(kernel):
+            # found a potential black artifact
+            blacks, whites = self._count_bw(target, x, y, neighbours, direction, max_x, max_y)
+            if whites == len(neighbours):
+                # got a black artifact
+                return MAX_LUMINANCE
+
+        return None
+
+    def _count_bw(self, target, x, y, kernel, direction, max_x, max_y):
+        """ count the number of black and white pixels in the given binary target around the given kernel """
+
+        whites = 0
+        blacks = 0
+        for kx, ky in Scan.Kernel(kernel, direction):
+            dy = y + ky
+            if dy < 0 or dy > (max_y - 1):
+                continue
+            dx = (x + kx) % max_x
+            pixel = target.getpixel(dx, dy)
+            if pixel == MAX_LUMINANCE:
+                whites += 1
+            elif pixel == MIN_LUMINANCE:
+                blacks += 1
+        return blacks, whites
 
     def _make_slices(self, target, inner_edge, outer_edge):
         """ make slices from the given binary image between the given inner and outer edges,
@@ -3730,15 +3804,17 @@ class Scan:
         slices = [Scan.Slice(x) for x in range(max_x)]
         for x in range(max_x):
             slice = slices[x]
-            inner = inner_edge[x]        # NB: we know these are black due to _binarize rules
+            inner = inner_edge[x]        # NB: we know these are black due to _compress rules
             outer = outer_edge[x]        #     ..
             min_span = max((outer - inner) * Scan.MIN_EDGE_TO_EDGE_SPAN, Scan.MIN_EDGE_TO_EDGE_PIXELS)
             curr = target.getpixel(x, inner)
-            slice.points = [Scan.SlicePoint(x, inner, type=Scan.TRAILING_EDGE, slope=(None, curr))]
+            slice.points = [Scan.SlicePoint(x, inner + 1, type=Scan.TRAILING_EDGE)]
             for y in range(inner + 1, outer):
                 prev = curr
                 curr = target.getpixel(x, y)
-                if curr != prev and len(slice.points) > 1:     # > 1 'cos must preserve inner trailing edge
+                trailing = prev > MID_LUMINANCE and curr < MID_LUMINANCE
+                leading = prev < MID_LUMINANCE and curr > MID_LUMINANCE
+                if (leading or trailing) and len(slice.points) > 1:  # > 1 'cos must preserve inner trailing edge
                     # got an edge, check if its too small
                     where = slice.points[-1].where
                     span = y - where
@@ -3750,12 +3826,12 @@ class Scan:
                                       format(x, where, x, y, span, min_span))
                         del slice.points[-1]
                         continue
-                if curr < prev:
-                    slice.points.append(Scan.SlicePoint(x, y, type=Scan.TRAILING_EDGE, slope=(prev, curr)))
-                elif curr > prev:
-                    slice.points.append(Scan.SlicePoint(x, y, type=Scan.LEADING_EDGE, slope=(prev, curr)))
+                if trailing:
+                    slice.points.append(Scan.SlicePoint(x, y, type=Scan.TRAILING_EDGE))
+                elif leading:
+                    slice.points.append(Scan.SlicePoint(x, y, type=Scan.LEADING_EDGE))
             prev = target.getpixel(x, outer + 1)
-            slice.points.append(Scan.SlicePoint(x, outer, type=Scan.LEADING_EDGE, slope=(prev, None)))
+            slice.points.append(Scan.SlicePoint(x, outer + 1, type=Scan.LEADING_EDGE))
 
         return slices
 
@@ -3809,7 +3885,7 @@ class Scan:
         return slice
 
     def _pulse_error(self, pulse, ideals):
-        """ calculate the pulse error between actual and ideal pulse component lengths,
+        """ calculate the pulse error betw`een actual and ideal pulse component lengths,
             each ideal consists of a list of ratios and the classification to assign if those ratios match,
             this is the *only* function that knows the structure of the ideals presented here
             """
@@ -3819,10 +3895,12 @@ class Scan:
         # which is 5 rings (inner black, data 1, data 2, data 2, outer black), so each
         # component relative to 1 ring is that measured multiplied by 5
         rings = Scan.NUM_RINGS - 3             # using this to show our dependence on it
-        head_length = pulse.head * rings
+        head_length = (pulse.head * rings)
         top_length = pulse.top * rings
-        tail_length = pulse.tail * rings
+        tail_length = (pulse.tail * rings)
 
+        # Note: various error functions have been tried,
+        #       this very simple average of the square of the differences works best
         best_error = None
         for ideal in ideals:
             head_error = ideal[0] - head_length
@@ -4045,9 +4123,82 @@ class Scan:
             grid = self._draw_lines(grid, dead_slices, Scan.PALE_RED)
             grid = self._draw_plots(grid, trailing_points, None, Scan.BLUE)
             grid = self._draw_plots(grid, leading_points, None, Scan.GREEN)
+            # ToDo: HACK start
+            #peaks = self._find_boundaries(slices, max_y, Scan.LEADING_EDGE)
+            #peak_lines = []
+            #for peak in peaks:
+            #    peak_lines.append([0, peak, max_x - 1, peak])
+            #grid = self._draw_lines(grid, peak_lines, Scan.PALE_GREEN)
+            #peaks = self._find_boundaries(slices, max_y, Scan.TRAILING_EDGE)
+            #peak_lines = []
+            #for peak in peaks:
+            #    peak_lines.append([0, peak, max_x - 1, peak])
+            #grid = self._draw_lines(grid, peak_lines, Scan.PALE_BLUE)
+            # ToDo: HACK end
             self._unload(grid, '08-slices')
 
         return slices
+
+    def _find_boundaries(self, slices, max_coord, edge_type):
+        """ given a set of slices find the most likely boundaries,
+            edge_type is one of LEADING_EDGE or TRAILING_EDGE,
+            we build a histogram of edge co-ordinates, differentiate and extract the peaks
+            """
+
+        # build histogram
+        histogram = [0 for _ in range(max_coord)]
+        for slice in slices:
+            points = slice.points
+            for p in range(len(points)):
+                point = points[p]
+                x = point.where
+                if point.type != edge_type:
+                    continue
+                histogram[x] += 1
+
+        # differentiate
+        slope = [None for _ in range(max_coord)]
+        curr = histogram[-1]
+        for x in range(len(histogram)):
+            prev = curr
+            curr = histogram[x]
+            slope[x] = curr - prev
+
+        # find a start point for our peak detection (we need a non-zero 'previous' value)
+        curr = None
+        for x in range(len(histogram)-1, -1, -1):
+            if slope[x] != 0:
+                # found the last non-zero slope
+                curr = slope[x]
+                break
+
+        # find the peaks (this is a transition from +ve to -ve slope)
+        peaks = []
+        if curr is None:
+            # this means we got no peaks
+            pass
+        else:
+            for x in range(len(histogram)):
+                prev = curr
+                curr = slope[x]
+                if curr == 0:
+                    # ignore these (it may be a false plateau), propagate existing prev
+                    curr = prev
+                elif prev > 0 and curr < 0:
+                    peaks.append((x - 1) % max_coord)
+
+        # reject peaks with small counts
+        for peak in range(len(peaks)-1, -1, -1):
+            y = peaks[peak]
+            if histogram[y] < 3:  # ToDo: make this a Scan constant
+                del peaks[peak]
+
+        if self.logging:
+            self._log('{}: histogram: {}'.format(edge_type, histogram))
+            self._log('{}: slope: {}'.format(edge_type, slope))
+            self._log('{}: peaks: {}'.format(edge_type, peaks))
+
+        return peaks
 
     def _make_bits(self, slices):
         """ make the bit sequence across all slices
@@ -4375,7 +4526,7 @@ class Scan:
             returns a vector of SliceBits
             """
 
-        target = self._binarize(context, inner_edge, outer_edge)
+        target = self._compress(context, inner_edge, outer_edge)
         slices = self._make_slices(target, inner_edge, outer_edge)
         slices = self._decode_slices(slices)
         slices = self._filter_slices(target, slices)
@@ -4502,6 +4653,8 @@ class Scan:
             if self.logging:
                 number = numbers[-1]
                 self._log('number:{}, bits:{}'.format(number.number, number.digits), number.centre_x, number.centre_y)
+                # for ring in range(len(code)):
+                #     self._log('    {}'.format(code[ring]), number.centre_x, number.centre_y)
             if self.save_images:
                 number = numbers[-1]
                 if number.number is None:
@@ -5219,13 +5372,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    test.scan_codes(test_codes_folder)
-    test.scan_media(test_media_folder)
+    # test.scan_codes(test_codes_folder)
+    # test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [565], 'photo-565.jpg')
-    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v3.jpg')
+    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
 
     del (test)  # needed to close the log file(s)
 
