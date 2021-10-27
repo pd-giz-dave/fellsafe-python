@@ -43,7 +43,7 @@ import traceback
                 
     """
 
-# ToDo: create test background with random noise blobs and and random edges
+# ToDo: create test background with random noise blobs and random edges
 # ToDo: add a blurring option when drawing test targets
 # ToDo: add a rotation (vertically and horizontally) option when drawing test targets
 # ToDo: add a curving (vertically and horizontally) option when drawing test targets
@@ -91,6 +91,7 @@ class Codec:
     BITS = 15  # total bits in the code
     MARKER_BITS = 4  # number of bits in our alignment marker
     MARKER_PATTERN = 0b_0110  # the bit 0 sync pattern
+    MIN_ACROSS_RING_EDGES = 5  # min bit transitions across the rings
 
     # ring XOR masks (-1 just inverts the whole ring)
     INNER_MASK = 0
@@ -216,10 +217,18 @@ class Codec:
     def allowable(self, code_word):
         """ given a code word return True if its allowable as a code word,
             codes are not allowed if they do not meet our bit transition requirements around or across the rings,
-            the requirement is that at least one bit transition must exist for every bit within the rings,
-            this ensures all bit transitions can be detected,
+            the requirement is that at least one bit transition must exist for every bit within the rings and
+            at least 5 bit transition across the rings, this ensures all bit transitions can be detected,
             returns True if allowed, False if not
             """
+
+        def count_bits(mask):
+            bits = 0
+            while mask != 0:
+                if (mask & 1) != 0:
+                    bits += 1
+                mask >>= 1
+            return bits
 
         msb = 1 << (Codec.BITS - 1)  # 1 in the MSB of a code word
         all_ones = (1 << Codec.BITS) - 1  # all 1's in the relevant bits
@@ -245,6 +254,14 @@ class Codec:
         missing = (edges ^ all_ones)
         if missing != 0:
             # does not meet edges requirement around the rings
+            return False
+
+        # check meets edge requirements across the rings
+        if count_bits(rings[0] ^ rings[1]) < Codec.MIN_ACROSS_RING_EDGES:
+            # does not meet edges requirement across the rings
+            return False
+        if count_bits(rings[1] ^ rings[2]) < Codec.MIN_ACROSS_RING_EDGES:
+            # does not meet edges requirement across the rings
             return False
 
         return True
@@ -841,6 +858,7 @@ class Ring:
         start_x = -self.x + self.w
         start_y = start_x
         place = -1
+        limits = [[None, None], [None, None]]  # min/max x/y used when drawing digits
         for power in [100, 10, 1]:
             place += 1
             x = start_x + ((digit_size + point_size) * place)
@@ -852,11 +870,28 @@ class Ring:
                         # draw a black point here (0's are left at the background)
                         for dx in range(point_size):
                             for dy in range(point_size):
-                                self._point(x + dx, y + dy, -2)  # draw at min luminance (ie. true black)
+                                tx = x + dx
+                                ty = y + dy
+                                self._point(tx, ty, -2)    # draw at min luminance (ie. true black)
+                                if limits[0][0] is None or limits[0][0] > tx:
+                                    limits[0][0] = tx
+                                if limits[0][1] is None or limits[0][1] > ty:
+                                    limits[0][1] = ty
+                                if limits[1][0] is None or limits[1][0] < tx:
+                                    limits[1][0] = tx
+                                if limits[1][1] is None or limits[1][1] < ty:
+                                    limits[1][1] = ty
                     x += point_size
                 x -= digit_size
                 y += point_size
-        # ToDo: draw a 1 pixel line 1 pixel under the number
+        # draw a line under the number (so we know which way up 666 or 999, et al, should be)
+        start_x = limits[0][0]
+        end_x = limits[1][0]
+        start_y = limits[1][1] + point_size
+        end_y = start_y + point_size
+        for x in range(start_x, end_x + 1):
+            for y in range(start_y, end_y + 1):
+                self._point(x, y, -2)    # draw at min luminance (ie. true black)
 
     def code(self, number, rings):
         """ draw the complete code for the given number and code-words
@@ -1437,19 +1472,6 @@ class Transform:
         return source
 
 
-class Target:
-    """ struct to hold info about a Scan detected target """
-
-    def __init__(self, number, doubt, centre_x, centre_y, target_size, blob_size, digits):
-        self.centre_x = centre_x  # where it is in the original image
-        self.centre_y = centre_y  # ..
-        self.blob_size = blob_size  # the size of the blob as detected by opencv
-        self.number = number  # the code number we found
-        self.doubt = doubt  # how many bit errors there are in it
-        self.target_size = target_size  # the size of the target in the original image (used for relative distance)
-        self.digits = digits  # the digits as decoded by the codec (shows where the bit errors are)
-
-
 class Scan:
     """ this class provides functions to scan an image and extract any codes in it,
         algorithm summary:
@@ -1471,8 +1493,8 @@ class Scan:
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance of each other are dropped
     BLOB_RADIUS_STRETCH = 4  # how much to stretch blob radius to ensure always cover the whole lot
     RING_RADIUS_STRETCH = 1.5  # how much stretch nominal ring size to ensure encompass the outer edge
-    RADIUS_PROBE_CENTRES = 10  # how many probes in x to make when looking for inner/outer edges
-    MAX_EDGE_PROBE_FRAGMENTS = 4  # don't look for more edge fragments once got this many per probe
+    RADIUS_PROBE_CENTRES = 18  # how many probes in x to make when looking for inner/outer edges
+    RADIUS_PROBE_MIN_LENGTH = 0.8  # min length of an edge fragment as a fraction of the probe width
     MAX_RADIUS_EDGE_GAP = 1/5  # max gap/distance between radius edge fragments in x as a fraction of the max
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
     MIN_PIXELS_PER_BIT = 4  # stretch angles param such that this constraint is met
@@ -1489,13 +1511,12 @@ class Scan:
     # due to distortion these edges can change rapidly vertically, so we look a long way sideways
     EDGE_KERNEL = [[0, 0], [0, 1], [0, -1], [0, 2], [0, -2]]
 
-    # min width of a ring/bit edge as a fraction of the nominal bit/ring width
-    MIN_EDGE_WIDTH = (0.1, 0.1)
-    MIN_EDGE_WIDTH_PIXELS = 2  # minimum width in pixels if the above is less than this
+    # edge vector smoothing kernel, pairs of offset and scale factor (see _smooth_edge)
+    SMOOTHING_KERNEL = [[-3, 0.5], [-2, 1], [-1, 1.5], [0, 2], [+1, 1.5], [+2, 1], [+3, 0.5]]
 
-    # when merging edges, only those below this length are merged and the merged length cannot exceed it either
-    # as a fraction of the image width (for rings) or height (for bits)
-    MERGE_LENGTH_LIMIT = (0.6, 0.6)
+    # min width of a ring as a fraction of the nominal ring width
+    MIN_EDGE_WIDTH = 0.1
+    MIN_EDGE_WIDTH_PIXELS = 2  # minimum width in pixels if the above is less than this
 
     # video modes image height
     VIDEO_SD = 480
@@ -1533,7 +1554,7 @@ class Scan:
     # the first bucket is the black threshold, the last is the white threshold,
     # the white band is implied as 1-(sum of the rest)
     # these are the levels used when detecting radius edges, only 'not-black' is relevant here
-    EDGE_THRESHOLD_LEVELS = (0.3, )      # trailing , is required to sure make its a tuple and not a number
+    EDGE_THRESHOLD_LEVELS = (0.3, )      # trailing comma is required to sure make its a tuple and not a number
     # these are the levels used when translating an image into 'buckets'
     # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white, white in _compress
     BUCKET_THRESHOLD_LEVELS = (0.25, 0.25, 0.25)
@@ -1558,9 +1579,6 @@ class Scan:
     ONE_TWO_TWO = '1:2:2'
     ONE_THREE_ONE = '1:3:1'
 
-    # slice dead reasons
-    SINGLE_SAMPLE = 'singleton'
-
     # pulse ratios for the above (see diagram in _measure_pulses)
     THREE_ONE_ONE_RATIOS = ((3, 1, 1), )  # (3, 1, 0.5))
     TWO_ONE_TWO_RATIOS = ((2, 1, 2), )  # (2, 1, 1.5))
@@ -1569,6 +1587,9 @@ class Scan:
     ONE_ONE_ONE_RATIOS = ((1, 1, 1), )  # (1, 1, 0.5))
     ONE_TWO_TWO_RATIOS = ((1, 2, 2), )  # (1, 2, 1.5))
     ONE_THREE_ONE_RATIOS = ((1, 3, 1), )  # (1, 3, 0.5))
+
+    # slice dead reasons
+    SINGLE_SAMPLE = 'singleton'
 
     # slice bit dead reasons
     NOISE_BIT = 'noise'
@@ -1666,6 +1687,26 @@ class Scan:
             if steps is not None:
                 self.steps = steps
             self.iterations = 0
+
+        def skip_to(self, dest):
+            """ skip steps until the next step will yield that given or None,
+                it returns the x,y tuple reached or None if beyond the end,
+                """
+
+            xy = [self.x, self.y]
+
+            if self.x_multiplier != 0:
+                while self.x != dest:
+                    xy = self.next()
+                    if xy is None:
+                        break
+            elif self.y_multiplier != 0 and self.y is not None:
+                while self.y != dest:
+                    xy = self.next()
+                    if xy is None:
+                        break
+
+            return xy
 
         def next(self):
             """ get the (first or) next x,y co-ord pair,
@@ -1840,9 +1881,6 @@ class Scan:
         max_scan_coord = None
         max_cross_coord = None
 
-        # in an ideal world the width of a ring/bit
-        nominal_width = None
-
         # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
         # these are offsets into an [x, y] array/tuple to access the in-direction co-ordinate
         # or the cross-direction co-ordinate, as they are 0 or 1 and mutually exclusive they can also
@@ -1856,11 +1894,7 @@ class Scan:
         #   xy[scan_coord] += something * scan_multiplier
         scan_multiplier = None
 
-        # tuning parameters
-        min_width = None  # edges closer than this are combined (fraction of nominal width)
-
         # wrapping constraints
-        allow_edge_wrap = None  # edges are allowed to wrap around image limits (e.g. rings)
         allow_scan_wrap = None  # scanning is allowed to wrap around image limits (e.g. bits)
 
         # kernel matrix to use to detect connected neighbours when following edges
@@ -1885,18 +1919,11 @@ class Scan:
                 self.max_scan_coord = self.max_y - 1
                 self.max_cross_coord = self.max_x - 1
 
-                # in an ideal world the width of a ring
-                self.nominal_width = self.max_y / Scan.NUM_RINGS
-
                 # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
                 self.scan_coord = 1  # ==y
                 self.cross_coord = 0  # ==x
 
-                # tuning parameters
-                self.min_width = max(self.nominal_width * Scan.MIN_EDGE_WIDTH[0], Scan.MIN_EDGE_WIDTH_PIXELS)
-
                 # wrapping constraints
-                self.allow_edge_wrap = True
                 self.allow_scan_wrap = False
 
             elif (direction & Scan.LEFT_AND_RIGHT) != 0:
@@ -1909,18 +1936,11 @@ class Scan:
                 self.max_scan_coord = self.max_x - 1
                 self.max_cross_coord = self.max_y - 1
 
-                # in an ideal world the width of a bit
-                self.nominal_width = self.max_x / Scan.NUM_BITS
-
                 # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
                 self.scan_coord = 0  # ==x
                 self.cross_coord = 1  # ==y
 
-                # tuning parameters
-                self.min_width = max(self.nominal_width * Scan.MIN_EDGE_WIDTH[1], Scan.MIN_EDGE_WIDTH_PIXELS)
-
                 # wrapping constraints
-                self.allow_edge_wrap = False
                 self.allow_scan_wrap = True
 
             else:
@@ -2048,9 +2068,8 @@ class Scan:
     class EdgeMetric:
         """ result of measuring inner and outer edge candidates """
 
-        def __init__(self, edge, fragments, where, gaps, overall, biggest, nones):
+        def __init__(self, edge, where, gaps, overall, biggest, nones):
             self.edge = edge  # the edge number
-            self.fragments = fragments  # the number of edge fragments this edge is comprised of
             self.where = where  # tha average Y position of the edge across all X's
             self.gaps = gaps  # how many gaps on the edge, a 'gap' is two consecutive pixels that are not neighbours
             self.overall = overall  # the overall gap squared across all x co-ords (x,y --> x,y by Pythagoras)
@@ -2058,8 +2077,8 @@ class Scan:
             self.nones = nones  # the number of x co-ords that have no y (no sample over the threshold here)
 
         def __str__(self):
-            return '(#{} at {:.2f}, fragments={}, gaps={}, overall={:.2f}, biggest={:.2f}, nones={})'.\
-                   format(self.edge, self.where, self.fragments, self.gaps,
+            return '(#{} at {:.2f}, gaps={}, overall={:.2f}, biggest={:.2f}, nones={})'.\
+                   format(self.edge, self.where, self.gaps,
                           math.sqrt(self.overall), math.sqrt(self.biggest), self.nones)
 
     class Pulse:
@@ -2079,6 +2098,18 @@ class Scan:
         def __str__(self):
             return '({:.2f}-{:.2f}-{:.2f} type={} error={:.2f}, type2={} error2={:.2f})'.\
                     format(self.head, self.top, self.tail, self.type, self.error, self.type2, self.error2)
+
+    class Detection:
+        """ struct to hold info about a Scan detected target """
+
+        def __init__(self, number, doubt, centre_x, centre_y, target_size, blob_size, digits):
+            self.centre_x = centre_x  # where it is in the original image
+            self.centre_y = centre_y  # ..
+            self.blob_size = blob_size  # the size of the blob as detected by opencv
+            self.number = number  # the code number we found
+            self.doubt = doubt  # how many bit errors there are in it
+            self.target_size = target_size  # the size of the target in the original image (used for relative distance)
+            self.digits = digits  # the digits as decoded by the codec (shows where the bit errors are)
 
     def __init__(self, code, frame, transform, angles=360, video_mode=VIDEO_FHD, debug=DEBUG_NONE, log=None):
         """ code is the code instance defining the code structure,
@@ -2269,17 +2300,30 @@ class Scan:
 
         return code, limit_radius
 
-    def _follow_edge(self, target, context, x, y, direction, threshold):
-        """ follow the edge at x,y in target if there is one there, until come to its end,
+    def _find_edge(self, target, context, x, y, direction, threshold):
+        """ test if there is a potential edge start in the target at x,y,
+            returns None if there is no edge here or an EdgePoint if there is
+            """
+        # check if on a valid starting point
+        pixel = self._get_threshold_pixel(target, x, y, threshold)
+        if pixel is None:
+            # nothing (starting) here
+            return None
+        # get the initial best
+        best = self._find_best_neighbour(target, context, x, y, direction, threshold)
+        if best is None:
+            # this should not happen as we got a pixel above
+            self._log('no first neighbour!', fatal=True)
+        return best
+
+    def _follow_edge(self, target, context, edge_start, direction, threshold, max_length):
+        """ follow the edge_start in target until come to its end or reach the max_length,
             NB: target here is *not* the same as the context target, it should be an edges image,
             context is for the scanning direction (which is different to the direction here),
             direction param is for the following direction (i.e. along the edge length discovered),
             this direction is left-to-right or right-to-left for following edges in x,
             threshold is the threshold to apply to determine if a pixel is a candidate for an edge,
-            its followed for at most for the image width/height,
-            x co-ordinates wrap, y does not,
-            returns a vector of EdgePoints, or an empty vector if none,
-            the pixel at x,y must be over the threshold else an empty vector is returned
+            returns a vector of EdgePoints (it will contain at least the given edge),
             """
 
         max_x = context.max_x
@@ -2287,19 +2331,9 @@ class Scan:
         best_coord = context.scan_coord        # NB: 90 degree rotated from scan direction
 
         stepper = Scan.Stepper(direction, max_x, max_y)
-
-        # check if on a valid starting point
-        pixel = self._get_threshold_pixel(target, x, y, threshold)
-        if pixel is None:
-            # nothing (starting) here
-            return []
-        # get the initial best
-        best = self._find_best_neighbour(target, context, x, y, direction, threshold)
-        if best is None:
-            # this should not happen as we got a pixel above
-            self._log('no first neighbour!', fatal=True)
-        stepper.reset(x=x, y=y)
-        edge = [best]
+        stepper.reset(x=edge_start.where, y=edge_start.midpoint)
+        edge = [edge_start]
+        best = edge_start
 
         stepper.next()                   # skip the initial pixel found above
         while True:
@@ -2313,15 +2347,18 @@ class Scan:
                 break
             # it qualifies
             edge.append(best)
+            if max_length is not None and len(edge) >= max_length:
+                break
 
         return edge
 
     def _find_radius_fragments(self, target, context, probe_centre, threshold,
-                               min_length=0, inner_limit=None, outer_limit=None):
+                               min_length=None, max_length=None, inner_limit=None, outer_limit=None):
         """ look for edges in the given edges image either top-down (inner) or bottom-up (outer),
             probe_centre is the x co-ord centre to scan up/down at,
+            min_length is the limit below which an edge should be ignored,
+            max_length is the limit on how far to follow an edge,
             inner/outer_limit when present limit the y indices probed,
-            the pixels of edges detected are cleared in target to stop them being re-found when doing multi probes,
             each x is probed left and right for an edge,
             returns a list of edge fragments found or an empty list if found nothing,
             each fragment consists of a tuple of its start X and a list of connected Y's
@@ -2339,74 +2376,66 @@ class Scan:
         else:
             max_y = min(outer_limit + 1, context.max_y)
 
-        fragments = []
-
+        # find all the potential edges
+        edges = []
         stepper = Scan.Stepper(direction, max_x, max_y, min_y=min_y)
         stepper.reset(x=probe_centre)
         while True:
-            if len(fragments) >= Scan.MAX_EDGE_PROBE_FRAGMENTS:
-                if self.logging:
-                    self._log('{}: probe {}: max fragments reached at this probe centre (limit is {})'.
-                              format(prefix, probe_centre, Scan.MAX_EDGE_PROBE_FRAGMENTS))
-                break
             xy = stepper.next()
             if xy is None:
                 break
-            edge = self._follow_edge(target, context, xy[0], xy[1], Scan.LEFT_TO_RIGHT, threshold)
-            if len(edge) == 0:
-                # nothing here, keep looking (nb: if nothing going forwards there'll also be nothing backwards)
-                continue
-            # we use this initial edge probe to find the end of a 'strong' edge, once we've done that we look
-            # the other way from the end and follow this strong edge to its other end, that is then the edge
-            # we want, the reason for doing this is to handle the case where an initially found weak edge
-            # runs into some part of a strong edge, when we come back along that strong edge the weak one
-            # joining it will not be noticed and we'll find the true beginning of the strong edge
-            # ToDo: implement the above
-            edge_points = [edge[x].midpoint for x in range(len(edge))]
-            edge_where = edge[0].where
-            if False:  # ToDo: HACK-->len(edge_points) < max_x:
-                # see if can extend it by going the other way
-                extension = self._follow_edge(target, context, xy[0], xy[1], Scan.RIGHT_TO_LEFT, threshold)
-                if len(extension) > 1:   # NB: edges overlap by 1, so need 2+ for extension
-                    # extend edge by this (but it must be reversed first)
-                    extension_points = [extension[x].midpoint for x in range(len(extension))]
-                    extension_points = extension_points[1:]  # remove the overlap pixel
-                    extension_where = (edge_where - len(extension_points)) % max_x  # adjust where it starts
-                    extension_points.reverse()
-                    extension_points += edge_points
-                    if self.logging:
-                        self._log('{}: probe {}: extending fragment for {} from {},{} to {} from {},{}'.
-                                  format(prefix, probe_centre,
-                                         len(edge_points), edge_where, edge_points[0],
-                                         len(extension_points), extension_where, extension_points[0]))
-                    edge_where = extension_where                         # update our edge
-                    edge_points = extension_points                       # ..
-                    self._clear_edge_pixels(target, context, extension)  # make sure we don't see these pixels again
-            self._clear_edge_pixels(target, context, edge)     # make sure we don't see these pixels again
-            if len(edge_points) < min_length:
+            edge = self._find_edge(target, context, xy[0], xy[1], Scan.LEFT_TO_RIGHT, threshold)
+            if edge is not None:
+                edges.append(edge)
+                if direction == Scan.TOP_DOWN:
+                    stepper.skip_to(edge.last + 1)
+                else:
+                    stepper.skip_to(edge.first - 1)
+
+        if self.logging:
+            self._log('{}: probe {}: found {} edge starts'.format(prefix, probe_centre, len(edges)))
+            for edge in edges:
+                self._log('    {}'.format(edge))
+
+        # follow all potential edges in both directions for at most the max_length
+        fragments = []
+        for edge in edges:
+            if self.logging:
+                self._log('{}: probe {}: following edge {}'.format(prefix, probe_centre, edge))
+            # NB: we go +1 further going backwards 'cos of the overlap, this is to ensure the start of that
+            #     backward fragment will coincide with the start of the earlier probe forward fragment for
+            #     the case where there is a continuous edge, this in turn means it will get detected as a
+            #     duplicate and dropped, its important to go backwards as well as forwards for the case
+            #     where the edge ends or merges with a brighter one
+            right_edge = self._follow_edge(target, context, edge, Scan.RIGHT_TO_LEFT, threshold, max_length + 1)
+            left_edge = self._follow_edge(target, context, edge, Scan.LEFT_TO_RIGHT, threshold, max_length)
+            if self.logging:
+                edge_length = len(right_edge) + len(left_edge) - 1
+                edge_from_x = right_edge[-1].where
+                edge_from_y = right_edge[-1].midpoint
+                edge_to_x = left_edge[-1].where
+                edge_to_y = left_edge[-1].midpoint
+            if len(right_edge) + len(left_edge) - 1 < min_length:
                 if self.logging:
-                    self._log('{}: probe {}: ignoring short fragment for {} from {},{} (limit is {})'.
-                              format(prefix, probe_centre, len(edge_points), edge_where, edge_points[0], min_length))
+                    self._log('    ignoring short fragment for {} from {},{} to {},{} (limit is {})'.
+                              format(edge_length, edge_from_x, edge_from_y, edge_to_x, edge_to_y, min_length))
                 continue
             if self.logging:
-                self._log('{}: probe {}: found radius fragment for {} from {},{}'.
-                          format(prefix, probe_centre, len(edge_points), edge_where, edge_points[0]))
-            edge_length = len(edge_points)
-            if edge_length > max_x:
-                # we've spiralled, truncate it, this can happen if we started off with a 'tail' that joined
-                # a stronger edge, the other way around cannot happen, so we truncate the beginning
-                excess = edge_length - max_x
-                edge_points = edge_points[excess:]
-                edge_where = (edge_where + excess) % max_x
-                if self.logging:
-                    self._log('{}: probe {}: above fragment too long ({}), truncating to {} from {},{}'.
-                              format(prefix, probe_centre, edge_length, max_x, edge_where, edge_points[0]))
-            fragments.append((edge_where, edge_points))
+                self._log('    found radius fragment for {} from {},{} to {},{} as {}+{}'.
+                          format(edge_length, edge_from_x, edge_from_y, edge_to_x, edge_to_y,
+                                 len(right_edge) - 1, len(left_edge)))
+            del right_edge[0]
+            if len(right_edge) > 0:
+                right_edge.reverse()
+                right_points = [edge.midpoint for edge in right_edge]
+                fragments.append([right_edge[0].where, right_points])
+            left_points = [edge.midpoint for edge in left_edge]
+            fragments.append([left_edge[0].where, left_points])
 
         return fragments
 
-    def _find_radius(self, context, edges, threshold, prefix, inner_limit=None, outer_limit=None):
-        """ find a continuous radius edge in direction (top down or bottom up) in the edges target,
+    def _find_radius(self, context, target, threshold, prefix, inner_limit=None, outer_limit=None):
+        """ find a continuous radius edge in direction (top down or bottom up) in the target,
             inner/outer_limit when present limit the y indices probed for any x,
             due to distortion the edge may be broken up into fragments,
             this function finds all qualifying fragments and attempts to join them up,
@@ -2415,12 +2444,17 @@ class Scan:
             in both cases it also returns a list of edge fragments making up the result
             """
 
+        # region Helper functions
         def add_edge(full_edge, slices, edge, start_x, end_x=None):
             """ add all the points of edge from start_x to its end or end_x (inclusive),
-                returning final x,y co-ords, True/False to indicate if reached end_x and the initial y
+                returning final x,y co-ords, True/False to indicate if reached end_x and the initial y,
+                if the whole edge is consumed its marked as used so that it is not used as a start point
+                in a subsequent join ('cos it'll just get the same full edge again)
                 """
 
             def result(pixel, x, end_x, first_y):
+                if first_is_start and last_is_end:
+                    used[edge] = True
                 if end_x is None:
                     return pixel, False, first_y
                 elif x == end_x:
@@ -2433,6 +2467,8 @@ class Scan:
             x = start_x
             last_x = x
             first_y = None
+            first_is_start = False
+            last_is_end = False
             for _ in range(max_x):
                 points = slices[x]
                 last_pixel = None
@@ -2440,6 +2476,10 @@ class Scan:
                     if point.edge == edge:
                         if first_y is None:
                             first_y = point.y
+                            if point.start_x == x:
+                                first_is_start = True
+                        if point.end_x == x:
+                            last_is_end = True
                         full_edge[x] = point.y
                         last_pixel = (x, point.y)
                         if point.end_x == x:
@@ -2499,15 +2539,10 @@ class Scan:
             nonlocal prefix, direction
             if best_edge is None:
                 if self.logging:
-                    self._log('{}: picking best edge'.format(prefix))
                     self._log('    edge #{} better than nothing, best={}'.format(edge.edge, edge))
                 return edge
             better_score = 0
             worse_score = 0
-            if edge.fragments < best_edge.fragments:
-                better_score += 1
-            elif edge.fragments > best_edge.fragments:
-                worse_score += 1
             if edge.gaps < best_edge.gaps:
                 better_score += 1
             elif edge.gaps > best_edge.gaps:
@@ -2562,6 +2597,7 @@ class Scan:
                 y += delta_y
                 edge[x] = int(round(y))
             return
+        # endregion
 
         context.kernel = Scan.EDGE_KERNEL
         context.prefix = prefix                    # overwrite standard prefix with the one we are given
@@ -2571,11 +2607,6 @@ class Scan:
         probe_width = max_x / Scan.RADIUS_PROBE_CENTRES
         max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
         max_edge_gap = max_edge_x_gap * max_edge_x_gap   # square it so don't have to square root the measured gap
-
-        if self.save_images:
-            target = self.transform.copy(edges)    # finding edges destroys pixels so make a copy here
-        else:
-            target = edges                         # when not showing images, pixel destruction is irrelevant
 
         # we expect the radius edges to be long, ideally all the way around, but due to distortion they
         # can get broken up, we find all the 'long' candidates and try to join them up by extrapolating
@@ -2595,17 +2626,40 @@ class Scan:
             else:
                 outer_y = None
             fragments = self._find_radius_fragments(target, context, probe_centre, threshold,
-                                                    min_length=probe_width,
+                                                    min_length=probe_width*Scan.RADIUS_PROBE_MIN_LENGTH,
+                                                    max_length=probe_width,
                                                     inner_limit=inner_y, outer_limit=outer_y)
             edges = edges + fragments
 
+        # remove duplicates (they are expected due to following edges in both directions)
+        dups = 0
         if self.logging:
-            self._log('{}: found {} edge fragments:'.format(prefix, len(edges)))
+            header = '{}: discarding duplicates within {} edges found'.format(prefix, len(edges))
+        edges.sort(key=lambda e: (e[0], e[1][0], e[1][-1]))
+        for edge in range(len(edges)-2, -1, -1):
+            edge_this = edges[edge]
+            edge_next = edges[edge+1]
+            start_x_same = edge_this[0] == edge_next[0]
+            start_y_same = edge_this[1][0] == edge_next[1][0]
+            end_y_same = edge_this[1][-1] == edge_next[1][-1]
+            if start_x_same and start_y_same and end_y_same:
+                # got a dup
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    duplicate {}'.format(edge_next))
+                del edges[edge+1]
+                dups += 1
+
+        if self.logging:
+            self._log('{}: found {} unique edge fragments from {} found:'.
+                      format(prefix, len(edges), len(edges) + dups))
             for e in range(len(edges)):
                 edge = edges[e]
                 self._log('    {}: for {} from {},{} to {},{}'.
                           format(e, len(edge[1]), edge[0], edge[1][0],
-                                 (edge[0] + len(edge[1])) % max_x, edge[1][-1]))
+                                 (edge[0] + len(edge[1]) - 1) % max_x, edge[1][-1]))
 
         if len(edges) == 0:
             # did not find any partials
@@ -2619,14 +2673,22 @@ class Scan:
             end_x = (start_x + len(edge[1]) - 1) % max_x
             x = start_x
             for y in edge[1]:
+                # NB: Its important the edge number lodged here (e) matches the index into edges
+                #     and that index remains valid during the join process below.
                 slices[x].append(Scan.RadiusPoint(e, y, start_x, end_x, len(edge[1])))
                 x = (x + 1) % max_x
 
         # join all nearest neighbours for each edge we found
+        used = [False for _ in range(len(edges))]  # set True once an edge has been used in a join
         full_edges = []
         for edge in range(len(edges)):
+            if used[edge]:
+                # skip this, its already been used in some other join, if we use it again we'll
+                # just find the same edge but starting from a different point along it, waste of time
+                continue
+            used[edge] = True            # note not to use this again
             full_edge = [None for _ in range(max_x)]
-            full_edges.append([1, full_edge])  # start off with 1 fragment
+            full_edges.append(full_edge)
 
             # add all the points for this lead edge
             start_x = edges[edge][0]
@@ -2634,7 +2696,8 @@ class Scan:
             (end_x, end_y), done, first_y = add_edge(full_edge, slices, edge, start_x)
 
             if self.logging:
-                header = '{}: edge {} at {}..{} from {}, joins:'.format(prefix, edge, start_x, end_x, first_y)
+                header = '{}: edge {} from {},{} to {},{} joins:'.\
+                         format(prefix, edge, start_x, first_y, end_x, end_y)
 
             # try and join other edges
             while not done:
@@ -2690,8 +2753,8 @@ class Scan:
                         if header is not None:
                             self._log(header)
                             header = None
-                        self._log('    stopping, next edge {} at {}..{}: gap too big:{:.2f} (limit is {:.2f})'.
-                                  format(next_edge_num, next_start_x, end_x,
+                        self._log('    stopping, next edge {} at {},{}..{},?: gap too big:{:.2f} (limit is {:.2f})'.
+                                  format(next_edge_num, next_start_x, end_y, end_x,
                                          math.sqrt(next_gap), math.sqrt(max_edge_gap)))
                     del full_edges[-1]
                     break
@@ -2706,30 +2769,29 @@ class Scan:
                     break
 
                 (end_x, end_y), done, first_y = add_edge(full_edge, slices, next_edge_num, next_start_x, final_x)
-                full_edges[-1][0] += 1   # note another fragment has been added
 
                 if self.logging:
                     if header is not None:
                         self._log(header)
                         header = None
-                    self._log('    edge {} from {} at {}..{} ({} gap={:.2f})'.
-                              format(next_edge_num, first_y, next_start_x, end_x, reason, math.sqrt(next_gap)))
+                    self._log('    edge {} from {},{} to {},{} ({} gap={:.2f})'.
+                              format(next_edge_num, next_start_x, first_y, end_x, end_y, reason, math.sqrt(next_gap)))
 
             if self.logging:
                 if header is not None:
                     self._log('{} nothing'.format(header))
 
         if len(full_edges) == 0:
-            # no full edges found
-            return None, edges, 'no full edge'
+            # no full edge candidates found
+            return None, edges, 'no edges'
 
         if self.logging:
-            self._log('{}: found {} full edges'.format(prefix, len(full_edges)))
+            self._log('{}: found {} full edge candidates'.format(prefix, len(full_edges)))
 
         # full_edges now contains all our candidates (with gaps), measure them all
         metrics = []
         for edge in range(len(full_edges)):
-            fragments, full_edge = full_edges[edge]
+            full_edge = full_edges[edge]
             first_pixel = None  # x,y of first pixel in the edge
             prev_pixel = None  # x,y of previous pixel seen in the edge
             nones = 0
@@ -2767,12 +2829,25 @@ class Scan:
                         # found a new bigger gap at the end
                         biggest_gap = gap
 
-            metrics.append(Scan.EdgeMetric(edge, fragments, average_y, gaps, overall_gap, biggest_gap, nones))
+            metric = Scan.EdgeMetric(edge, average_y, gaps, overall_gap, biggest_gap, nones)
+            if biggest_gap > max_edge_gap:
+                if self.logging:
+                    self._log('    {} discarding, biggest gap too big (limit is {})'.
+                              format(metric, math.sqrt(max_edge_gap)))
+            else:
+                metrics.append(metric)
+                if self.logging:
+                    self._log('    {}'.format(metric))
 
+        if len(metrics) == 0:
+            # nothing qualified
             if self.logging:
-                self._log('    {}'.format(metrics[-1]))
+                self._log('{}: no full edges found')
+            return None, edges, 'no full edges'
 
         # now find the best edge
+        if self.logging:
+            self._log('{}: picking best edge from {} candidates'.format(prefix, len(metrics)))
         best_edge = None
         for edge in metrics:
             best_edge = pick_best(edge, best_edge)
@@ -2781,7 +2856,7 @@ class Scan:
         # we need to start from a known position, so find the first non gap
         reason = None
         start_x = None
-        full_edge = full_edges[best_edge.edge][1]
+        full_edge = full_edges[best_edge.edge]
         for x in range(max_x):
             if full_edge[x] is None:
                 # found a gap, find the other end as our start point
@@ -2836,7 +2911,7 @@ class Scan:
                 self._log('{}: best edge {} at {},{}'.format(prefix, best_edge, 0, full_edge[0]))
 
         # our joined up edge fragments all start at 0
-        return (0, full_edge), edges, reason
+        return [0, full_edge], edges, reason
 
     def _find_extent(self, target):
         """ find the inner and outer edges of the given target,
@@ -2846,10 +2921,10 @@ class Scan:
             """
 
         # look for the inner edge as a white to black transition
-        w2b_edges, threshold = self._get_transitions(target, 0, 1, True)
+        w2b_edges, w2b_threshold = self._get_transitions(target, 0, 1, True)
         context = self.Context(target, Scan.TOP_DOWN)
         ring_inner_edge, inner_fragments, reason = self._find_radius(context, w2b_edges,
-                                                                     threshold, 'radius-inner')
+                                                                     w2b_threshold, 'radius-inner')
         if reason is not None:
             reason = 'inner {}'.format(reason)
             b2w_edges = None
@@ -2867,18 +2942,28 @@ class Scan:
                 # we assume y here represents the two inner white rings, so the whole lot is...
                 outer_limit[x] = min(max(inner_limit[x] / 2, Scan.MIN_PIXELS_PER_RING_PROJECTED) * \
                                  Scan.NUM_RINGS * Scan.RING_RADIUS_STRETCH, max_y - 1)
-            b2w_edges, threshold = self._get_transitions(target, 0, 1, False)
+            b2w_edges, b2w_threshold = self._get_transitions(target, 0, 1, False)
             context = self.Context(target, Scan.BOTTOM_UP)
             ring_outer_edge, outer_fragments, reason = self._find_radius(context, b2w_edges,
-                                                                         threshold, 'radius-outer',
+                                                                         b2w_threshold, 'radius-outer',
                                                                          inner_limit=inner_limit,
                                                                          outer_limit=outer_limit)
             if reason is not None:
                 reason = 'outer {}'.format(reason)
 
+        # smooth the edges
+        if ring_inner_edge is not None:
+            # do via an intermediary for debugging purposes
+            inner_edge_raw = ring_inner_edge[1]
+            ring_inner_edge[1] = self._smooth_edge(inner_edge_raw)
+        if ring_outer_edge is not None:
+            # do via an intermediary for debugging purposes
+            outer_edge_raw = ring_outer_edge[1]
+            ring_outer_edge[1] = self._smooth_edge(outer_edge_raw)
+
         if self.save_images:
             if w2b_edges is not None:
-                plot = self._draw_below(w2b_edges, threshold, Scan.RED)
+                plot = self._draw_below(w2b_edges, w2b_threshold, Scan.RED)
                 if inner_fragments is not None:
                     for fragment in inner_fragments:
                         points = [[fragment[0], fragment[1]]]
@@ -2889,7 +2974,7 @@ class Scan:
                 self._unload(plot, '02-inner')
 
             if b2w_edges is not None:
-                plot = self._draw_below(b2w_edges, threshold, Scan.RED)
+                plot = self._draw_below(b2w_edges, b2w_threshold, Scan.RED)
                 if outer_fragments is not None:
                     for fragment in outer_fragments:
                         points = [[fragment[0], fragment[1]]]
@@ -3217,6 +3302,27 @@ class Scan:
         # return flattened image
         return Scan.Extent(target=code, inner_edge=inner_edge, outer_edge=outer_edge, size=target_size)
 
+    def _smooth_edge(self, in_edge):
+        """ smooth the given edge vector by doing a mean across N pixels,
+            if wraps is True the edge wraps end-to-end,
+            return the smoothed vector
+            """
+        extent = len(in_edge)
+        out_edge = [None for _ in range(extent)]
+        for x in range(extent):
+            v = 0  # value accumulator
+            d = 0  # divisor accumulator
+            for dx, f in Scan.SMOOTHING_KERNEL:
+                sample = in_edge[(x + dx) % extent]
+                if sample is None:
+                    # what does this mean?
+                    continue
+                v += (sample * f)
+                d += f
+            if d > 0:
+                out_edge[x] = int(round(v / d))
+        return out_edge
+
     def _get_gap(self, first, second, max_x=0):
         """ compute distance between first and second pixel (by Pythagoras without the square root),
             if wrapping possible first must be 'before' second but second may have wrapped in x at max_x
@@ -3336,9 +3442,7 @@ class Scan:
             returns a list of pixels or an empty list if the given x,y is not over the threshold,
             """
 
-        max_x = context.max_x
         max_y = context.max_y
-        allow_wrap = context.allow_scan_wrap
         scan_limit = context.max_scan_coord + 1
         scan_coord = context.scan_coord
         if reversed:
@@ -3346,8 +3450,6 @@ class Scan:
         else:
             scan_inc = context.scan_multiplier
 
-        x = int(round(x % max_x))
-        y = int(round(y))
         if y >= max_y:
             return []
 
@@ -3360,10 +3462,7 @@ class Scan:
             pixels.append(edge_pixel)    # add it to our list
             xy[scan_coord] += scan_inc  # move on
             if xy[scan_coord] >= scan_limit:
-                if allow_wrap:
-                    xy[scan_coord] %= scan_limit  # carry on around
-                else:
-                    break  # that's it
+                break  # that's it
 
         return pixels
 
@@ -3411,7 +3510,7 @@ class Scan:
         cross_coord = context.cross_coord
         scan_multiplier = context.scan_multiplier
 
-        xy = [int(round(x)), int(round(y))]  # must int+round to ensure we get a correct midpoint
+        xy = [x, y]
 
         pixels_up = self._get_within_threshold(target, context, xy[0], xy[1], threshold, reversed=True)
         if len(pixels_up) == 0:
@@ -3421,6 +3520,7 @@ class Scan:
 
         xy[scan_coord] += (scan_multiplier * 1)
         pixels_down = self._get_within_threshold(target, context, xy[0], xy[1], threshold, reversed=False)
+        # NB: pixels_down length of zero is OK
 
         if scan_multiplier < 0:
             # up is natural, down is reversed
@@ -3518,26 +3618,7 @@ class Scan:
 
         return edges, threshold
 
-    def _clear_edge_pixels(self, target, context, points):
-        """ clear the pixels of the given edge points in the given image,
-            the pixels cleared are those between the width of each midpoint for every midpoint in the edge
-            """
-
-        cross_coord = context.cross_coord
-        scan_coord = context.scan_coord
-
-        for point in points:
-            from_xy = [None, None]
-            to_xy = [None, None]
-            from_xy[cross_coord] = point.where
-            from_xy[scan_coord] = point.first
-            to_xy[cross_coord] = point.where
-            to_xy[scan_coord] = point.last
-            self.transform.fill(target, from_xy, to_xy, MIN_LUMINANCE)
-
-        return target
-
-    def _compress(self, context, inner_edge, outer_edge):
+    def _compress(self, target, inner_edge, outer_edge):
         """ compress the context target pixel luminance range into just black and white,
             inner/outer_edge is a list of y's for the target inner and outer edges,
             returns the modified image such that pixels before the inner or after the outer edge are white,
@@ -3601,11 +3682,12 @@ class Scan:
 
             return low_neighbours, high_neighbours
 
-        target = context.target
-        min_width = context.min_width
+        max_x, max_y = target.size()
+
+        # calc the minimum width of a ring in pixels (used in thresholding and enforcing inner/outer black rings)
+        min_width = max((max_y / Scan.NUM_RINGS) * Scan.MIN_EDGE_WIDTH, Scan.MIN_EDGE_WIDTH_PIXELS)
 
         # get the thresholds to apply
-        max_x, max_y = target.size()
         threshold = self._get_slices_thresholds(target, Scan.BUCKET_THRESHOLD_LEVELS,
                                                 inner_edge, outer_edge, min_width)
 
@@ -3801,6 +3883,8 @@ class Scan:
 
         max_x, max_y = target.size()
 
+        if self.logging:
+            header = 'slices: ignoring short edge pairs:'
         slices = [Scan.Slice(x) for x in range(max_x)]
         for x in range(max_x):
             slice = slices[x]
@@ -3821,8 +3905,10 @@ class Scan:
                     if span < min_span:
                         # too small, ignore it and chuck its other edge
                         if self.logging:
-                            self._log('slices: ignoring short edge pair '
-                                      'from {},{} to {},{} (span {}, limit is {})'.
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {},{} .. {},{} (span {}, min is {})'.
                                       format(x, where, x, y, span, min_span))
                         del slice.points[-1]
                         continue
@@ -4520,18 +4606,18 @@ class Scan:
 
         return good_bits, reason
 
-    def _get_slice_bits(self, context, inner_edge, outer_edge):
+    def _get_slice_bits(self, target, inner_edge, outer_edge):
         """ get all the slice bits in the context target,
             inner/outer edge define the limits of the code within the target,
             returns a vector of SliceBits
             """
 
-        target = self._compress(context, inner_edge, outer_edge)
-        slices = self._make_slices(target, inner_edge, outer_edge)
+        compressed = self._compress(target, inner_edge, outer_edge)
+        slices = self._make_slices(compressed, inner_edge, outer_edge)
         slices = self._decode_slices(slices)
-        slices = self._filter_slices(target, slices)
+        slices = self._filter_slices(compressed, slices)
         bits = self._make_bits(slices)
-        good_bits = self._filter_bits(target, bits)
+        good_bits = self._filter_bits(compressed, bits)
 
         return good_bits
 
@@ -4575,10 +4661,8 @@ class Scan:
             outer_edge = flattened.outer_edge
             target_size = flattened.size
 
-            ring_context = self.Context(target, Scan.UP_AND_DOWN)
-
             # get the slice bits
-            bits, reason = self._get_slice_bits(ring_context, inner_edge, outer_edge)
+            bits, reason = self._get_slice_bits(target, inner_edge, outer_edge)
             if reason is not None:
                 if self.save_images:
                     rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, None, reason))
@@ -4648,7 +4732,7 @@ class Scan:
             number, doubt, digits = self.decoder.unbuild(code)
 
             # add this result
-            numbers.append(Target(number, doubt, self.centre_x, self.centre_y, target_size, blob_size, digits))
+            numbers.append(Scan.Detection(number, doubt, self.centre_x, self.centre_y, target_size, blob_size, digits))
 
             if self.logging:
                 number = numbers[-1]
@@ -4963,11 +5047,11 @@ class Test:
             traceback.print_exc()
         self._log('******************')
 
-    def test_set(self, size):
+    def test_set(self, size, presets=None):
         """ make a set of test codes,
-            the test codes consist of the minimum and maximum numbers plus those with the most
-            1's and the most 0's and alternating 1's and 0's and N random numbers to make the
-            set size up to that given
+            the test codes consist of the given presets plus the minimum and maximum numbers
+            plus those with the most 1's and the most 0's and alternating 1's and 0's and
+            N random numbers to make the set size up to that given
             """
         if self.max_num is None:
             return []
@@ -4978,6 +5062,8 @@ class Test:
         max_ones = -1
         max_zeroes = -1
         num_set = [self.min_num, self.max_num]
+        if presets is not None:
+            num_set += presets
         max_ones_num = None
         max_zeroes_num = None
         num_bits = self.bits - self.marker_bits
@@ -5363,7 +5449,7 @@ def verify():
                  debug=test_debug_mode)
 
     # build a test code set
-    test_num_set = test.test_set(10)
+    test_num_set = test.test_set(10, [161, 191])
 
     # test.coding()
     # test.decoding()
@@ -5373,12 +5459,12 @@ def verify():
     # test.rings(test_codes_folder, test_ring_width)
 
     # test.scan_codes(test_codes_folder)
-    # test.scan_media(test_media_folder)
+    test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
-    # test.scan(test_media_folder, [565], 'photo-565.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
+    # test.scan(test_media_folder, [101], 'photo-101-v2.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v5.jpg')
 
     del (test)  # needed to close the log file(s)
 
