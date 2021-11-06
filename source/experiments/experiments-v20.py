@@ -2336,9 +2336,6 @@ class Scan:
                                         format(centre_x, centre_y, blob_size))
             # save it
             self._unload(blob, '01-target', centre_x, centre_y)
-        if self.logging:
-            max_x, max_y = code.size()
-            self._log('project: projected image size {}x {}y'.format(max_x, max_y))
 
         return code, limit_radius
 
@@ -2713,12 +2710,11 @@ class Scan:
             for every x (starting at 0), the y co-ord is None where there are gaps.
             """
 
-        def find_reachable(from_x=-1, from_y=None, limit_x=None):
+        def find_reachable(from_x=-1, from_y=None):
             """ find edges that are reachable from the given x,y,
                 if from_y not given treat as all possible y's,
                 if from_y is given only edges reachable from that are returned,
                 also, direct connections override non-direct,
-                if limit_x is given reachable edge starts of that are ignored,
                 the given x,y is assumed to be the end of some other edge,
                 returns a list of edges that are reachable in x order,
                 NB: from_x must be the end of some edge *not* the start,
@@ -2729,9 +2725,6 @@ class Scan:
             connected_edges = []
             for dx in range(max_edge_x_gap):
                 x = (from_x + 1 + dx) % max_x
-                if limit_x is not None and x == limit_x:
-                    # not allowed to look further
-                    break
                 slice = slices[x]
                 for edge in slice:
                     if from_y is not None:
@@ -2773,88 +2766,59 @@ class Scan:
                 # no direct connections
                 return reachable_edges
 
-        def extend(this_edge, this_joins, start_x, edge, clone=False):
-            """ given an edge, return a list of edges that join it or None if nothing joins it,
-                recurses on each choice generating a *massive* search tree,
-                if clone is True this_edge/joins is copied before it is modified
-                ToDo: tree pruning - how?
-                """
+        def extend(this_edge, this_joins, start_x, edge, depth=1):
+            """ given an edge, return a list of edges that join it """
 
-            def add_edge(this_edge, this_joins, edge, clone):
-                """ add the given edge to the given extended edge,
-                    if clone is True the extending edge is copied first,
-                    returns the updated edge and joins
-                    """
-
-                if clone:
-                    extend_this = this_edge.copy()
-                    extend_joins = this_joins.copy()
-                else:
-                    extend_this = this_edge
-                    extend_joins = this_joins
-
-                x = edge.start
-                edge_length = len(edge.points)
-                if extend_this[edge.end] is not None:
-                    # this edge overlaps the start, that means our completion detection failed...
-                    self._log('overlap extending {} with {}'.format(extend_joins, edge), fatal=True)
-                if len(extend_joins) > 0 and extend_joins[-1] == -1:
-                    # an attempt to extend a complete edge, bad boy...
-                    self._log('attempt to extend completed edge {} with {}'.format(extend_joins, edge), fatal=True)
-                # add this edge points
-                for dx in range(edge_length):
-                    extend_this[(x + dx) % max_x] = edge.points[dx]
-                # note the join
-                extend_joins.append(edge.id)
-
-                return extend_this, extend_joins
-
-            # see if the edge is complete
-            if len(this_joins) > 0 and this_joins[-1] == -1:
-                # this edge is complete, so do not attempt to add to it
-                return None
-
-            # see if got back to start
-            if ((edge.end + 1) % max_x) == start_x:
-                # this edge brings us back to the start, so include this then we're done
-                that_edge, that_joins = add_edge(this_edge, this_joins, edge, clone)
-                that_joins.append(-1)  # mark as complete
-                return [[that_edge, that_joins]]
-            else:
-                start_before_start = (edge.start < start_x or edge.start + len(edge.points) > max_x)
-                end_after_start = ((edge.end + 1) % max_x) > start_x
-                if start_before_start and end_after_start:
-                    # this edge crosses the start, so does not fit
-                    if clone:
-                        # no point marking it as complete
-                        return None
+            def log(msg):  # ToDo: HACK
+                if self.logging:
+                    if self.centre_x == 181:
+                        prefix = '_' * (depth * 2)
+                        self._log('**** from {}: {} {}'.format(start_x, prefix, msg))
                     else:
-                        this_joins.append(-1)  # mark as complete
-                        return None
+                        self._log('stopping', fatal=True)
 
-            # find all reachable edges from the end of this one
-            next_edges = find_reachable(edge.end, edge.points[-1], start_x)
+            # log('extend {}'.format(edge))
+
+            # make a copy of what we have so far
+            extend_this = [this_edge[x] for x in range(max_x)]
+            extend_joins = [this_joins[x] for x in range(len(this_joins))]
+
+            x = edge.start
+            edge_length = len(edge.points)
+            if extend_this[edge.end] is not None:
+                # this edge overlaps the start, so nothing to add
+                # log('__overlaps the start')
+                return None
+            # add this edge
+            for dx in range(edge_length):
+                extend_this[(x + dx) % max_x] = edge.points[dx]
+                start_x += 1
+            extend_joins.append(edge.id)
+            # extend this edge by every reachable edge from the end of this one
+            # find all reachable starts from here
+            next_edges = find_reachable(edge.end, edge.points[-1])
+            # clone the edge so far for every reachable start from here
+            # if self.logging:
+                # log('__{} nexts:'.format(len(next_edges)))
+                # for next_edge in next_edges:
+                #     log('____{}'.format(next_edge))
             if len(next_edges) == 0:
-                # nothing coming up next, so just add this and we're done
-                that_edge, that_joins = add_edge(this_edge, this_joins, edge, clone)
-                that_joins.append(-1)  # mark as complete
-                return [[that_edge, that_joins]]
+                # nothing reachable from here, so that's it
+                # log('__nothing reachable')
+                return [[extend_this, extend_joins]]
             if len(next_edges) == 1:
-                # only one choice, so just add the given edge and this next to what we have so far
-                that_edge, that_joins = add_edge(this_edge, this_joins, edge, clone)
-                extended = extend(that_edge, that_joins, start_x, next_edges[0])
+                # only one, so just add to the edge we were given
+                extended = extend(extend_this, extend_joins, start_x, next_edges[0], depth + 1)
                 if extended is None:
-                    return [[that_edge, that_joins]]
-                else:
-                    return extended
-
-            # got multiple forward choices, add given edge, then clone for all forward choices
-            extend_this, extend_joins = add_edge(this_edge, this_joins, edge, clone)
-
-            # extend with the first reachable edge
-            extensions = extend(extend_this, extend_joins, start_x, next_edges[0], clone=True)
+                    # run out of room, so that's it
+                    # log('__single next: out of room')
+                    return [[extend_this, extend_joins]]
+                # log('__single next: return {} edges'.format(len(extended)))
+                return extended
+            # extend the one we were given with the first reachable edge
+            extensions = extend(extend_this, extend_joins, start_x, next_edges[0], depth + 1)
             if extensions is None:
-                # this next does not fit
+                # first option does not fit, so just add what we have so far
                 extensions = [[extend_this, extend_joins]]
             for e in range(1, len(next_edges)):
                 # ignore next edge candidate if its in the joins of the previous one,
@@ -2864,10 +2828,13 @@ class Scan:
                 next_edge = next_edges[e]
                 if next_edge.id in previous_joins:
                     # ignore this one
+                    # log('__ignoring next edge {}'.format(next_edge))
                     continue
-                extended = extend(extend_this, extend_joins, start_x, next_edge, clone=True)
+                extended = extend(extend_this, extend_joins, start_x, next_edge, depth + 1)
                 if extended is not None:
+                    # we did extend, so add the result to our list
                     extensions += extended
+            # log('__{} nexts: return {} edges'.format(len(next_edges), len(extensions)))
             return extensions
 
         max_x = context.max_x
@@ -3050,7 +3017,7 @@ class Scan:
 
             if best_edge is None:
                 if self.logging:
-                    self._log('    edge #{} better than nothing, initial best {}'.format(edge.edge, edge))
+                    self._log('    edge #{} better than nothing, best={}'.format(edge.edge, edge))
                 return edge
             better_score = 0
             worse_score = 0
@@ -3099,14 +3066,14 @@ class Scan:
             if better_score > worse_score:
                 # candidate edge is better
                 if self.logging:
-                    self._log('    edge #{} better than #{} (better={}, worse={}) best now {}'.
-                              format(edge.edge, best_edge.edge, better_score, worse_score, edge))
+                    self._log('    edge #{} better than #{} (better={}, worse={}) best={} other={}'.
+                              format(edge.edge, best_edge.edge, better_score, worse_score, edge, best_edge))
                 return edge
             else:
                 # best edge is still best
-                # if self.logging:
-                #     self._log('    edge #{} better than #{} (better={}, worse={}) best={} other={}'.
-                #               format(best_edge.edge, edge.edge, better_score, worse_score, best_edge, edge))
+                if self.logging:
+                    self._log('    edge #{} better than #{} (better={}, worse={}) best={} other={}'.
+                              format(best_edge.edge, edge.edge, better_score, worse_score, best_edge, edge))
                 return best_edge
 
         def fill_gap(edge, size, start_x, stop_x, start_y, stop_y, max_x):
@@ -3625,9 +3592,6 @@ class Scan:
             plot = self._draw_plots(code, [[0, inner_edge]], None, Scan.GREEN)
             plot = self._draw_plots(plot, [[0, outer_edge]], None, Scan.GREEN)
             self._unload(plot, '05-flat')
-        if self.logging:
-            max_x, max_y = code.size()
-            self._log('flatten: flattened image size {}x {}y'.format(max_x, max_y))
 
         # return flattened image
         return Scan.Extent(target=code, inner_edge=inner_edge, outer_edge=outer_edge, size=target_size)
@@ -3838,11 +3802,9 @@ class Scan:
 
         return slope
 
-    def _find_peaks(self, sequence, threshold=0, edge_type=None):
+    def _find_peaks(self, sequence, threshold=0):
         """ given a list of values that represent some sort of sequence find the peaks and its slopes,
             threshold is the value change required to qualify as a slope change,
-            edge_type is LEADING_EDGE or TRAILING_EDGE or None
-            (used to select leading or trailing peak edge or centre)
             returns a list of co-ordinates into the sequence that represent peaks as well as
             the differentiation of the sequence (its slope)
             """
@@ -3873,20 +3835,14 @@ class Scan:
                     curr_x = prev_x
                 elif prev > 0 and curr < 0:
                     # prev_x is the leading edge of the peak and curr_x-1 is the trailing edge
-                    if edge_type == Scan.LEADING_EDGE:
-                        peaks.append(prev_x)
-                    elif edge_type == Scan.TRAILING_EDGE:
-                        peaks.append(curr_x - 1)
-                    else:
-                        # want the centre, set the peak as between the two points
-                        peak = int(round(prev_x + ((curr_x - 1 - prev_x) / 2)))
-                        peaks.append(peak)
+                    # we set the peak as between the two points
+                    peak = int(round(prev_x + ((curr_x - 1 - prev_x) / 2)))
+                    peaks.append(peak)
 
         return peaks, slope
 
     def _find_neighbour_peaks(self, pixels, direction, threshold):
         """ given a list of pixels (in ascending co-ord order) find the 'bright' peaks,
-            direction is TOP_DOWN or BOTTOM_UP (used to determine which peak edge is required),
             threshold is the luminance threshold for an edge pixel,
             return a list co-ords of the bright peaks,
             the pixels given here are *across* the edge (i.e. its width or thickness),
@@ -3899,15 +3855,9 @@ class Scan:
         for pixel in range(len(pixels)):
             sequence[pixel + 1] = int(pixels[pixel])
 
-        # set peak edge we want
-        if direction == Scan.TOP_DOWN:
-            edge_type = Scan.LEADING_EDGE
-        else:
-            edge_type = Scan.TRAILING_EDGE
-
         # find luminance peaks
         threshold = int(round(threshold * Scan.SIGNIFICANT_SLOPE_THRESHOLD))
-        peaks, slope = self._find_peaks(sequence, threshold, edge_type)
+        peaks, slope = self._find_peaks(sequence, threshold)
         if len(peaks) == 0:
             return None
 
@@ -4642,7 +4592,7 @@ class Scan:
                 histogram[x] += 1
 
         # find peaks
-        peaks, slope = self._find_peaks(histogram, 3, edge_type)  # ToDo: make '3' a Scan constant
+        peaks, slope = self._find_peaks(histogram, 3)  # ToDo: make '3' a Scan constant
 
         if self.logging:
             self._log('{}: histogram: {}'.format(edge_type, histogram))
@@ -5831,8 +5781,8 @@ def verify():
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
-    # test.scan(test_media_folder, [102], 'photo-102.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
+    test.scan(test_media_folder, [102], 'photo-102.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
 
     del (test)  # needed to close the log file(s)
 
