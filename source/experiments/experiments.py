@@ -1501,6 +1501,10 @@ class Scan:
     RADIUS_PROBE_CENTRES = 18  # how many probes in x to make when looking for inner/outer edges
     RADIUS_PROBE_MIN_LENGTH = 0.7  # min length of an edge fragment as a fraction of the probe width
     MAX_RADIUS_EDGE_GAP = 0.1  # max gap/distance between radius edge fragments in x as a fraction of the max
+    MAX_JOIN_CHOICES = 4  # limit for the join choices when building full edges from fragments
+    MAX_FULL_EDGES = 1000  # limit for the number of full edges to explore for each lead edge
+    MIN_FULL_EDGES = 0  # if found at least this many full edges, limit on number of dead ends
+    MAX_DEAD_EDGES = 1000  # once got MIN_FULL_EDGES give up if get this many dead ends
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
     MIN_PIXELS_PER_RING_FLAT = 4  # min pixels per ring in the flattened image
     MIN_PIXELS_PER_RING_MEASURED = 1  # min number of pixels per ring after measuring target extent
@@ -2713,20 +2717,28 @@ class Scan:
             for every x (starting at 0), the y co-ord is None where there are gaps.
             """
 
+        completions_found = 0
+        ends_found = 0
+
+        # ToDo: allow joining of overlapping edges, e.g.:
+        #       A --> |     /----     |
+        #       B --> |----/   -------|
+        #                       ^(1)  ^(2)
+        #       want A to join B at (1) rather than (2)
+        #       photo many v4 @697 outer has an eg. of this
+
         def find_reachable(from_x=-1, from_y=None, limit_x=None):
             """ find edges that are reachable from the given x,y,
                 if from_y not given treat as all possible y's,
                 if from_y is given only edges reachable from that are returned,
-                also, direct connections override non-direct,
                 if limit_x is given reachable edge starts of that are ignored,
                 the given x,y is assumed to be the end of some other edge,
-                returns a list of edges that are reachable in x order,
+                returns a list of edges that are reachable in x order closest first,
                 NB: from_x must be the end of some edge *not* the start,
                 the default parameters find all reachable edges from 0
                 """
 
             reachable_edges = []
-            connected_edges = []
             for dx in range(max_edge_x_gap):
                 x = (from_x + 1 + dx) % max_x
                 if limit_x is not None and x == limit_x:
@@ -2734,51 +2746,76 @@ class Scan:
                     break
                 slice = slices[x]
                 for edge in slice:
-                    if from_y is not None:
+                    if from_y is None:
+                        this_gap = 0
+                        this_slope = 0
+                    else:
                         # is this edge reachable from_x, from_y
-                        gap = self._get_gap((from_x, from_y),
+                        this_gap = self._get_gap((from_x, from_y),
                                             (edge.start, edge.points[0]), max_x)
-                        if gap > max_edge_gap:
+                        if this_gap > max_edge_gap:
                             # not reachable by this one
                             continue
-                        elif gap > 2:
-                            # not direct connection
-                            if len(connected_edges) > 0:
-                                # we've found at least one direct connection, so stop looking for others
-                                continue
-                        else:
-                            # its a direct connection
-                            connected_edges.append(edge)
-                            continue
+                        # determine the slope of this edge (y diff between start and end)
+                        this_slope = edge.points[0] - edge.points[-1]
+                        this_slope *= this_slope           # square it to get rid of sign
                     # only add the edge if its not directly connected to anything we have so far
                     # NB: edges indirectly connected, e.g. |--1--|..2..|--3--| where ..2.. is some other
-                    #     edge we skipped, so 1 is connected to 3 via 2, are detected by the extend() function.
+                    #     edge we skipped, so 1 is connected to 3 via 2,
+                    #     these are detected by the extend() function.
                     connected = False
-                    for reachable_edge in reachable_edges:
-                        gap = self._get_gap((reachable_edge.end, reachable_edge.points[-1]),
+                    for reachable_edge, _, _ in reachable_edges:
+                        prev_gap = self._get_gap((reachable_edge.end, reachable_edge.points[-1]),
                                             (edge.start, edge.points[0]), max_x)
-                        if gap > 2:
+                        if prev_gap > 2:
                             # its not directly connected
                             continue
                         # its connected, so do not want to add it again
                         connected = True
                         break
                     if not connected:
-                        reachable_edges.append(edge)
+                        reachable_edges.append([edge, this_gap, this_slope])
 
-            if len(connected_edges) > 0:
-                # use these in preference to those further afield
-                return connected_edges
+            # put into closest first order then min slope (y diff between start and end)
+            reachable_edges.sort(key=lambda e: (e[1], e[2]))
+
+            # region Determine how many reachable edges to keep...
+            if from_y is None:
+                # no limit when looking for initial lead edges
+                max_choices = len(reachable_edges)
+            elif len(reachable_edges) <= Scan.MAX_JOIN_CHOICES:
+                # we're inside our limit
+                max_choices = len(reachable_edges)
             else:
-                # no direct connections
-                return reachable_edges
+                # limit non-direct connection choices to the nearest N
+                non_direct = 0
+                for reachable_edge in reachable_edges:
+                    if reachable_edge[1] > 2:
+                        non_direct += 1
+                residue = len(reachable_edges) - non_direct
+                if residue < Scan.MAX_JOIN_CHOICES:
+                    # we've got room for some non-directs
+                    max_choices = Scan.MAX_JOIN_CHOICES
+                else:
+                    # directs are more than enough, so stick with those
+                    max_choices = len(reachable_edges)
+            # endregion
+
+            return [reachable_edges[x][0] for x in range(max_choices)]
 
         def extend(this_edge, this_joins, start_x, edge, clone=False):
             """ given an edge, return a list of edges that join it or None if nothing joins it,
                 recurses on each choice generating a *massive* search tree,
-                if clone is True this_edge/joins is copied before it is modified
+                if clone is True this_edge/joins is copied before it is modified,
+                the returned join list is terminated by -1 if it ran out of choices and -2 if it went full circle
                 ToDo: tree pruning - how?
                 """
+
+            nonlocal completions_found, ends_found
+
+            # join list codes (*must* be less than 0)
+            NO_MORE_CHOICES = -1
+            GONE_FULL_CIRCLE = -2
 
             def add_edge(this_edge, this_joins, edge, clone):
                 """ add the given edge to the given extended edge,
@@ -2798,7 +2835,7 @@ class Scan:
                 if extend_this[edge.end] is not None:
                     # this edge overlaps the start, that means our completion detection failed...
                     self._log('overlap extending {} with {}'.format(extend_joins, edge), fatal=True)
-                if len(extend_joins) > 0 and extend_joins[-1] == -1:
+                if len(extend_joins) > 0 and extend_joins[-1] < 0:
                     # an attempt to extend a complete edge, bad boy...
                     self._log('attempt to extend completed edge {} with {}'.format(extend_joins, edge), fatal=True)
                 # add this edge points
@@ -2810,7 +2847,7 @@ class Scan:
                 return extend_this, extend_joins
 
             # see if the edge is complete
-            if len(this_joins) > 0 and this_joins[-1] == -1:
+            if len(this_joins) > 0 and this_joins[-1] < 0:
                 # this edge is complete, so do not attempt to add to it
                 return None
 
@@ -2818,18 +2855,20 @@ class Scan:
             if ((edge.end + 1) % max_x) == start_x:
                 # this edge brings us back to the start, so include this then we're done
                 that_edge, that_joins = add_edge(this_edge, this_joins, edge, clone)
-                that_joins.append(-1)  # mark as complete
+                that_joins.append(GONE_FULL_CIRCLE)  # mark as complete
+                completions_found += 1               # note for short-circuiting
                 return [[that_edge, that_joins]]
             else:
                 start_before_start = (edge.start < start_x or edge.start + len(edge.points) > max_x)
                 end_after_start = ((edge.end + 1) % max_x) > start_x
                 if start_before_start and end_after_start:
-                    # this edge crosses the start, so does not fit
+                    # this edge crosses the start, so does not fit, so we're done
+                    completions_found += 1  # note for short-circuiting
                     if clone:
                         # no point marking it as complete
                         return None
                     else:
-                        this_joins.append(-1)  # mark as complete
+                        this_joins.append(GONE_FULL_CIRCLE)  # mark as complete
                         return None
 
             # find all reachable edges from the end of this one
@@ -2837,7 +2876,8 @@ class Scan:
             if len(next_edges) == 0:
                 # nothing coming up next, so just add this and we're done
                 that_edge, that_joins = add_edge(this_edge, this_joins, edge, clone)
-                that_joins.append(-1)  # mark as complete
+                that_joins.append(NO_MORE_CHOICES)   # mark as ended
+                ends_found += 1
                 return [[that_edge, that_joins]]
             if len(next_edges) == 1:
                 # only one choice, so just add the given edge and this next to what we have so far
@@ -2857,6 +2897,12 @@ class Scan:
                 # this next does not fit
                 extensions = [[extend_this, extend_joins]]
             for e in range(1, len(next_edges)):
+                if completions_found >= Scan.MAX_FULL_EDGES:
+                    # we've found enough, get out now
+                    break
+                elif completions_found >= Scan.MIN_FULL_EDGES and ends_found >= Scan.MAX_DEAD_EDGES:
+                    # too many dead ends found, give up
+                    break
                 # ignore next edge candidate if its in the joins of the previous one,
                 # this happens when the candidate is indirectly connected to some previous candidate,
                 # e.g. |--1--|..2..|--3--| where ..2.. is not a candidate, so 1 is connected to 3 via 2,
@@ -2894,6 +2940,8 @@ class Scan:
         full_edges = []
         for edge in lead_edges:
             # start a new full edge from this edge
+            completions_found = 0        # reset limit counters
+            ends_found = 0               # ..
             initial_edge = [None for _ in range(max_x)]
             initial_joins = []
             final_edges = extend(initial_edge, initial_joins, edge.start, edge)
@@ -5826,13 +5874,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    # test.scan_codes(test_codes_folder)
-    # test.scan_media(test_media_folder)
+    test.scan_codes(test_codes_folder)
+    test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [102], 'photo-102.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
 
     del (test)  # needed to close the log file(s)
 
