@@ -1499,10 +1499,10 @@ class Scan:
     BLOB_RADIUS_STRETCH = 4  # how much to stretch blob radius to ensure always cover the whole lot
     RING_RADIUS_STRETCH = 1.5  # how much stretch nominal ring size to ensure encompass the outer edge
     RADIUS_PROBE_CENTRES = 18  # how many probes in x to make when looking for inner/outer edges
-    RADIUS_PROBE_MIN_LENGTH = 0.7  # min length of an edge fragment as a fraction of the probe width
-    MAX_RADIUS_EDGE_GAP = 0.1  # max gap/distance between radius edge fragments in x as a fraction of the max
-    MAX_JOIN_CHOICES = 4  # limit for the join choices when building full edges from fragments
-    MAX_FULL_EDGES = 1000  # limit for the number of full edges to explore for each lead edge
+    RADIUS_PROBE_MIN_LENGTH = 0.4  # min length of an edge fragment as a fraction of the probe width
+    MAX_RADIUS_EDGE_GAP = 0.2  # max gap/distance between radius edge fragments in x as a fraction of the max
+    MAX_JOIN_CHOICES = 10  # limit for the join choices when building full edges from fragments
+    MAX_FULL_EDGES = 100  # limit for the number of full edges to explore for each lead edge
     MIN_FULL_EDGES = 0  # if found at least this many full edges, limit on number of dead ends
     MAX_DEAD_EDGES = 1000  # once got MIN_FULL_EDGES give up if get this many dead ends
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
@@ -1514,19 +1514,18 @@ class Scan:
     MIN_EDGE_TO_EDGE_PIXELS = 2  # minimum pixels if the above is below this
     MAX_BIT_SEQUENCE_LENGTH = 2.0  # max length of a bit sequence as a multiple of the nominal bit length
     MIN_BIT_SEQUENCE_LENGTH = 1/3  # min length of a bit sequence as a multiple of the nominal bit length
-    # endregion
 
     # x,y pairs for neighbours when looking for inner/outer radius edges,
     # the first x,y pair *must* be 0,0 (this constraint is required for edge split detection)
-    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1]]  # ToDo: HACK-->, [0, 2], [0, -2]]
+    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1], [0, 2], [0, -2]]
 
     # edge vector smoothing kernel, pairs of offset and scale factor (see _smooth_edge)
-    # ToDo: HACK-->SMOOTHING_KERNEL = [[-3, 0.5], [-2, 1], [-1, 1.5], [0, 2], [+1, 1.5], [+2, 1], [+3, 0.5]]
-    SMOOTHING_KERNEL = [[-3, 0.5], [-2, 1], [-1, 1], [0, 1.5]]
+    SMOOTHING_KERNEL = [[-4, 1.25], [-3, 1], [-2, 0.75], [-1, 0.5], [0, 0], [+1, 0.5], [+2, 0.75], [+3, 1], [+4, 1.25]]
 
     # min width of a ring as a fraction of the nominal ring width
     MIN_EDGE_WIDTH = 0.1
     MIN_EDGE_WIDTH_PIXELS = 2  # minimum width in pixels if the above is less than this
+    # endregion
 
     # region Video modes image height...
     VIDEO_SD = 480
@@ -1570,7 +1569,7 @@ class Scan:
     # the white band is implied as 1-(sum of the rest)
 
     # these are the levels used when detecting radius edges, only 'not-black' is relevant here
-    EDGE_THRESHOLD_LEVELS = (0.6, )      # trailing comma is required to sure make its a tuple and not a number
+    EDGE_THRESHOLD_LEVELS = (0.25, )      # trailing comma is required to sure make its a tuple and not a number
 
     # these are the levels used when translating an image into 'buckets'
     # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white or white in _compress
@@ -2719,6 +2718,7 @@ class Scan:
 
         completions_found = 0
         ends_found = 0
+        edge_visited = [False for _ in range(Scan.Fragment.last_id + 1)]
 
         # ToDo: allow joining of overlapping edges, e.g.:
         #       A --> |     /----     |
@@ -2738,6 +2738,8 @@ class Scan:
                 the default parameters find all reachable edges from 0
                 """
 
+            nonlocal edge_visited
+
             reachable_edges = []
             for dx in range(max_edge_x_gap):
                 x = (from_x + 1 + dx) % max_x
@@ -2749,6 +2751,9 @@ class Scan:
                     if from_y is None:
                         this_gap = 0
                         this_slope = 0
+                    elif edge_visited[edge.id]:
+                        # already been here, ignore it
+                        continue
                     else:
                         # is this edge reachable from_x, from_y
                         this_gap = self._get_gap((from_x, from_y),
@@ -2759,22 +2764,7 @@ class Scan:
                         # determine the slope of this edge (y diff between start and end)
                         this_slope = edge.points[0] - edge.points[-1]
                         this_slope *= this_slope           # square it to get rid of sign
-                    # only add the edge if its not directly connected to anything we have so far
-                    # NB: edges indirectly connected, e.g. |--1--|..2..|--3--| where ..2.. is some other
-                    #     edge we skipped, so 1 is connected to 3 via 2,
-                    #     these are detected by the extend() function.
-                    connected = False
-                    for reachable_edge, _, _ in reachable_edges:
-                        prev_gap = self._get_gap((reachable_edge.end, reachable_edge.points[-1]),
-                                            (edge.start, edge.points[0]), max_x)
-                        if prev_gap > 2:
-                            # its not directly connected
-                            continue
-                        # its connected, so do not want to add it again
-                        connected = True
-                        break
-                    if not connected:
-                        reachable_edges.append([edge, this_gap, this_slope])
+                    reachable_edges.append([edge, this_gap, this_slope])
 
             # put into closest first order then min slope (y diff between start and end)
             reachable_edges.sort(key=lambda e: (e[1], e[2]))
@@ -2811,11 +2801,12 @@ class Scan:
                 ToDo: tree pruning - how?
                 """
 
-            nonlocal completions_found, ends_found
+            nonlocal completions_found, ends_found, edge_visited
 
             # join list codes (*must* be less than 0)
             NO_MORE_CHOICES = -1
-            GONE_FULL_CIRCLE = -2
+            ALREADY_VISITED = -2
+            GONE_FULL_CIRCLE = -3
 
             def add_edge(this_edge, this_joins, edge, clone):
                 """ add the given edge to the given extended edge,
@@ -2832,6 +2823,9 @@ class Scan:
 
                 x = edge.start
                 edge_length = len(edge.points)
+                if edge_visited[edge.id]:
+                    # been here before, bad boy
+                    self._log('extending {} revisited edge {}'.format(extend_joins, edge), fatal=True)
                 if extend_this[edge.end] is not None:
                     # this edge overlaps the start, that means our completion detection failed...
                     self._log('overlap extending {} with {}'.format(extend_joins, edge), fatal=True)
@@ -2843,6 +2837,9 @@ class Scan:
                     extend_this[(x + dx) % max_x] = edge.points[dx]
                 # note the join
                 extend_joins.append(edge.id)
+
+                # note we've been here
+                edge_visited[edge.id] = True
 
                 return extend_this, extend_joins
 
@@ -2903,13 +2900,9 @@ class Scan:
                 elif completions_found >= Scan.MIN_FULL_EDGES and ends_found >= Scan.MAX_DEAD_EDGES:
                     # too many dead ends found, give up
                     break
-                # ignore next edge candidate if its in the joins of the previous one,
-                # this happens when the candidate is indirectly connected to some previous candidate,
-                # e.g. |--1--|..2..|--3--| where ..2.. is not a candidate, so 1 is connected to 3 via 2,
-                previous_joins = extensions[-1][1]
                 next_edge = next_edges[e]
-                if next_edge.id in previous_joins:
-                    # ignore this one
+                if edge_visited[next_edge.id]:
+                    # been here already, ignore it
                     continue
                 extended = extend(extend_this, extend_joins, start_x, next_edge, clone=True)
                 if extended is not None:
@@ -2938,14 +2931,28 @@ class Scan:
 
         # join all reachable edges from every potential start
         full_edges = []
+        leads_visited = []
         for edge in lead_edges:
-            # start a new full edge from this edge
-            completions_found = 0        # reset limit counters
-            ends_found = 0               # ..
+            if edge.id in leads_visited:
+                # some other lead got here, so don't bother again
+                continue
+            # region Prepare to start a new full-edge from this lead edge...
+            completions_found = 0
+            ends_found = 0
+            edge_visited = [False for _ in range(Scan.Fragment.last_id + 1)]
             initial_edge = [None for _ in range(max_x)]
             initial_joins = []
+            # endregion
             final_edges = extend(initial_edge, initial_joins, edge.start, edge)
             full_edges += final_edges
+            # region Check if any of our leads have been visited...
+            for edge in lead_edges:
+                if edge_visited[edge.id]:
+                    leads_visited.append(edge.id)
+            # endregion
+            if self.logging:
+                self._log('{}: from lead edge {}: found {} edges, {} completions, {} dead-ends'.
+                          format(prefix, edge.id, len(final_edges), completions_found, ends_found))
 
         # check the end to start (wrapping) gap
         for edge in range(len(full_edges)-1, -1, -1):
@@ -3682,7 +3689,7 @@ class Scan:
 
     def _smooth_edge(self, in_edge):
         """ smooth the given edge vector by doing a mean across N pixels,
-            if wraps is True the edge wraps end-to-end,
+            the edge may wrap,
             return the smoothed vector
             """
         extent = len(in_edge)
@@ -5874,13 +5881,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    test.scan_codes(test_codes_folder)
-    test.scan_media(test_media_folder)
+    # test.scan_codes(test_codes_folder)
+    # test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [102], 'photo-102.jpg')
-    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
+    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     del (test)  # needed to close the log file(s)
 
