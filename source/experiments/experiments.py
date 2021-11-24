@@ -1504,7 +1504,7 @@ class Scan:
     RADIUS_PROBE_MIN_LENGTH = 1/15  # min length of an edge fragment as a fraction of the max
     RADIUS_PROBE_MIN_PIXELS = 3  # if the above is less than this pixels, use this min length in pixels
     MAX_RADIUS_EDGE_GAP = 1/8  # max gap/distance between radius edge fragments in x as a fraction of the max
-    MAX_FULL_EDGES = 10  # stop looking for fragment joins when found this many full length ones
+    MAX_FULL_EDGES = 20  # stop looking for fragment joins when found this many full length ones
     MAX_JOIN_CHOICES = 2  # limit for the join choices when building full edges from fragments
     MAX_EDGES_PER_LEAD = 100  # stop looking for full edges when found this many per lead fragment
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
@@ -1587,6 +1587,12 @@ class Scan:
     JOINED = 'joined'
     DEAD = 'dead'
     ENDED = 'ended'
+    # endregion
+
+    # region Fragment/Edge state codes...
+    HEADJOIN = 'head-join'
+    TAILJOIN = 'tail-join'
+    COMPLETE = 'complete'
     # endregion
 
     # region Ring numbers of flattened image...
@@ -2100,13 +2106,13 @@ class Scan:
 
         last_id = -1
 
-        def __init__(self, start, end, points, reason, mergee=None, slope=None):
+        def __init__(self, start, end, points, reason, mergee=None, split=False):
             self.start = start  # the x co-ord of the start of the fragment
             self.end = end  # the x co-ord of the end of the fragment
             self.points = points  # list of y co-ords for this fragment
-            self.slope = slope  # number of slope changes in this fragment
             self.reason = reason  # the reason the fragment ended
             self.mergee: Optional[Scan.Fragment] = mergee  # the fragment this merges with or None if it doesn't
+            self.split = split  # iff True this is a continuation of a split edge or an edge jump
             self.collisions: List[Scan.Fragment] = []  # list of fragments that collide with this one
             Scan.Fragment.last_id += 1
             self.id = Scan.Fragment.last_id
@@ -2117,9 +2123,9 @@ class Scan:
                 points = '{}..{}'.format(vstr(self.points[:5], 'n'), vstr(self.points[-5:], 'n'))
             else:
                 points = '{}'.format(vstr(self.points, 'n'))
-            return '(#{}({}): {},{}..{},{} points({}): {}, slope:{}, collisions:{}, state:{})'. \
+            return '(#{}({}): {},{}..{},{} points({}): {}, collisions:{}, split:{}, state:{})'.\
                 format(self.id, self.reason, self.start, self.points[0], self.end, self.points[-1],
-                       len(self.points), points, self.slope, len(self.collisions), self.state)
+                       len(self.points), points, len(self.collisions), self.split, self.state)
 
         @staticmethod
         def reset():
@@ -2128,28 +2134,18 @@ class Scan:
     class Edge:
         """ info about continuous edges being constructed from edge fragments """
 
-        # edge state codes
-        CREATE = 'create'
-        ACTIVE = 'active'
-        MERGED = 'merged'
-        ENDED = 'ended'
-        DEAD = 'dead'
-
-        def __init__(self, parent=None, first=None, root=None):
-            self.parent: Scan.Edge = parent  # the parent edge of this one or None if the 'top'
-            self.root: int = root  # the start x for the beginning of this edge (propagated to all children)
-            self.fragments: List[Scan.Fragment] = [first]  # list of Fragment instances making up this edge
-            self.children: List[Scan.Edge] = []  # list of children Edge instances of this one
-            self.state = Scan.Edge.CREATE  # gets set to ACTIVE when starts to be followed and DEAD if killed
+        def __init__(self, fragments=None, length=None):
+            self.fragments: List[Scan.Fragment] = fragments  # list of Fragment instances making up this edge
+            self.length = length  # total length in X (None==not known yet)
+            self.state = None
 
         def __str__(self):
             if len(self.fragments) > 0:
                 first_fragment = ', first={}'.format(self.fragments[0])
             else:
                 first_fragment = ''
-            return '(top:{}, root:{}, state:{}, #children:{}, #fragments:{}{})'.\
-                   format(True if self.parent is None else False,
-                          self.root, self.state, len(self.children), len(self.fragments), first_fragment)
+            return '(state:{}, length:{}, #fragments:{}{})'.\
+                   format(self.state, self.length, len(self.fragments), first_fragment)
 
     class EdgeMetric:
         """ result of measuring inner and outer edge candidates """
@@ -2451,8 +2447,7 @@ class Scan:
                     # splits at the beginning - do nothing
                     return None
                 # create a new fragment for the tail
-                tail = Scan.Fragment(split_x, fragment.end,
-                                     fragment.points[dx:], fragment.reason, Scan.SPLIT)
+                tail = Scan.Fragment(split_x, fragment.end, fragment.points[dx:], fragment.reason, split=True)
                 # shrink the original and consider to merge with tail
                 fragment.points = fragment.points[:dx]
                 fragment.end = (fragment.start + len(fragment.points) - 1) % max_x
@@ -2483,6 +2478,7 @@ class Scan:
                 if collision.reason != Scan.MERGED:
                     self._log('collider {} is not a MERGED edge'.format(collision), fatal=True)
                 joins.append([collision.end, collision.points[-1]])
+                # remove the collision x,y from the merged fragment
                 del collision.points[-1]
                 collision.end = (collision.end - 1) % max_x
             joins.sort(key=lambda e: (e[0], e[1]))
@@ -2551,21 +2547,31 @@ class Scan:
         return fragments
 
     def _merge_connected(self, context: Context, fragments: List[Fragment], span) -> List[Fragment]:
-        """ merge fragments that are connected within span,
-            returns the updated Fragment list and count of joins made and max length fragments
-            for each fragment so connected to another a new fragment of the two joined is created
+        """ merge fragments that are connected within X+1 and Y+span,
+            returns the updated Fragment list and count of max length fragments,
+            for each fragment so connected to another a new fragment of the two joined is created,
+            fragments must be sorted by start X then start Y,
             """
+
+        max_x = context.max_x
+        span *= span  # remove sign issues
 
         def connectable(head, tail):
             """ test if head can be connected to tail,
-                to be connected the end of head must meet the start of tail and the Y gap must be 0 or 1
-                and the total length must not exceed the max
+                to be connected the gap between end of head and start of tail must not exceed the span
+                and the total length must not exceed the max,
+                only merged edges are connectable, in particular split edges are future choice points,
+                returns True iff allowed to be joined
                 """
-            if (head.end + 1) % max_x == tail.start:
-                gap = self._get_gap((head.end, head.points[-1]), (tail.start, tail.points[0]), max_x)
+            if head.reason != Scan.MERGED:
+                return False
+            elif (head.end + 1) % max_x == tail.start:
+                # must have contiguous X 'cos we just merge the points
+                gap = head.points[-1] - tail.points[0]
+                gap *= gap
                 if gap <= span:
                     if len(head.points) + len(tail.points) > max_x:
-                        # joining them would exceed the length limit
+                        # joined would be too big
                         return False
                     else:
                         return True
@@ -2574,38 +2580,49 @@ class Scan:
             else:
                 return False
 
-        max_x = context.max_x
-        span *= span  # remove sign issues
-        min_length = max(max_x * Scan.RADIUS_PROBE_MIN_LENGTH, Scan.RADIUS_PROBE_MIN_PIXELS)
-        mergers = 0
-
-        while True:
-            # find all joins
-            joins = []
-            for h in range(len(fragments)):
-                head = fragments[h]
-                if head.state is not None:
-                    # already joined this to something
-                    continue
-                for t in range(len(fragments)):
-                    tail = fragments[t]
-                    if connectable(head, tail):
-                        joined = Scan.Fragment(head.start, tail.end, head.points + tail.points, Scan.JOINED)
-                        joins.append(joined)
-                        head.state = Scan.JOINED
-                        mergers += 1
-            if len(joins) != 0:
-                # add joins to fragments and go round again
-                fragments += joins
+        joins = []                       # the new fragment set is accumulated in here
+        completed = 0
+        for head in fragments:
+            if len(head.points) == max_x:
+                # this cannot be connected to anything else, so just propagate it
+                joins.append(head)
+                completed += 1
+                if completed >= Scan.MAX_FULL_EDGES:
+                    break
                 continue
-            # knock out any min-length fragments and count max length ones
-            full_length = 0
-            for f in range(len(fragments)-1, -1, -1):
-                if len(fragments[f].points) < min_length:
-                    del fragments[f]
-                elif len(fragments[f].points) == max_x:
-                    full_length += 1
-            return fragments, mergers, full_length
+            if head.state is not None:
+                # this has been 'consumed' by some previous merger
+                continue
+            consider = [head]            # start by considering this next head
+            while True:
+                result = []              # joins are accumulated for this head in here
+                for lead in consider:
+                    for tail in fragments:
+                        if connectable(lead, tail):
+                            joined = Scan.Fragment(lead.start, tail.end, lead.points + tail.points, Scan.JOINED)
+                            # NB: the state of this new fragment is None
+                            result.append(joined)
+                            head.state = Scan.HEADJOIN
+                            tail.state = Scan.TAILJOIN
+                            if len(joined.points) == max_x:
+                                completed += 1
+                                if completed >= Scan.MAX_FULL_EDGES:
+                                    break
+                if len(result) > 0:
+                    # we found some mergers, so now try and extend those
+                    consider = result
+                    if completed >= Scan.MAX_FULL_EDGES:
+                        break
+                    continue
+                else:
+                    # nothing else merges, so we've now done this head
+                    break
+            # consider now contains all the merged fragments for this head
+            joins += consider
+            if completed >= Scan.MAX_FULL_EDGES:
+                break
+
+        return joins, completed
 
     def _find_edge_starts(self, target, context, x, y, threshold):
         """ test if there is a potential edge start in the target at x,y,
@@ -2630,7 +2647,7 @@ class Scan:
         # return list of new start points
         return edges
 
-    def _follow_edge(self, target, context, edge_start, threshold) -> Optional[List[Fragment]]:
+    def _follow_edge(self, target, context, edge_start, threshold, split=False) -> Optional[List[Fragment]]:
         """ follow the edge start in target until come to its end for whatever reason, reasons are:
                 ran off its end (no more neighbours)
                 ran into a split (more than one neighbour)
@@ -2640,6 +2657,7 @@ class Scan:
             NB: target here is *not* the same as the context target, it should be an edges image,
             context is for the scanning direction (which is different to the direction here),
             threshold is the threshold to apply to determine if a pixel is a candidate for an edge,
+            split is True if we're following the continuation of a split or a jump,
             returns a Fragment instance list or None if nothing to follow
             """
 
@@ -2654,9 +2672,11 @@ class Scan:
 
             points = [e.midpoint for e in edge]
             fragment = Scan.Fragment(edge[0].where, (edge[0].where + len(points) - 1) % max_x,
-                                     points, reason, mergee)
+                                     points, reason, mergee, split)
 
             if mergee is not None:
+                if reason != Scan.MERGED:
+                    self._log('mergee end reason is not MERGED: {}'.format(fragment), fatal=True)
                 # add ourselves to its collision list
                 mergee.collisions.append(fragment)
 
@@ -2735,7 +2755,7 @@ class Scan:
                 if gap > max_y_gap:
                     # too far away, end this one here and start a new one to carry on
                     fragment = make_fragment(edge, Scan.JUMPED, None)
-                    fragments = self._follow_edge(target, context, neighbours[0], threshold)
+                    fragments = self._follow_edge(target, context, neighbours[0], threshold, split=True)
                     if fragments is not None:
                         return [fragment] + fragments
                     else:
@@ -2755,6 +2775,27 @@ class Scan:
             xy = stepper.cross_to(neighbour.midpoint)      # move y to follow what we found
 
         return [make_fragment(edge, reason, mergee)]
+
+    def _is_continuation(self, context: Context, edge: EdgePoint):
+        """ determine if the given edge is a continuation of some preceding edge """
+
+        kernel = context.kernel
+
+        max_x = context.max_x
+        max_y = context.max_y
+
+        x = (edge.where - 1) % max_x
+        y = edge.midpoint
+
+        for dx, dy in self.Kernel(kernel, Scan.RIGHT_TO_LEFT):
+            dy += y
+            if dy < 0 or dy >= max_y:
+                continue  # y never wraps
+            dx = (dx + x) % max_x  # x always wraps
+            if self._get_mergee(context, dx, dy) is not None:
+                return True
+
+        return False
 
     def _find_probe_fragments(self, target, context, probe_x, threshold, inner_limit=None, outer_limit=None):
         """ look for edges in the given edges image either top-down (inner) or bottom-up (outer),
@@ -2795,10 +2836,17 @@ class Scan:
                 else:
                     stepper.skip_to(edge.first - 1)
 
-                fragments = self._follow_edge(target, context, edge, threshold)
+                fragments = self._follow_edge(target, context, edge, threshold,
+                                              self._is_continuation(context, edge))
                 if fragments is None:
                     continue
                 probe_fragments += fragments
+
+        if self.logging:
+            if len(probe_fragments) > 0:
+                self._log('{}: found {} probe fragments at {}:'.format(prefix, len(probe_fragments), probe_x))
+                for fragment in probe_fragments:
+                    self._log('    {}'.format(fragment))
 
         return probe_fragments
 
@@ -2810,6 +2858,7 @@ class Scan:
 
         prefix = context.prefix
         max_x = context.max_x
+        min_length = int(max(round(max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
 
         Scan.Fragment.reset()            # reset fragment counter
         context.mergers = None           # reset mergers matrix
@@ -2834,20 +2883,27 @@ class Scan:
         # merge fragment splinters
         fragments = self._merge_splinters(context, fragments)
 
-        # merge connected
-        for span in range(1, int(max_x * Scan.MAX_RADIUS_EDGE_GAP)):
-            fragments, joins, full_length = self._merge_connected(context, fragments, span)
-            if joins == 0 or full_length >= Scan.MAX_FULL_EDGES:
-                break
+        # # merge connected that are within the kernel span
+        # fragments.sort(key=lambda f: (f.start, f.points[0]))   # put fragments into x,y order
+        # for span in range(1, Scan.CONNECTED_KERNEL_HEIGHT + 1):
+        #     fragments, completed = self._merge_connected(context, fragments, span)
+        #     if completed >= Scan.MAX_FULL_EDGES:
+        #         break
 
-        # calculate the slope of each fragment
-        for fragment in fragments:
-            fragment.slope = self._get_slope_changes(fragment.points)
-
-        fragments.sort(key=lambda f: (f.start, f.points[0]))  # just as a visual aid in the logs
+        # remove small 'islands'
+        for f in range(len(fragments) - 1, -1, -1):
+            fragment = fragments[f]
+            if fragment.split:
+                # leave these alone
+                continue
+            if fragment.reason != Scan.ENDED:
+                # leave these alone
+                continue
+            if len(fragment.points) < min_length:
+                del fragments[f]
 
         if self.logging:
-            self._log('{}: found {} edge fragments:'.format(prefix, len(fragments)))
+            self._log('{}: found {} radius fragments:'.format(prefix, len(fragments)))
             for fragment in fragments:
                 self._log('    {}'.format(fragment))
 
@@ -2916,581 +2972,236 @@ class Scan:
                 better_score += 1
         return better_score - worse_score
 
-    def _find_full_edges(self, context, edges):
-        """ find all the full edge candidates in the given set of edge fragments,
-            a 'full edge' is one that goes full circle by joining fragments,
-            all possible joins are explored,
-            this is a depth-first algorithm that explores each combination to completion
-            or it runs into a previous exploration (only the best is kept when edges merge),
-            returns a list of edges where each edge is the id of the leading fragment and a list of y co-ords
-            for every x (starting at 0), the y co-ord is None where there are gaps.
+    def _measure_edge(self, full_edge: List[int]) -> EdgeMetric:
+        """ measure the given full_edge """
+
+        # we measure the number of edge 'jumps' (where y changes a lot from x to x+1),
+        # the biggest jump and total jumps span,
+        # the number of 'gaps' (sequences where y is None that must be extrapolated across),
+        # the biggest gap and the total gaps span,
+        # the number of slope changes (i.e. how straight it is)
+
+        # region Prepare...
+        max_x = len(full_edge)
+        first_pixel = None  # x,y of first non-None pixel found
+        prev_pixel = None  # x,y of previous pixel seen in the edge
+        gap_start = None  # x of start of gap or None if not in a gap
+        gaps = 0
+        overall_gap = 0
+        biggest_gap = 0
+        jumps = 0
+        overall_jumps = 0
+        biggest_jump = 0
+        total_ys = 0
+        num_ys = 0
+        # endregion
+        for x in range(max_x):
+            y = full_edge[x]
+            # region Gap detection...
+            if y is None:
+                if first_pixel is None:
+                    # we're starting off in a gap - defer to end of scan to measure it
+                    continue
+                if gap_start is None:
+                    # start of a new gap
+                    gaps += 1
+                    gap_start = x
+                else:
+                    # just continuing in the same gap
+                    pass
+                overall_gap += 1
+                continue
+            elif gap_start is not None:
+                # end of a gap, see if its the biggest
+                gap_span = x - gap_start
+                if gap_span > biggest_gap:
+                    biggest_gap = gap_span
+                gap_start = None
+            first_pixel = (x, y)
+            # endregion
+            # NB: y is not None when we get here
+            total_ys += y
+            num_ys += 1
+            # region Jump detection...
+            if prev_pixel is not None:
+                jump = self._get_gap(prev_pixel, (x, y), max_x)
+                if jump > 2:  # 0, 1 or 2 is a direct connection
+                    jumps += 1
+                    overall_jumps += jump
+                    if jump > biggest_jump:
+                        biggest_jump = jump
+            prev_pixel = (x, y)
+            # endregion
+
+        # region Check for wrapping gap...
+        if gap_start is not None:
+            # got a wrapping gap from gap_start to the first_pixel
+            gap_span = (max_x - gap_start) + first_pixel[0]
+            if gap_span > biggest_gap:
+                # the wrapping gap is biggest
+                biggest_gap = gap_span
+        # endregion
+
+        # this is used as a 'goodness' measure
+        slope = self._get_slope_changes(full_edge)
+
+        metric = Scan.EdgeMetric(0 if num_ys == 0 else total_ys / num_ys,
+                                 slope,
+                                 (gaps, overall_gap, biggest_gap),
+                                 (jumps, overall_jumps, biggest_jump))
+
+        return metric
+
+    def _merge_edges(self, context, edges: List[Edge], span: int) -> List[Edge]:
+        """ merge edges that are reachable from each other within span,
             """
 
-        # ToDo: allow joining of overlapping edges, e.g.:
-        #       A --> |     /----     |
-        #       B --> |----/   -------|
-        #                       ^(1)  ^(2)
-        #       want A to join B at (1) rather than (2)
-        #       photo many v4 @697 outer has an eg. of this
+        max_x = context.max_x
+        span *= span  # remove sign issues
 
-        def get_gap(from_x, from_y, to_x, to_y):
-            """ get the gap from x/y to x/y for reachable determination purposes,
-                from_y is a tuple of up to 3 points preceding from_x,
-                these are used as a crude prediction of the next y (assuming a parabola)
-                the gap from that prediction is returned
+        def reachable(head: Scan.Edge, tail: Scan.Edge):
+            """ test if tail can be reached by head,
+                to be reachable the gap between end of head's last fragment and start of tail's first
+                must not exceed the span,
+                returns the x-gap iff reachable or None if not,
+                NB: unlike the _merge_fragments version this one allows gaps in X
                 """
 
-            # ToDo: do a better 'gap' determination by curve fitting last 3 points and
-            #       measuring gap to that curve (assume the curve is a parabola)
+            if head.state == Scan.COMPLETE or tail.state == Scan.COMPLETE:
+                return False
 
-            this_gap = self._get_gap((from_x, from_y[-1]), (to_x, to_y), max_x)
-            return this_gap
-
-        def find_reachable(from_fragment: Scan.Fragment=None, limit_x=None):
-            """ find edge fragments that are reachable from the given fragment,
-                if no fragment given find everything reachable from x=0,
-                if from_y not given treat as all possible y's,
-                if from_y is given its a tuple of N points preceding from_x,
-                if limit_x is given reachable fragment starts of that, or spanning that, are ignored,
-                the given x,y is assumed to be the end of some other edge,
-                returns a list of fragments that are reachable in most-appropriate first order,
-                NB: from_x must be the end of some fragment *not* the start,
-                the default parameters finds all reachable fragments from 0
-                """
-
-            if from_fragment is None:
-                from_x = -1
-                from_y = None
+            head_fragment = head.fragments[-1]
+            tail_fragment = tail.fragments[0]
+            gap = self._get_gap((head_fragment.end, head_fragment.points[-1]),
+                                (tail_fragment.start, tail_fragment.points[0]), max_x)
+            if gap <= span:
+                # calculate the jump in X across this gap
+                jump = tail_fragment.start - (head_fragment.end + 1)
+                if jump < 0:
+                    jump = jump + max_x
+                return jump
             else:
-                y_points = min(3, len(from_fragment.points))
-                from_x = from_fragment.end
-                from_y = from_fragment.points[-y_points:]  # get last N points for extrapolation in get_gap
+                return None
 
-            reachable_edges = []
-            for dx in range(max_edge_x_gap):
-                x = (from_x + 1 + dx) % max_x
-                if limit_x is not None and x == limit_x:
-                    # not allowed to look further
+        joins = []                       # the new edge set is accumulated in here
+        completed = 0
+        for head in edges:
+            if head.state == Scan.COMPLETE:
+                # this cannot be connected to anything else, so just propagate it
+                joins.append(head)
+                completed += 1
+                if completed >= Scan.MAX_FULL_EDGES:
                     break
-                slice = slices[x]
-                for edge in slice:
-                    if limit_x is not None:
-                        # region Stop when a fragment spans the limit...
-                        # there are lots of cases (due to wrapping):
-                        #  S==start fragment, E==end fragment, X==limit, s==S=X, e==E=X
-                        #      S <= E | S < X | S = X | S > X | E < X | E = X | E > X
-                        #  (01)  N        N       N       Y       N       N       Y    |--X--S--E--| OK
-                        #  (02)  N        N       N       Y       N       Y       N    impossible    -
-                        #  (03)  N        N       N       Y       Y       N       N    impossible    -
-                        #  (04)  N        N       Y       N       N       N       Y    |--s-----E--| not OK
-                        #  (05)  N        N       Y       N       N       Y       N    impossible    -
-                        #  (06)  N        N       Y       N       Y       N       N    impossible    -
-                        #  (07)  N        Y       N       N       N       N       Y    |--S--X--E--| not OK
-                        #  (08)  N        Y       N       N       N       Y       N    |--S--e-----| not OK
-                        #  (09)  N        Y       N       N       Y       N       N    |--S--E--X--| OK
-                        #
-                        #  (11)  Y        N       N       Y       N       N       Y    |--X--E--S--| not OK
-                        #  (12)  Y        N       N       Y       N       Y       N    |--e--S-----| not OK
-                        #  (13)  Y        N       N       Y       Y       N       N    |--E--X--S--| OK
-                        #  (14)  Y        N       Y       N       N       N       Y    impossible
-                        #  (15)  Y        N       Y       N       N       Y       N    impossible
-                        #  (16)  Y        N       Y       N       Y       N       N    |--E--s-----| not OK
-                        #  (17)  Y        Y       N       N       N       N       Y    impossible
-                        #  (18)  Y        Y       N       N       N       Y       N    impossible
-                        #  (19)  Y        Y       N       N       Y       N       N    |--E--S--X--| not OK
-                        if edge.start <= edge.end:  # (01)..(09)
-                            if edge.start > limit_x:  # (01) (02) (03)
-                                pass
-                            elif edge.start == limit_x:  # (04) (05) (06)
-                                continue
-                            elif edge.end < limit_x:  # (09)
-                                pass
-                            else:  # (07) (08)
-                                continue
-                        else:  # (10)..(19)
-                            if edge.start > limit_x:  # (11) (12) (13)
-                                if edge.end < limit_x:  # (13)
-                                    pass
-                                else:  # (11) (12)
-                                    continue
-                            else:  # (14) (15) (16) (17) (18) (19)
-                                continue
-                        # endregion
-                    if from_y is None:
-                        this_gap = 0
-                        this_slope = 0
-                    else:
-                        # is this edge reachable from_x, from_y
-                        this_gap = get_gap(from_x, from_y, edge.start, edge.points[0])
-                        if this_gap > max_edge_gap:
-                            # not reachable by this one
+                continue
+            if head.state is not None:
+                # this has been 'consumed' by some previous merger
+                continue
+            consider = [head]            # start by considering this next head
+            while True:
+                result = []              # joins are accumulated for this head in here
+                for lead in consider:
+                    for tail in edges:
+                        if tail.state == Scan.COMPLETE:
                             continue
-                        # determine the slope of this edge (used to prioritise straighter edges)
-                        this_slope = edge.points[0] - edge.points[-1]  # y diff between start and end
-                        this_slope *= this_slope           # square it to get rid of sign
-                    reachable_edges.append([edge, this_gap, this_slope])
-
-            # put into an appropriate order (nearest first, then straightest)
-            # ToDo: bias it such that TOP_DOWN goes 'up' and BOTTOM_UP goes 'down' when got a choice?
-            reachable_edges.sort(key=lambda e: (e[1], e[2]))
-
-            # determine how many reachable edges to keep
-            if from_y is None:
-                # no limit when looking for initial lead edges
-                max_choices = len(reachable_edges)
-            else:
-                max_choices = min(len(reachable_edges), Scan.MAX_JOIN_CHOICES)
-
-            return [reachable_edges[x][0] for x in range(max_choices)]
-
-        def find_ancestor(this_edge: Scan.Edge, that_edge: Scan.Edge) -> Scan.Edge:
-            """ find the common ancestor to the given edge pair,
-                this is called when an edge exploration meets a fragment that has been used in another
-                edge, this can only happen when an edge splits and re-combines, thus there *must* be
-                a common ancestor, we find it by backtracking through the edge parents
-                """
-
-            this_parent = this_edge
-            while this_parent is not None:
-                that_parent = that_edge
-                while that_parent is not None:
-                    if that_parent == this_parent:
-                        # found it
-                        return this_parent
-                    that_parent = that_parent.parent
-                this_parent = this_parent.parent
-            self._log('common ancestor missing', fatal=True)
-
-        def get_fragments(this_edge: Scan.Edge) -> List[int]:
-            """ return the fragment id list from the given edge back up to its root,
-                this is just a diagnostic aid
-                """
-            ids = []
-            while this_edge is not None:
-                for fragment in this_edge.fragments:
-                    ids.append(fragment.id)
-                this_edge = this_edge.parent
-            ids.reverse()
-            return ids
-
-        def get_children(this_edge: Scan.Edge) -> List[int]:
-            """ return a fragment id list of the first fragment of each 'alive' child of the given edge,
-                this is just a diagnostic aid
-                """
-            ids = []
-            for child in this_edge.children:
-                if child.state == Scan.Edge.DEAD or child.state == Scan.Edge.CREATE:
+                        jump = reachable(lead, tail)
+                        if jump is not None:
+                            length = lead.length + jump + tail.length
+                            if length > max_x:
+                                # too big
+                                continue
+                            # make a new edge with the concatenation of their fragments
+                            joined = Scan.Edge(lead.fragments + tail.fragments, length)
+                            # NB: the state of this new edge is None
+                            result.append(joined)
+                            head.state = Scan.HEADJOIN
+                            tail.state = Scan.TAILJOIN
+                            if joined.length == max_x:
+                                joined.state = Scan.COMPLETE
+                                completed += 1
+                                if completed >= Scan.MAX_FULL_EDGES:
+                                    break
+                if len(result) > 0:
+                    # we found some mergers, so now try and extend those
+                    consider = result
+                    if completed >= Scan.MAX_FULL_EDGES:
+                        break
                     continue
-                ids.append(child.fragments[0].id)
-            return ids
-
-        def measure_partial_edge(from_edge: Scan.Edge, to_edge: Scan.Edge):
-            """ measure the given edge between the two limits,
-                to_edge must be connected to from_edge through the parent chain
-                """
-
-            # get the edge so far
-            # ToDo: this is very inefficient, do it better without re-creating full_edge every time
-            full_edge = [None for _ in range(max_x)]
-            ids = []
-            slope = 0
-            this_edge = to_edge
-            while this_edge is not None:
-                this_ids, this_slope = extract_fragments(full_edge, this_edge)
-                ids += this_ids
-                slope += this_slope
-                if this_edge == from_edge:
-                    break
-                this_edge = this_edge.parent
-
-            return measure_edge(full_edge, slope), ids
-
-        def measure_edge(full_edge: List[int], slope: int) -> Scan.EdgeMetric:
-            """ measure the given full_edge """
-
-            # we measure the number of edge 'jumps' (where y changes a lot from x to x+1),
-            # the biggest jump and total jumps span,
-            # the number of 'gaps' (sequences where y is None that must be extrapolated across),
-            # the biggest gap and the total gaps span,
-            # the number of slope changes (i.e. how straight it is)
-
-            # region Prepare...
-            first_pixel = None  # x,y of first non-None pixel found
-            prev_pixel = None  # x,y of previous pixel seen in the edge
-            gap_start = None  # x of start of gap or None if not in a gap
-            gaps = 0
-            overall_gap = 0
-            biggest_gap = 0
-            jumps = 0
-            overall_jumps = 0
-            biggest_jump = 0
-            total_ys = 0
-            num_ys = 0
-            # endregion
-            for x in range(max_x):
-                y = full_edge[x]
-                # region Gap detection...
-                if y is None:
-                    if first_pixel is None:
-                        # we're starting off in a gap - defer to end of scan to measure it
-                        continue
-                    if gap_start is None:
-                        # start of a new gap
-                        gaps += 1
-                        gap_start = x
-                    else:
-                        # just continuing in the same gap
-                        pass
-                    overall_gap += 1
-                    continue
-                elif gap_start is not None:
-                    # end of a gap, see if its the biggest
-                    gap_span = x - gap_start
-                    if gap_span > biggest_gap:
-                        biggest_gap = gap_span
-                    gap_start = None
-                first_pixel = (x, y)
-                # endregion
-                # NB: y is not None when we get here
-                total_ys += y
-                num_ys += 1
-                # region Jump detection...
-                if prev_pixel is not None:
-                    jump = self._get_gap(prev_pixel, (x, y), max_x)
-                    if jump > 2:  # 0, 1 or 2 is a direct connection
-                        jumps += 1
-                        overall_jumps += jump
-                        if jump > biggest_jump:
-                            biggest_jump = jump
-                prev_pixel = (x, y)
-                # endregion
-
-            # region Check for wrapping gap...
-            if gap_start is not None:
-                # got a wrapping gap from gap_start to the first_pixel
-                gap_span = (max_x - gap_start) + first_pixel[0]
-                if gap_span > biggest_gap:
-                    # the wrapping gap is biggest
-                    biggest_gap = gap_span
-            # endregion
-
-            metric = Scan.EdgeMetric(0 if num_ys == 0 else total_ys / num_ys,
-                                     slope,
-                                     (gaps, overall_gap, biggest_gap),
-                                     (jumps, overall_jumps, biggest_jump))
-
-            return metric
-
-        def kill_edge(this_edge: Scan.Edge, depth=0):
-            """ kill the given edge and its parent if this is its last child """
-
-            this_edge.state = Scan.Edge.DEAD
-            parent = this_edge.parent
-            if parent is not None:
-                this_edge.parent = None  # disconnect from our parent
-                found_self = False
-                found_live = 0
-                for child in range(len(parent.children)):
-                    if parent.children[child] == this_edge:
-                        found_self = True
-                    if parent.children[child].state != Scan.Edge.DEAD:
-                        found_live += 1
-                if not found_self:
-                    self._log('cannot find child in parent children', fatal=True)
-                if found_live == 0:
-                    # parent is dead too now
-                    if self.logging:
-                        self._log('    ({:02n}){}killing now childless parent {}'.
-                                  format(depth, '_' * depth, parent))
-                    kill_edge(parent, depth-1)
-
-        def merging(this_fragment: Scan.Fragment) -> Optional[Scan.Edge]:
-            """ determine if the given fragment has been visited before by an 'alive' edge
-                """
-
-            visiting_edge: Scan.Edge = fragments_visited[this_fragment.id]
-
-            if visiting_edge is not None:
-                if visiting_edge.state == Scan.Edge.DEAD:
-                    return None
-                if visiting_edge.state == Scan.Edge.CREATE:
-                    return None
-
-            return visiting_edge
-
-        def adopt_children(to_edge: Scan.Edge, from_edge: Scan.Edge):
-            """ move the children from from_edge to to_edge and change their parent to match """
-
-            # all children of to_edge are now dead
-            for child in to_edge.children:
-                child.state = Scan.Edge.DEAD
-
-            # inherit all non-dead children of from_edge
-            to_edge.children = []
-            for child in from_edge.children:
-                if child.state != Scan.Edge.DEAD:
-                    to_edge.children.append(child)
-
-            # disconnect the children of from_edge
-            from_edge.children = []
-
-            # connect children to their new parent
-            for child in to_edge.children:
-                child.parent = to_edge
-
-        def extend(this_edge: Scan.Edge, depth=0) -> Scan.Edge:
-            """ given an edge and a fragment, extend the edge by that fragment and any other than joins it,
-                when there are choices joining, each is explored and only the 'best' kept
-                """
-
-            nonlocal fragments_visited, found_edges
-
-            def log_killing(who):
-                self._log('{} killing {}, split from {}'.format(at_prefix, who, ancestor.fragments[-1]))
-                self._log('{}__self fragments:{}, children:{}'.
-                          format(depth_prefix, get_fragments(this_edge), get_children(this_edge)))
-                self._log('{}__mergee fragments:{}, children:{}'.
-                          format(depth_prefix, get_fragments(visiting_edge), get_children(visiting_edge)))
-                self._log('{}__comparison {} {} vis {}'.format(depth_prefix, comparison, this_metric, visiting_metric))
-
-            if found_edges >= Scan.MAX_EDGES_PER_LEAD:
-                # found enough, look no further
-                return this_edge
-
-            # we're extending from the last fragment in this edge
-            this_fragment: Scan.Fragment = this_edge.fragments[-1]
-            if self.logging:
-                depth_prefix = '    ({:02n}){}'.format(depth, '_' * depth)
-                at_prefix = '{}at {}'.format(depth_prefix, this_fragment)
-
-            # check if we're merging with some other edge
-            visiting_edge: Scan.Edge = merging(this_fragment)
-            if visiting_edge is not None:
-                # merging with another edge, if we're better hi-jack that ones' tail
-                # if not, kill ourselves back to our common parent
-                ancestor = find_ancestor(this_edge, visiting_edge)
-                this_metric, this_ids = measure_partial_edge(ancestor, this_edge)
-                visiting_metric, visiting_ids = measure_partial_edge(ancestor, visiting_edge)
-                comparison = self._compare_metric(context, this_metric, visiting_metric)
-                if comparison <= 0:
-                    # we no better than the visitor, kill self and give up
-                    if self.logging:
-                        log_killing('self')
-                    kill_edge(this_edge, depth)
-                    # our state is set to DEAD now
                 else:
-                    # kill the visitor and hi-jack its children
-                    if self.logging:
-                        log_killing('mergee')
-                    kill_edge(visiting_edge, depth)
-                    adopt_children(this_edge, visiting_edge)
-                    # note we've been here
-                    fragments_visited[this_fragment.id] = this_edge
-                    # treat self as a new edge
-                    found_edges += 1
-                    if self.logging:
-                        self._log('{} reached end (#{}) via mergee {}'.
-                                  format(at_prefix, found_edges, visiting_edge))
-                    this_edge.state = Scan.Edge.MERGED
-                # now we're done
-                return this_edge
-
-            # note we've been here
-            fragments_visited[this_fragment.id] = this_edge
-
-            # find all forward choices
-            y_points = min(3, len(this_fragment.points))
-            reachable_fragments: List[Scan.Fragment] = find_reachable(this_fragment, this_edge.root)
-            if len(reachable_fragments) == 0:
-                # nothing more from here, so we're done
-                found_edges += 1
-                if self.logging:
-                    self._log('{} reached end (#{})'.format(at_prefix, found_edges))
-                    self._log('{}__fragments:{}'.format(depth_prefix, get_fragments(this_edge)))
-                this_edge.state = Scan.Edge.ENDED
-                return this_edge
-            if len(reachable_fragments) == 1:
-                # only one choice from here, so just add to this Edge instance
-                if self.logging:
-                    self._log('{} continuing with {}'.format(at_prefix, reachable_fragments[0]))
-                if reachable_fragments[0] in this_edge.fragments:
-                    self._log('{} adding duplicate fragment {}'.format(at_prefix, reachable_fragments[0]), fatal=True)
-                this_edge.fragments.append(reachable_fragments[0])
-                this_edge.state = Scan.Edge.ACTIVE
-                return extend(this_edge, depth)
-
-            # got multiple choices, recurse on each one with a new edge
-            this_edge.state = Scan.Edge.ACTIVE
-            if self.logging:
-                reachable = ''
-                for reachable_fragment in reachable_fragments:
-                    reachable += ', ({},{})'.format(reachable_fragment.start, reachable_fragment.points[0])
-                self._log('{} splitting into {}{}'.format(at_prefix, len(reachable_fragments), reachable))
-            # create all the children
-            for reachable_fragment in reachable_fragments:
-                child: Scan.Edge = Scan.Edge(this_edge, root=this_edge.root, first=reachable_fragment)
-                this_edge.children.append(child)
-            # explore each child
-            for child in this_edge.children:
-                if child.state == Scan.Edge.CREATE:
-                    extend(child, depth+1)
-                if this_edge.state == Scan.Edge.DEAD:
-                    # we've been killed
+                    # nothing else merges, so we've now done this head
                     break
+            # consider now contains all the merged fragments for this head
+            joins += consider
+            if completed >= Scan.MAX_FULL_EDGES:
+                break
 
-            return this_edge
+        return joins, completed
 
-        def extract_fragments(full_edge: List[Optional[int]], from_edge: Scan.Edge):
-            """ extract the fragment points from the given edge into the full_edge """
-            ids = []
-            slope = 0
-            for fragment in from_edge.fragments:
-                ids.append(fragment.id)
-                x = fragment.start
-                slope += fragment.slope
-                for px in range(len(fragment.points)):
-                    y = fragment.points[px]
-                    dx = (x + px) % max_x
-                    if full_edge[dx] is not None:
-                        self._log('full edge has an overlap', fatal=True)
-                    full_edge[dx] = y
-            return ids, slope
-
-        def extract_edges(from_edge: Scan.Edge, full_edge: Optional[List[Optional[int]]]=None, ids=None, slope=0):
-            """ extract all the full edges from the fragments starting at from_edge,
-                returns a list of full edge and fragment id tuples which may be empty,
-                full_edge is a list of y's starting from x = 0, a y of None means no sample at that x,
-                """
-
-            if from_edge.state == Scan.Edge.DEAD:
-                self._log('attempt to extract from a dead edge', fatal=True)
-            elif from_edge.state == Scan.Edge.CREATE:
-                # this was created but never explored, ignore it
-                return []
-
-            if full_edge is None:
-                full_edge = [None for _ in range(max_x)]
-            if ids is None:
-                ids = []
-
-            ex_ids, ex_slope = extract_fragments(full_edge, from_edge)
-            ids += ex_ids
-            slope += ex_slope
-
-            children = []
-            for child in from_edge.children:
-                if child.state != Scan.Edge.DEAD:
-                    children.append(child)
-
-            if len(children) == 0:
-                # no children, so we're done
-                return [(full_edge, ids, slope)]
-
-            if len(children) == 1:
-                # only one child, so just carry on with this edge buffer
-                return extract_edges(children[0], full_edge, ids, slope)
-
-            # got multiple children, carry on with the first and clone for the rest
-            partial_edge = full_edge.copy()
-            partial_ids = ids.copy()
-            main_extraction = extract_edges(children[0], full_edge, ids, slope)
-            for child in range(1, len(children)):
-                child_edge = partial_edge.copy()
-                child_ids = partial_ids.copy()
-                child_extraction = extract_edges(children[child], child_edge, child_ids, slope)
-                main_extraction += child_extraction
-
-            return main_extraction
+    def _find_full_edges(self, context, fragments):
+        """ find all the full edge candidates in the given set of edge fragments,
+            fragments contains a list of maximal length fragments, we assemble those that are
+            reachable from each other into full edges and pick the best
+            """
 
         max_x = context.max_x
         prefix = context.prefix
         max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
         max_edge_gap = max_edge_x_gap * max_edge_x_gap   # square it so don't have to square root the measured gap
 
-        # build slices for every x containing edges that start at that x (this is a convenience for find_reachable)
-        slices = [[] for _ in range(max_x)]
+        # convert all Fragment instances to the equivalent Edge instances
+        fragments.sort(key=lambda  f: (f.start, f.points[0]))
+        edges: List[Scan.Edge] = []
+        for fragment in fragments:
+            length = len(fragment.points)
+            edge = Scan.Edge([fragment], length)
+            if length == max_x:
+                edge.state = Scan.COMPLETE
+            edges.append(edge)
+
+        # combine all reachable edges
+        span = 1
+        max_span = max_x * Scan.MAX_RADIUS_EDGE_GAP
+        while True:
+            edges, completed = self._merge_edges(context, edges, span)
+            if completed >= Scan.MAX_FULL_EDGES:
+                break
+            span *= 2
+            if span >= max_span:
+                # do the last iteration at the limit
+                edges, completed = self._merge_edges(context, edges, max_span)
+                break
+
+        # find all lengthy candidates
+        candidates = []
         for edge in edges:
-            start_x = edge.start
-            slices[start_x].append(edge)
+            if edge.length + max_edge_x_gap >= max_x:
+                candidates.append(edge)
 
-        # build list of potential start edge fragments,
-        # all full edges must pass within max-edge-gap of every x, so we just get all reachable from x=0
-        lead_fragments: List[Scan.Fragment] = find_reachable()    # default params gets all reachable from x=0
+        # remove those whose ends do not meet
+        for e in range(len(candidates)-1, -1, -1):
+            edge = candidates[e]
+            head = edge.fragments[0]
+            tail = edge.fragments[-1]
+            gap = self._get_gap((tail.end, tail.points[-1]), (head.start, head.points[0]), max_x)
+            if gap > max_edge_gap:
+                del candidates[e]
+                continue
 
         if self.logging:
-            self._log('{}: found {} lead-fragments:'.format(prefix, len(lead_fragments)))
-            for lead_fragment in lead_fragments:
-                self._log('    {}'.format(lead_fragment))
+            self._log('{}: found {} full length edges from {} fragments:'.
+                      format(prefix, len(candidates), len(fragments)))
+            for edge in candidates:
+                self._log('    {}'.format(edge))
 
-        # join all reachable fragments from every potential start
+        # construct the edge+metric tuple for each full edge
         full_edges = []
-        leads_visited = [None for _ in range(Scan.Fragment.last_id + 1)]
-        for lead_fragment in lead_fragments:
-            if self.logging:
-                self._log('{}: following lead {}'.format(prefix, lead_fragment))
-            if leads_visited[lead_fragment.id] is not None:
-                # some other lead got here, so don't bother again
-                if self.logging:
-                    self._log('    ignoring, already visited')
-                continue
-            # region Prepare to start a new full-edge from this lead fragment...
-            fragments_visited = [None for _ in range(Scan.Fragment.last_id + 1)]
-            initial_edge = Scan.Edge(root=lead_fragment.start, first=lead_fragment)
-            found_edges = 0
-            # endregion
-            extend(initial_edge)
-            if initial_edge.state == Scan.Edge.DEAD:
-                final_edges = []
-            else:
-                final_edges = extract_edges(initial_edge)
-            if self.logging:
-                self._log('{}: found {} full-edges via lead-edge {}'.
-                          format(prefix, len(final_edges), lead_fragment))
-            for full_edge, fragments, slope in final_edges:
-                metric = measure_edge(full_edge, slope)
-                full_edges.append([full_edge, metric])
-                if self.logging:
-                    self._log('    fragments:{}'.format(fragments))
-                    self._log('    metric:{}'.format(metric))
-            # region Check if any of our leads have been visited...
-            for lead in lead_fragments:
-                leads_visited[lead.id] = fragments_visited[lead.id]
-            # endregion
-
-        if self.logging:
-            header = '{}: dropping full-edge candidates with too big end to start gap (from {} edges):'.\
-                     format(prefix, len(full_edges))
-
-        # check the end to start (wrapping) gap
-        for edge in range(len(full_edges)-1, -1, -1):
-            full_edge, _ = full_edges[edge]
-            # find first non-None
-            first_x = None
-            for x in range(len(full_edge)):
-                if full_edge[x] is not None:
-                    first_x = x
-                    break
-            # find last non-None
-            last_x = None
-            for x in range(len(full_edge)-1, -1, -1):
-                if full_edge[x] is not None:
-                    last_x = x
-                    break
-            # check gap
-            if first_x is None or last_x is None:
-                # its an empty edge
-                del full_edges[edge]
-                continue
-            end_start_gap = self._get_gap((last_x, full_edge[last_x]), (first_x, full_edge[first_x]), max_x)
-            if end_start_gap > max_edge_gap:
-                # ends do not meet, chuck it
-                if self.logging:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    dropping edge {} (end to start gap too big at {:.2f}, limit is {:.2f})'.
-                              format(edge, math.sqrt(end_start_gap), math.sqrt(max_edge_gap)))
-                del full_edges[edge]
+        for edge in candidates:
+            full_edge = [None for _ in range(max_x)]
+            for fragment in edge.fragments:
+                x = fragment.start
+                for dx in range(len(fragment.points)):
+                    full_edge[(x + dx) % max_x] = fragment.points[dx]
+            metric = self._measure_edge(full_edge)
+            full_edges.append((full_edge, metric, ))
 
         return full_edges
 
