@@ -1503,10 +1503,9 @@ class Scan:
     RING_RADIUS_STRETCH = 1.5  # how much stretch nominal ring size to ensure encompass the outer edge
     RADIUS_PROBE_MIN_LENGTH = 1/15  # min length of an edge fragment as a fraction of the max
     RADIUS_PROBE_MIN_PIXELS = 3  # if the above is less than this pixels, use this min length in pixels
+    MAX_NEIGHBOURS = 3  # max numbers of neighbours to probe from fragment ends
     MAX_RADIUS_EDGE_GAP = 1/8  # max gap/distance between radius edge fragments in x as a fraction of the max
     MAX_FULL_EDGES = 20  # stop looking for fragment joins when found this many full length ones
-    MAX_JOIN_CHOICES = 2  # limit for the join choices when building full edges from fragments
-    MAX_EDGES_PER_LEAD = 100  # stop looking for full edges when found this many per lead fragment
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
     MIN_PIXELS_PER_RING_FLAT = 4  # min pixels per ring in the flattened image
     MIN_PIXELS_PER_RING_MEASURED = 1  # min number of pixels per ring after measuring target extent
@@ -1519,7 +1518,7 @@ class Scan:
 
     # x,y pairs for neighbours when looking for inner/outer radius edges,
     # the first x,y pair *must* be 0,0 (this constraint is required for edge split detection)
-    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1], [0, 2], [0, -2]]
+    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1]]  # ToDo: HACK-->, [0, 2], [0, -2]]
     CONNECTED_KERNEL_HEIGHT = 2  # the max span of the kernel from 0,0
 
     # edge vector smoothing kernel, pairs of offset and scale factor (see _smooth_edge)
@@ -1583,16 +1582,19 @@ class Scan:
     WRAPPED = 'wrapped'
     MERGED = 'merged'
     SPLIT = 'split'
+    SPLITEND = 'split-end'
     JUMPED = 'jumped'
     JOINED = 'joined'
     DEAD = 'dead'
     ENDED = 'ended'
     # endregion
 
-    # region Fragment/Edge state codes...
+    # region Edge state codes...
     HEADJOIN = 'head-join'
     TAILJOIN = 'tail-join'
+    BOTHJOIN = 'both-join'
     COMPLETE = 'complete'
+    CONSIDERED = 'considered'
     # endregion
 
     # region Ring numbers of flattened image...
@@ -2106,46 +2108,68 @@ class Scan:
 
         last_id = -1
 
-        def __init__(self, start, end, points, reason, mergee=None, split=False):
+        def __init__(self, start, end, points, reason, mergee=None):
             self.start = start  # the x co-ord of the start of the fragment
             self.end = end  # the x co-ord of the end of the fragment
             self.points = points  # list of y co-ords for this fragment
             self.reason = reason  # the reason the fragment ended
             self.mergee: Optional[Scan.Fragment] = mergee  # the fragment this merges with or None if it doesn't
-            self.split = split  # iff True this is a continuation of a split edge or an edge jump
             self.collisions: List[Scan.Fragment] = []  # list of fragments that collide with this one
             Scan.Fragment.last_id += 1
-            self.id = Scan.Fragment.last_id
-            self.state = None  # used by various filtering processes
+            self.id = Scan.Fragment.last_id  # unique id for this Fragment, <0 means its due for deletion
+            self.pred: List[Scan.Fragment] = []  # list of fragments that can reach this one
+            self.succ: List[Scan.Fragment] = []  # list of fragments that this one can reach
 
         def __str__(self):
-            if len(self.points) > 10:
-                points = '{}..{}'.format(vstr(self.points[:5], 'n'), vstr(self.points[-5:], 'n'))
+            if len(self.points) > 4:
+                points = '{}..{}'.format(vstr(self.points[:2], 'n'), vstr(self.points[-2:], 'n'))
             else:
                 points = '{}'.format(vstr(self.points, 'n'))
-            return '(#{}({}): {},{}..{},{} points({}): {}, collisions:{}, split:{}, state:{})'.\
+            return '(#{}({}): {},{}..{},{} points({}): {}, collisions:{}, #pred:{}, #succ:{})'.\
                 format(self.id, self.reason, self.start, self.points[0], self.end, self.points[-1],
-                       len(self.points), points, len(self.collisions), self.split, self.state)
+                       len(self.points), points, len(self.collisions), len(self.pred), len(self.succ))
 
         @staticmethod
         def reset():
             Scan.Fragment.last_id = -1
 
+    class Link:
+        """ info about a link between two fragments """
+
+        def __init__(self, head, tail, gap, jump):
+            self.head: Scan.Fragment = head  # fragment 1
+            self.tail: Scan.Fragment = tail  # fragment 2
+            self.gap = gap  # the distance between these two fragments
+            self.jump = jump  # the X 'jump' between these two fragments
+
+        def __str__(self):
+            return 'gap:{}, jump:{}, head:{}, tail:{}'.format(self.gap, self.jump, self.head, self.tail)
+
     class Edge:
         """ info about continuous edges being constructed from edge fragments """
+
+        last_id = -1
 
         def __init__(self, fragments=None, length=None):
             self.fragments: List[Scan.Fragment] = fragments  # list of Fragment instances making up this edge
             self.length = length  # total length in X (None==not known yet)
             self.state = None
+            Scan.Edge.last_id += 1
+            self.id = Scan.Edge.last_id
 
         def __str__(self):
-            if len(self.fragments) > 0:
-                first_fragment = ', first={}'.format(self.fragments[0])
+            if len(self.fragments) > 1:
+                fragments = ', first={}, last={}'.format(self.fragments[0], self.fragments[-1])
+            elif len(self.fragments) > 0:
+                fragments = ', first={}'.format(self.fragments[0])
             else:
-                first_fragment = ''
-            return '(state:{}, length:{}, #fragments:{}{})'.\
-                   format(self.state, self.length, len(self.fragments), first_fragment)
+                fragments = ''
+            return '(#{}: state:{}, length:{}, #fragments:{}{})'.\
+                   format(self.id, self.state, self.length, len(self.fragments), fragments)
+
+        @staticmethod
+        def reset():
+            Scan.Edge.last_id = -1
 
     class EdgeMetric:
         """ result of measuring inner and outer edge candidates """
@@ -2447,7 +2471,7 @@ class Scan:
                     # splits at the beginning - do nothing
                     return None
                 # create a new fragment for the tail
-                tail = Scan.Fragment(split_x, fragment.end, fragment.points[dx:], fragment.reason, split=True)
+                tail = Scan.Fragment(split_x, fragment.end, fragment.points[dx:], fragment.reason)
                 # shrink the original and consider to merge with tail
                 fragment.points = fragment.points[:dx]
                 fragment.end = (fragment.start + len(fragment.points) - 1) % max_x
@@ -2460,7 +2484,7 @@ class Scan:
 
     def _split_collisions(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
         """ split all fragments that have collisions (and remove the collision point),
-            returns a collision free fragment list
+            returns a collision free fragment list (in a random order)
             """
 
         max_x = context.max_x
@@ -2546,84 +2570,6 @@ class Scan:
 
         return fragments
 
-    def _merge_connected(self, context: Context, fragments: List[Fragment], span) -> List[Fragment]:
-        """ merge fragments that are connected within X+1 and Y+span,
-            returns the updated Fragment list and count of max length fragments,
-            for each fragment so connected to another a new fragment of the two joined is created,
-            fragments must be sorted by start X then start Y,
-            """
-
-        max_x = context.max_x
-        span *= span  # remove sign issues
-
-        def connectable(head, tail):
-            """ test if head can be connected to tail,
-                to be connected the gap between end of head and start of tail must not exceed the span
-                and the total length must not exceed the max,
-                only merged edges are connectable, in particular split edges are future choice points,
-                returns True iff allowed to be joined
-                """
-            if head.reason != Scan.MERGED:
-                return False
-            elif (head.end + 1) % max_x == tail.start:
-                # must have contiguous X 'cos we just merge the points
-                gap = head.points[-1] - tail.points[0]
-                gap *= gap
-                if gap <= span:
-                    if len(head.points) + len(tail.points) > max_x:
-                        # joined would be too big
-                        return False
-                    else:
-                        return True
-                else:
-                    return False
-            else:
-                return False
-
-        joins = []                       # the new fragment set is accumulated in here
-        completed = 0
-        for head in fragments:
-            if len(head.points) == max_x:
-                # this cannot be connected to anything else, so just propagate it
-                joins.append(head)
-                completed += 1
-                if completed >= Scan.MAX_FULL_EDGES:
-                    break
-                continue
-            if head.state is not None:
-                # this has been 'consumed' by some previous merger
-                continue
-            consider = [head]            # start by considering this next head
-            while True:
-                result = []              # joins are accumulated for this head in here
-                for lead in consider:
-                    for tail in fragments:
-                        if connectable(lead, tail):
-                            joined = Scan.Fragment(lead.start, tail.end, lead.points + tail.points, Scan.JOINED)
-                            # NB: the state of this new fragment is None
-                            result.append(joined)
-                            head.state = Scan.HEADJOIN
-                            tail.state = Scan.TAILJOIN
-                            if len(joined.points) == max_x:
-                                completed += 1
-                                if completed >= Scan.MAX_FULL_EDGES:
-                                    break
-                if len(result) > 0:
-                    # we found some mergers, so now try and extend those
-                    consider = result
-                    if completed >= Scan.MAX_FULL_EDGES:
-                        break
-                    continue
-                else:
-                    # nothing else merges, so we've now done this head
-                    break
-            # consider now contains all the merged fragments for this head
-            joins += consider
-            if completed >= Scan.MAX_FULL_EDGES:
-                break
-
-        return joins, completed
-
     def _find_edge_starts(self, target, context, x, y, threshold):
         """ test if there is a potential edge start in the target at x,y,
             returns an EdgePoint list of starts (empty if none)
@@ -2647,7 +2593,7 @@ class Scan:
         # return list of new start points
         return edges
 
-    def _follow_edge(self, target, context, edge_start, threshold, split=False) -> Optional[List[Fragment]]:
+    def _follow_edge(self, target, context, edge_start, threshold) -> Optional[List[Fragment]]:
         """ follow the edge start in target until come to its end for whatever reason, reasons are:
                 ran off its end (no more neighbours)
                 ran into a split (more than one neighbour)
@@ -2657,7 +2603,6 @@ class Scan:
             NB: target here is *not* the same as the context target, it should be an edges image,
             context is for the scanning direction (which is different to the direction here),
             threshold is the threshold to apply to determine if a pixel is a candidate for an edge,
-            split is True if we're following the continuation of a split or a jump,
             returns a Fragment instance list or None if nothing to follow
             """
 
@@ -2672,7 +2617,7 @@ class Scan:
 
             points = [e.midpoint for e in edge]
             fragment = Scan.Fragment(edge[0].where, (edge[0].where + len(points) - 1) % max_x,
-                                     points, reason, mergee, split)
+                                     points, reason, mergee)
 
             if mergee is not None:
                 if reason != Scan.MERGED:
@@ -2686,7 +2631,7 @@ class Scan:
 
         max_x = context.max_x
         max_y = context.max_y
-        max_y_gap = Scan.CONNECTED_KERNEL_HEIGHT
+        max_y_gap = 1  # ToDo: HACK-->Scan.CONNECTED_KERNEL_HEIGHT
         max_y_gap *= max_y_gap
 
         stepper = Scan.Stepper(Scan.LEFT_TO_RIGHT, max_x, max_y)
@@ -2743,27 +2688,33 @@ class Scan:
                         self._log('edge_start {} not in initial neighbours'.format(edge_start), fatal=True)
                 else:
                     # for on-going edges that split we end here (the splits will be picked up later)
-                    reason = Scan.SPLIT
+                    reason = Scan.SPLITEND
                     break
-            if len(edge) > 0:
+            # we've only got a single neighbour when we get here, grab it
+            neighbour = neighbours[0]  # note the last neighbour we've seen
+            # grab our mergee (if there is one)
+            mergee = self._get_mergee(context, neighbour.where, neighbour.midpoint)
+            if mergee is None and len(edge) > 0:
                 # check this neighbour is not too far away from the previous one,
                 # if y has jumped more than the kernel height it probably means we're in a messy area
                 # where two edges are merging or splitting, in either case consider this one as ended
                 previous = edge[-1].midpoint
-                gap = neighbours[0].midpoint - previous
+                gap = neighbour.midpoint - previous
                 gap *= gap
                 if gap > max_y_gap:
+                    # ToDo: HACK START
+                    reason = Scan.JUMPED
+                    break
+                    # ToDo: HACK END
                     # too far away, end this one here and start a new one to carry on
                     fragment = make_fragment(edge, Scan.JUMPED, None)
-                    fragments = self._follow_edge(target, context, neighbours[0], threshold, split=True)
+                    fragments = self._follow_edge(target, context, neighbour, threshold, split=True)
                     if fragments is not None:
                         return [fragment] + fragments
                     else:
                         return [fragment]
-            # add the non-splitting edge point
-            neighbour = neighbours[0]                      # note the last neighbour we've seen
+            # add the neighbour
             edge.append(neighbour)                         # always add (so we get the merge collision point)
-            mergee = self._get_mergee(context, neighbour.where, neighbour.midpoint)
             if mergee is not None:
                 # ran into another edge, so stop here
                 if len(edge) == 1:
@@ -2775,27 +2726,6 @@ class Scan:
             xy = stepper.cross_to(neighbour.midpoint)      # move y to follow what we found
 
         return [make_fragment(edge, reason, mergee)]
-
-    def _is_continuation(self, context: Context, edge: EdgePoint):
-        """ determine if the given edge is a continuation of some preceding edge """
-
-        kernel = context.kernel
-
-        max_x = context.max_x
-        max_y = context.max_y
-
-        x = (edge.where - 1) % max_x
-        y = edge.midpoint
-
-        for dx, dy in self.Kernel(kernel, Scan.RIGHT_TO_LEFT):
-            dy += y
-            if dy < 0 or dy >= max_y:
-                continue  # y never wraps
-            dx = (dx + x) % max_x  # x always wraps
-            if self._get_mergee(context, dx, dy) is not None:
-                return True
-
-        return False
 
     def _find_probe_fragments(self, target, context, probe_x, threshold, inner_limit=None, outer_limit=None):
         """ look for edges in the given edges image either top-down (inner) or bottom-up (outer),
@@ -2836,8 +2766,7 @@ class Scan:
                 else:
                     stepper.skip_to(edge.first - 1)
 
-                fragments = self._follow_edge(target, context, edge, threshold,
-                                              self._is_continuation(context, edge))
+                fragments = self._follow_edge(target, context, edge, threshold)
                 if fragments is None:
                     continue
                 probe_fragments += fragments
@@ -2850,15 +2779,295 @@ class Scan:
 
         return probe_fragments
 
+    def _find_fragment_neighbours(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
+        """ find all the reachable fragments from each fragment, both before and after """
+
+        def reachable(head: Scan.Fragment, tail: Scan.Fragment):
+            """ test if tail can be reached by head,
+                to be reachable the gap between end of head's last fragment and start of tail's first
+                must not exceed some threshold,
+                returns the fragment distance (squared) and the x-gap iff reachable or None if not,
+                """
+
+            max_x = context.max_x
+            max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
+            max_edge_gap = max_edge_x_gap * max_edge_x_gap  # square it so don't have to square root the measured gap
+
+            # get the gap between these two fragments
+            gap = self._get_gap((head.end, head.points[-1]),
+                                (tail.start, tail.points[0]), max_x)
+            if gap > max_edge_gap:
+                # too far away
+                return None
+
+            # calculate the jump in X across this gap (this is used to calculate edge lengths later)
+            jump = tail.start - (head.end + 1)
+            if jump < 0:
+                jump += max_x
+
+            return gap, jump
+
+        # clear all existing links
+        for fragment in fragments:
+            fragment.succ = []
+            fragment.pred = []
+
+        # find all the connections
+        for head in fragments:
+            for tail in fragments:
+                distance = reachable(head, tail)
+                if distance is not None:
+                    head.succ.append(Scan.Link(head, tail, distance[0], distance[1]))
+                    tail.pred.append(Scan.Link(tail, head, distance[0], distance[1]))
+
+        # sort into distance order (closest first)
+        for fragment in fragments:
+            fragment.succ.sort(key=lambda f: (f.gap, f.jump))
+            fragment.pred.sort(key=lambda f: (f.gap, f.jump))
+
+        # limit choices to the closest few (to reduce search space)
+        for fragment in fragments:
+            if len(fragment.succ) > Scan.MAX_NEIGHBOURS:
+                fragment.succ = fragment.succ[:Scan.MAX_NEIGHBOURS]
+            if len(fragment.pred) > Scan.MAX_NEIGHBOURS:
+                fragment.pred = fragment.pred[:Scan.MAX_NEIGHBOURS]
+
+        return fragments
+
+    def _get_near_links(self, links: List[Fragment], max_gap: int, max_jump: int=0) -> List[Fragment]:
+        """ given a set of links for a fragment, return a list of those within max_gap and max_jump,
+            returns a list of fragments that are directly connected, empty if none
+            """
+
+        tails = []
+        for link in links:
+            if link.gap > max_gap:
+                # too far away in distance
+                break
+            if link.jump > max_jump:
+                # too far away in X
+                continue
+            # got a near link
+            tails.append(link.tail)
+        return tails
+
+    def _join_fragments(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
+        """ join all fragments connected with an X span of 1 and a Y span of the connected kernel,
+            the returned list is all combinations of fragments that are so connected,
+            all probe detected splits and merges are now complete fragments in their own right
+            """
+
+        max_x = context.max_x
+        max_gap = Scan.CONNECTED_KERNEL_HEIGHT
+        max_gap *= max_gap
+        max_gap += 1  # this is to allow for the get_gap function treating X to X+1 as a length of 1
+
+        # find all combinations going forwards
+        tails = []
+        for head in fragments:
+            leads = [head]
+            lead_num = -1
+            while True:
+                lead_num += 1
+                if lead_num >= len(leads):
+                    break
+                lead = leads[lead_num]
+                links = self._get_near_links(lead.succ, max_gap)
+                for link in links:
+                    joined_length = len(lead.points) + len(link.points)
+                    if joined_length > max_x:
+                        # too big
+                        continue
+                    joined = Scan.Fragment(lead.start, link.end, lead.points + link.points, Scan.TAILJOIN)
+                    joined.succ = link.succ
+                    leads.append(joined)
+            tails += leads
+
+        # find all combinations going backwards
+        heads = []
+        for head in tails:
+            leads = [head]
+            lead_num = -1
+            while True:
+                lead_num += 1
+                if lead_num >= len(leads):
+                    break
+                lead = leads[lead_num]
+                links = self._get_near_links(lead.pred, max_gap)
+                for link in links:
+                    joined_length = len(link.points) + len(lead.points)
+                    if joined_length > max_x:
+                        # too big
+                        continue
+                    joined = Scan.Fragment(link.start, lead.end, link.points + lead.points, Scan.HEADJOIN)
+                    joined.pred = link.pred
+                    leads.append(joined)
+            heads += leads
+
+        # heads is now the all joined up fragments, re-find neighbours
+        fragments = self._find_fragment_neighbours(context, heads)
+
+        fragments.sort(key=lambda h: (h.start, h.points[0], len(h.points)))  # not required but helps log analysis
+        return fragments
+
+    def _kill_fragment(self, fragment: Fragment):
+        """ kill the given fragment, this involves removing all successor and predecessor fragments
+            and marking it as dead
+            """
+
+        # remove ourselves from the successor list of all our predecessors
+        for pred in fragment.pred:
+            links = pred.tail
+            for n in range(len(links.succ)):
+                link = links.succ[n]
+                if link.tail == fragment:
+                    del links.succ[n]
+                    break
+
+        # remove ourselves from the predecessor list of all our successors
+        for succ in fragment.succ:
+            links = succ.tail
+            for n in range(len(links.pred)):
+                link = links.pred[n]
+                if link.tail == fragment:
+                    del links.pred[n]
+                    break
+
+        # mark ourselves as dead
+        fragment.id = None  # JIC we miss a reference
+        fragment.reason = Scan.DEAD
+
+    def _remove_fragment_islands(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
+        """ remove isolated islands,
+            this is called after all directly connected edges have been joined, so anything left
+            is not directly connected, we remove all directly connected edges and those that are
+            below the minimum probe length
+            """
+
+        max_x = context.max_x
+        min_length = int(max(round(max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
+        max_gap = Scan.CONNECTED_KERNEL_HEIGHT
+        max_gap *= max_gap
+
+        for f in range(len(fragments)-1, -1, -1):
+            fragment = fragments[f]
+            if len(fragment.points) == max_x:
+                # always keep these, no matter what
+                continue
+            kill_it = False
+            links = self._get_near_links(fragment.succ, max_gap)
+            if len(links) > 0:
+                # its directly connected to something, thus it is not a maximal length fragment
+                kill_it = True
+            else:
+                links = self._get_near_links(fragment.pred, max_gap)
+                if len(links) > 0:
+                    # its directly connected to something, thus it is not a maximal length fragment
+                    kill_it = True
+            if len(fragment.points) < min_length:
+                # not long enough to be worth keeping
+                kill_it = True
+            if kill_it:
+                # got an island, remove any references to it and dump it
+                self._kill_fragment(fragment)
+                del fragments[f]
+
+        if self.logging:
+            # check no dead fragments exist
+            for fragment in fragments:
+                if fragment.reason == Scan.DEAD:
+                    self._log('DEAD fragment {}'.format(fragment), fatal=True)
+
+        return fragments
+
+    def _remove_fragment_duplicates(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
+        """ remove fragment duplicates created by _join_fragments,
+            a duplicate is a fragment that starts and ends in the same place as another,
+            for these we keep the 'best' one and ditch the others
+            """
+
+        max_x = context.max_x
+        max_y = context.max_y
+
+        # find duplicates and mark bad ones as dead
+        fragments.sort(key=lambda f: (f.start, f.points[0], f.end, f.points[-1]))
+        start = None
+        start_slope = None
+        for f in range(len(fragments)):
+            fragment = fragments[f]
+            if start is None:
+                start = fragment
+                start_slope = self._get_slope_changes(start.points)
+                continue
+            if fragment.start == start.start and fragment.end == start.end:
+                # got a dup, keep the 'best', the best is the straightest
+                # a dup happens when there is more than one route from the start location to the end location
+                slope = self._get_slope_changes(fragment.points)
+                if slope < start_slope:
+                    # this one better, kill the other
+                    self._kill_fragment(start)
+                    start = fragment
+                    start_slope = slope
+                else:
+                    # this one worse or same, kill this one
+                    self._kill_fragment(fragment)
+            else:
+                # move reference to this new start/end
+                start = fragment
+                start_slope = self._get_slope_changes(start.points)
+            continue
+
+        # remove all dead fragments
+        for f in range(len(fragments)-1, -1, -1):
+            if fragments[f].reason == Scan.DEAD:
+                del fragments[f]
+
+        return fragments
+
+    def _remove_overlapping_fragments(self, context: Context, fragments: List[Fragment]) -> List[Fragment]:
+        """ remove overlapping full fragments,
+            when fragments wrap duplicates can occur when due to later considerations running into earlier ones
+            """
+
+        # ToDo: detect any overlap where wrapping is involved (see e.g. in v1 @ 772x outer)
+        #       0,15..140,7 and 171,17..140.7 the end of the latter is the same as the former
+
+        max_x = context.max_x
+
+        full_cirles = []
+        for f in range(len(fragments)-1, -1, -1):
+            fragment = fragments[f]
+            if len(fragment.points) == max_x:
+                # got a full circle, see if its a dup of one we've already got
+                keep_it = True
+                for full_circle in full_cirles:
+                    offset = fragment.start - full_circle.start
+                    is_dup = True
+                    for x in range(max_x):
+                        if fragment.points[x] != full_circle.points[(x + offset) % max_x]:
+                            # they are not the same,
+                            is_dup = False
+                            break
+                    if is_dup:
+                        keep_it = False
+                        break
+                if keep_it:
+                    # its different, so add to our unique full circle list
+                    full_cirles.append(fragment)
+                else:
+                    # its the same as something we have already seen so chuck this one
+                    del fragments[f]
+
+        return fragments
+
     def _find_radius_fragments(self, context, target, threshold, inner_limit=None, outer_limit=None):
         """ probe the entire radius for edge fragments,
             see _find_radius for parameter meaning,
-            returns a list of edges or None if found nothing
+            returns a list of fragments (sorted by start x,y) or None if found nothing
             """
 
         prefix = context.prefix
         max_x = context.max_x
-        min_length = int(max(round(max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
 
         Scan.Fragment.reset()            # reset fragment counter
         context.mergers = None           # reset mergers matrix
@@ -2883,24 +3092,20 @@ class Scan:
         # merge fragment splinters
         fragments = self._merge_splinters(context, fragments)
 
-        # # merge connected that are within the kernel span
-        # fragments.sort(key=lambda f: (f.start, f.points[0]))   # put fragments into x,y order
-        # for span in range(1, Scan.CONNECTED_KERNEL_HEIGHT + 1):
-        #     fragments, completed = self._merge_connected(context, fragments, span)
-        #     if completed >= Scan.MAX_FULL_EDGES:
-        #         break
+        # find all the neighbours
+        fragments = self._find_fragment_neighbours(context, fragments)
 
-        # remove small 'islands'
-        for f in range(len(fragments) - 1, -1, -1):
-            fragment = fragments[f]
-            if fragment.split:
-                # leave these alone
-                continue
-            if fragment.reason != Scan.ENDED:
-                # leave these alone
-                continue
-            if len(fragment.points) < min_length:
-                del fragments[f]
+        # join directly connected fragments
+        fragments = self._join_fragments(context, fragments)
+
+        # remove isolated 'islands'
+        fragments = self._remove_fragment_islands(context, fragments)
+
+        # remove duplicates
+        fragments = self._remove_fragment_duplicates(context, fragments)
+
+        # remove overlapping full circle fragments
+        fragments = self._remove_overlapping_fragments(context, fragments)
 
         if self.logging:
             self._log('{}: found {} radius fragments:'.format(prefix, len(fragments)))
@@ -3017,7 +3222,8 @@ class Scan:
                 if gap_span > biggest_gap:
                     biggest_gap = gap_span
                 gap_start = None
-            first_pixel = (x, y)
+            if first_pixel is None:
+                first_pixel = (x, y)
             # endregion
             # NB: y is not None when we get here
             total_ys += y
@@ -3025,7 +3231,7 @@ class Scan:
             # region Jump detection...
             if prev_pixel is not None:
                 jump = self._get_gap(prev_pixel, (x, y), max_x)
-                if jump > 2:  # 0, 1 or 2 is a direct connection
+                if jump > Scan.CONNECTED_KERNEL_HEIGHT:  # 0, 1 or 2 is a direct connection
                     jumps += 1
                     overall_jumps += jump
                     if jump > biggest_jump:
@@ -3052,103 +3258,95 @@ class Scan:
 
         return metric
 
-    def _merge_edges(self, context, edges: List[Edge], span: int) -> List[Edge]:
-        """ merge edges that are reachable from each other within span,
+    def _same_fragments(self, this: List[Fragment], that: List[Fragment]):
+        """ return True iff the two fragment lists contain identical entries """
+        if len(this) != len(that):
+            # cannot be the same if they have different lengths
+            return False
+        for fragment in this:
+            if fragment in that:
+                continue
+            return False
+        return True
+
+    def _merge_edges(self, context, edges: List[Edge], max_span: int) -> List[Edge]:
+        """ merge edges that are reachable from each other within max_span,
+            max_span limits how far out to look for new merges
             """
 
         max_x = context.max_x
-        span *= span  # remove sign issues
-
-        def reachable(head: Scan.Edge, tail: Scan.Edge):
-            """ test if tail can be reached by head,
-                to be reachable the gap between end of head's last fragment and start of tail's first
-                must not exceed the span,
-                returns the x-gap iff reachable or None if not,
-                NB: unlike the _merge_fragments version this one allows gaps in X
-                """
-
-            if head.state == Scan.COMPLETE or tail.state == Scan.COMPLETE:
-                return False
-
-            head_fragment = head.fragments[-1]
-            tail_fragment = tail.fragments[0]
-            gap = self._get_gap((head_fragment.end, head_fragment.points[-1]),
-                                (tail_fragment.start, tail_fragment.points[0]), max_x)
-            if gap <= span:
-                # calculate the jump in X across this gap
-                jump = tail_fragment.start - (head_fragment.end + 1)
-                if jump < 0:
-                    jump = jump + max_x
-                return jump
-            else:
-                return None
+        max_span *= max_span
 
         joins = []                       # the new edge set is accumulated in here
         completed = 0
+        # grab all the completed edges up-front (so they don't get lost if find too many more)
+        # ones we have already are better than any more we might find
         for head in edges:
             if head.state == Scan.COMPLETE:
-                # this cannot be connected to anything else, so just propagate it
                 joins.append(head)
                 completed += 1
-                if completed >= Scan.MAX_FULL_EDGES:
-                    break
-                continue
-            if head.state is not None:
-                # this has been 'consumed' by some previous merger
-                continue
-            consider = [head]            # start by considering this next head
-            while True:
-                result = []              # joins are accumulated for this head in here
-                for lead in consider:
-                    for tail in edges:
-                        if tail.state == Scan.COMPLETE:
+
+        if completed >= Scan.MAX_FULL_EDGES:
+            # look no further
+            pass
+        else:
+            # see if we can find some more
+            for head in edges:
+                if head.state == Scan.COMPLETE:
+                    # already grabbed these
+                    continue
+                head.state = Scan.CONSIDERED
+                consider = [head]            # start by considering this next head
+                lead_num = -1
+                while True:
+                    lead_num += 1
+                    if lead_num >= len(consider):
+                        break
+                    lead = consider[lead_num]
+                    links = lead.fragments[-1].succ
+                    for link in links:
+                        if link.gap > max_span:
+                            # too far away
+                            break
+                        # got a join
+                        tail = link.tail
+                        joined_length = lead.length + link.jump + len(tail.points)
+                        if joined_length > max_x:
+                            # too big
                             continue
-                        jump = reachable(lead, tail)
-                        if jump is not None:
-                            length = lead.length + jump + tail.length
-                            if length > max_x:
-                                # too big
-                                continue
-                            # make a new edge with the concatenation of their fragments
-                            joined = Scan.Edge(lead.fragments + tail.fragments, length)
-                            # NB: the state of this new edge is None
-                            result.append(joined)
-                            head.state = Scan.HEADJOIN
-                            tail.state = Scan.TAILJOIN
-                            if joined.length == max_x:
-                                joined.state = Scan.COMPLETE
-                                completed += 1
-                                if completed >= Scan.MAX_FULL_EDGES:
-                                    break
-                if len(result) > 0:
-                    # we found some mergers, so now try and extend those
-                    consider = result
+                        joined_fragments = lead.fragments + [tail]
+                        # make a new edge with this combo
+                        joined = Scan.Edge(joined_fragments, joined_length)
+                        # NB: The state of this new Edge is None
+                        consider.append(joined)
+                        lead.state = Scan.HEADJOIN
+                        tail.state = Scan.TAILJOIN
+                        if joined_length == max_x:
+                            joined.state = Scan.COMPLETE
+                            completed += 1
+                            if completed >= Scan.MAX_FULL_EDGES:
+                                break
                     if completed >= Scan.MAX_FULL_EDGES:
                         break
-                    continue
-                else:
-                    # nothing else merges, so we've now done this head
+                joins += consider
+                if completed >= Scan.MAX_FULL_EDGES:
                     break
-            # consider now contains all the merged fragments for this head
-            joins += consider
-            if completed >= Scan.MAX_FULL_EDGES:
-                break
+
+        if self.logging:
+            self._log('{}: merged {} edges into {} at span {} with {} complete:'.
+                      format(context.prefix, len(edges), len(joins), int(math.sqrt(max_span)), completed))
+            for edge in joins:
+                self._log('    {}'.format(edge))
 
         return joins, completed
 
-    def _find_full_edges(self, context, fragments):
-        """ find all the full edge candidates in the given set of edge fragments,
-            fragments contains a list of maximal length fragments, we assemble those that are
-            reachable from each other into full edges and pick the best
-            """
+    def _make_edges(self, context: Context, fragments: List[Fragment]) -> List[Edge]:
+        """ make a list of edges from the given list of fragments """
 
-        max_x = context.max_x
-        prefix = context.prefix
-        max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
-        max_edge_gap = max_edge_x_gap * max_edge_x_gap   # square it so don't have to square root the measured gap
+        Scan.Edge.reset()
 
         # convert all Fragment instances to the equivalent Edge instances
-        fragments.sort(key=lambda  f: (f.start, f.points[0]))
+        max_x = context.max_x
         edges: List[Scan.Edge] = []
         for fragment in fragments:
             length = len(fragment.points)
@@ -3157,15 +3355,32 @@ class Scan:
                 edge.state = Scan.COMPLETE
             edges.append(edge)
 
+        return edges
+
+    def _find_full_edges(self, context, fragments):
+        """ find all the full edge candidates in the given set of edge fragments,
+            fragments contains a list of maximal length fragments, we assemble those that are
+            reachable from each other into full edges,
+            fragments must be sorted by start x,y
+            """
+
+        max_x = context.max_x
+        prefix = context.prefix
+        max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
+        max_edge_gap = max_edge_x_gap * max_edge_x_gap   # square it so don't have to square root the measured gap
+
+        # convert all Fragment instances to the equivalent Edge instances
+        edges: List[Scan.Edge] = self._make_edges(context, fragments)
+
         # combine all reachable edges
-        span = 1
-        max_span = max_x * Scan.MAX_RADIUS_EDGE_GAP
+        this_span = int(1)
+        max_span = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
         while True:
-            edges, completed = self._merge_edges(context, edges, span)
+            edges, completed = self._merge_edges(context, edges, this_span)
             if completed >= Scan.MAX_FULL_EDGES:
                 break
-            span *= 2
-            if span >= max_span:
+            this_span = int(this_span * 2)
+            if this_span >= max_span:
                 # do the last iteration at the limit
                 edges, completed = self._merge_edges(context, edges, max_span)
                 break
@@ -3210,6 +3425,7 @@ class Scan:
             inner/outer_limit when present limit the y indices probed for any x,
             due to distortion the edge may be broken up into fragments,
             this function finds all qualifying fragments and attempts to join them up,
+            returns a
             when successful returns an edge (as an x start + y points list) and None as a reason,
             when failed returns the best edge found and a reason for failure,
             in both cases it also returns a list of edge fragments making up the result
@@ -3269,13 +3485,13 @@ class Scan:
 
         edges = self._find_radius_fragments(context, target, threshold, inner_limit, outer_limit)
         if len(edges) == 0:
-            return None, None, 'no edge'
+            return None, None, None, 'no edge'
 
         full_edges = self._find_full_edges(context, edges)
 
         if len(full_edges) == 0:
             # no full edge candidates found
-            return None, edges, 'no edges'
+            return None, None, edges, 'no edges'
 
         if self.logging:
             self._log('{}: found {} full edge candidates'.format(prefix, len(full_edges)))
@@ -3358,7 +3574,7 @@ class Scan:
                 self._log('{}: best edge {} at {},{}'.format(prefix, metric, 0, full_edge[0]))
 
         # our joined up edge fragments all start at 0
-        return [0, full_edge], edges, reason
+        return full_edge, full_edges, edges, reason
 
     def _find_extent(self, target):
         """ find the inner and outer edges of the given target,
@@ -3375,14 +3591,15 @@ class Scan:
         max_y = context.max_y
         inner_outer_limit = [(max_y / Scan.NUM_RINGS) * (Scan.INNER_BLACK + 1) for _ in range(max_x)]
         w2b_edges, w2b_threshold = self._get_transitions(target, 0, 1, True)
-        ring_inner_edge, inner_fragments, reason = self._find_radius(context, w2b_edges,
-                                                                     w2b_threshold, 'radius-inner',
-                                                                     inner_limit=None,
-                                                                     outer_limit=inner_outer_limit)
+        inner_edge, inner_edges, inner_fragments, reason = self._find_radius(context, w2b_edges,
+                                                                             w2b_threshold,
+                                                                             'radius-inner',
+                                                                             inner_limit=None,
+                                                                             outer_limit=inner_outer_limit)
         if reason is not None:
             reason = 'inner {}'.format(reason)
             b2w_edges = None
-            ring_outer_edge = None
+            outer_edge = None
             outer_fragments = None
             outer_limit = None
         else:
@@ -3390,29 +3607,26 @@ class Scan:
             # we give the outer edge y probe limits to stop it finding edges above the inner edge
             # and also to limit finding edges in the junk below our target
             context = self.Context(target, Scan.BOTTOM_UP)
-            inner_limit = ring_inner_edge[1]
+            inner_limit = inner_edge
             outer_limit = [0 for _ in range(max_x)]
             for x in range(max_x):
                 # we assume y here represents the two inner white rings, so the whole lot is...
                 outer_limit[x] = min(max(inner_limit[x] / 2, Scan.MIN_PIXELS_PER_RING_PROJECTED) * \
                                  Scan.NUM_RINGS * Scan.RING_RADIUS_STRETCH, max_y - 1)
             b2w_edges, b2w_threshold = self._get_transitions(target, 0, 1, False)
-            ring_outer_edge, outer_fragments, reason = self._find_radius(context, b2w_edges,
-                                                                         b2w_threshold, 'radius-outer',
-                                                                         inner_limit=inner_limit,
-                                                                         outer_limit=outer_limit)
+            outer_edge, outer_edges, outer_fragments, reason = self._find_radius(context, b2w_edges,
+                                                                                 b2w_threshold,
+                                                                                 'radius-outer',
+                                                                                 inner_limit=inner_limit,
+                                                                                 outer_limit=outer_limit)
             if reason is not None:
                 reason = 'outer {}'.format(reason)
 
         # smooth the edges
-        if ring_inner_edge is not None:
-            # do via an intermediary for debugging purposes
-            inner_edge_raw = ring_inner_edge[1]
-            ring_inner_edge[1] = self._smooth_edge(inner_edge_raw)
-        if ring_outer_edge is not None:
-            # do via an intermediary for debugging purposes
-            outer_edge_raw = ring_outer_edge[1]
-            ring_outer_edge[1] = self._smooth_edge(outer_edge_raw)
+        if inner_edge is not None:
+            inner_edge = self._smooth_edge(inner_edge)
+        if outer_edge is not None:
+            outer_edge = self._smooth_edge(outer_edge)
 
         if self.save_images:
             if w2b_edges is not None:
@@ -3421,8 +3635,12 @@ class Scan:
                     for fragment in inner_fragments:
                         points = [[fragment.start, fragment.points]]
                         plot = self._draw_plots(plot, points, None, Scan.BLUE)
-                if ring_inner_edge is not None:
-                    points = [[ring_inner_edge[0], ring_inner_edge[1]]]
+                # if inner_edges is not None:
+                #     for edge in inner_edges:
+                #         points = [[0, edge[0]]]
+                #         plot = self._draw_plots(plot, points, None, Scan.PURPLE)
+                if inner_edge is not None:
+                    points = [[0, inner_edge]]
                     plot = self._draw_plots(plot, points, None, Scan.GREEN)
                 if inner_outer_limit is not None:
                     points = [[0, inner_outer_limit]]
@@ -3435,28 +3653,32 @@ class Scan:
                     for fragment in outer_fragments:
                         points = [[fragment.start, fragment.points]]
                         plot = self._draw_plots(plot, points, None, Scan.BLUE)
-                if ring_inner_edge is not None:
-                    points = [[ring_inner_edge[0], ring_inner_edge[1]]]
+                if inner_edge is not None:
+                    points = [[0, inner_edge]]
                     plot = self._draw_plots(plot, points, None, Scan.RED)
                 if outer_limit is not None:
                     points = [[0, outer_limit]]
                     plot = self._draw_plots(plot, points, None, Scan.RED)
-                if ring_outer_edge is not None:
-                    points = [[ring_outer_edge[0], ring_outer_edge[1]]]
+                # if outer_edges is not None:
+                #     for edge in outer_edges:
+                #         points = [[0, edge[0]]]
+                #         plot = self._draw_plots(plot, points, None, Scan.PURPLE)
+                if outer_edge is not None:
+                    points = [[0, outer_edge]]
                     plot = self._draw_plots(plot, points, None, Scan.GREEN)
                 self._unload(plot, '03-outer')
 
             plot = target
             if outer_limit is not None:
-                points = [[ring_inner_edge[0], outer_limit]]
+                points = [[0, outer_limit]]
                 plot = self._draw_plots(plot, points, None, Scan.RED)
-            if ring_inner_edge is not None:
-                plot = self._draw_plots(plot, [[ring_inner_edge[0], ring_inner_edge[1]]], None, Scan.GREEN)
-            if ring_outer_edge is not None:
-                plot = self._draw_plots(plot, [[ring_outer_edge[0], ring_outer_edge[1]]], None, Scan.GREEN)
+            if inner_edge is not None:
+                plot = self._draw_plots(plot, [[0, inner_edge]], None, Scan.GREEN)
+            if outer_edge is not None:
+                plot = self._draw_plots(plot, [[0, outer_edge]], None, Scan.GREEN)
             self._unload(plot, '04-wavy')
 
-        return ring_inner_edge, ring_outer_edge, reason
+        return inner_edge, outer_edge, reason
 
     def _measure(self, target, orig_radius):
         """ find the inner and outer radius edges in the given target,
@@ -3477,10 +3699,10 @@ class Scan:
             return Scan.Extent(target, reason)
 
         # find the edge limits and rotate them such that they start at 0
-        inner_edge_points = ring_inner_edge[1]
-        outer_edge_points = ring_outer_edge[1]
-        start_inner_x = ring_inner_edge[0]
-        start_outer_x = ring_outer_edge[0]
+        inner_edge_points = ring_inner_edge
+        outer_edge_points = ring_outer_edge
+        start_inner_x = 0
+        start_outer_x = 0
         inner_edge = [None for _ in range(max_x)]
         outer_edge = [None for _ in range(max_x)]
         min_inner_edge = projected_y
@@ -4061,7 +4283,7 @@ class Scan:
             return None
 
         # the peaks are indices into sequence which is offset by 1 from pixels, so adjust them
-        adjusted_peaks = [max(peak - 1, 1) for peak in peaks]
+        adjusted_peaks = [max(peak - 1, 0) for peak in peaks]
         return adjusted_peaks
 
     def _find_neighbours(self, target, context, x, y, threshold) -> Optional[List[EdgePoint]]:
