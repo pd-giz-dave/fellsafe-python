@@ -56,7 +56,6 @@ from typing import Optional
 # ToDo: try frame grabbing from a movie
 # ToDo: in the final product speak the number detected (just need 10 sound snips - spoken 0 to 9)
 # ToDo: generate some test images in heavy rain (and snow?)
-# ToDo: try with lower original image resolution and angle steps
 
 # colours
 MAX_LUMINANCE = 255
@@ -2294,7 +2293,6 @@ class Scan:
         self.image = self.transform.downsize(blurred, self.video_mode)  # re-size to given video mode
 
         # set filter parameters
-        # ToDo: these need tuning to hell and back to optimise for our context
         threshold = (MIN_LUMINANCE, MAX_LUMINANCE, 8)  # min, max luminance, luminance step
         circularity = (0.75, None)  # min, max 'corners' in blob edge or None
         convexity = (0.5, None)  # min, max 'gaps' in blob edge or None
@@ -4313,8 +4311,11 @@ class Scan:
         if curr_x is None:
             # this means we got no peaks
             pass
+        elif curr_x+1 == len(sequence):
+            # no slope change until the very last sample, so the peak is curr_x - 1
+            peaks = [max(curr_x-1, 0)]
         else:
-            for x in range(curr_x, len(sequence)):
+            for x in range(curr_x+1, len(sequence)):
                 prev_x = curr_x
                 curr_x = x
                 curr = slope[curr_x]
@@ -4369,7 +4370,7 @@ class Scan:
 
         # find luminance peaks
         threshold = int(round(threshold * Scan.LUMINANCE_SLOPE_THRESHOLD))
-        peaks = self._find_peaks(sequence, threshold)  # ToDo: HACK-->, edge_type)
+        peaks = self._find_peaks(sequence, threshold)
         if len(peaks) == 0:
             return None
 
@@ -6272,7 +6273,7 @@ def verify():
     # going more takes too long, 180 is a good compromise
     test_scan_angle_steps = 180
 
-    test_scan_video_mode = Scan.VIDEO_2K
+    test_scan_video_mode = Scan.VIDEO_HD
 
     test_debug_mode = Scan.DEBUG_IMAGE
     #test_debug_mode = Scan.DEBUG_VERBOSE
@@ -6296,13 +6297,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    test.scan_codes(test_codes_folder)
-    test.scan_media(test_media_folder)
+    # test.scan_codes(test_codes_folder)
+    # test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [101], 'photo-101-v2.jpg')
-    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     del (test)  # needed to close the log file(s)
 
