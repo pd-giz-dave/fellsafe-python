@@ -4072,8 +4072,9 @@ class Scan:
         # return flattened image
         return Scan.Extent(target=code, inner_edge=inner_edge, outer_edge=outer_edge, size=target_size)
 
-    def _smooth_edge(self, in_edge):
+    def _smooth_edge(self, in_edge, no_round=False):
         """ smooth the given edge vector by doing a mean across N pixels,
+            the result is rounded as an integer unless no_round is given,
             the edge may wrap,
             return the smoothed vector
             """
@@ -4090,7 +4091,10 @@ class Scan:
                 v += (sample * f)
                 d += f
             if d > 0:
-                out_edge[x] = int(round(v / d))
+                if no_round:
+                    out_edge[x] = v / d
+                else:
+                    out_edge[x] = int(round(v / d))
         return out_edge
 
     def _get_gap(self, first, second, max_x=0):
@@ -4245,15 +4249,15 @@ class Scan:
 
         return pixels
 
-    def _get_slope_changes(self, sequence, threshold=0):
+    def _get_slope_changes(self, sequence, smooth=True):
         """ given a sequence of values determine how many slope changes there are within it,
+            if smooth is given the sequence is smoothed first
             returns the count of slope changes
             """
 
-        # ToDo: implement a threshold mechanism such that small blips are ignored,
-        #       e.g.: __-__-__ is same as ________, but __--_--_ is not
-
-        slope = self._get_slope(sequence)
+        if smooth:
+            sequence = self._smooth_edge(sequence, no_round=True)
+        slope = self._get_slope(sequence, threshold=0.5)
         slope_slope = self._get_slope(slope)
         changes = 0
         for x in range(len(slope_slope)):
@@ -4343,9 +4347,8 @@ class Scan:
 
         return peaks
 
-    def _find_neighbour_peaks(self, pixels, direction, threshold):
+    def _find_neighbour_peaks(self, pixels, threshold):
         """ given a list of pixels (in ascending co-ord order) find the 'bright' peaks,
-            direction is TOP_DOWN or BOTTOM_UP (used to determine which peak edge is required),
             threshold is the luminance threshold for an edge pixel,
             return a list co-ords of the bright peaks,
             the pixels given here are *across* the edge (i.e. its width or thickness),
@@ -4361,12 +4364,6 @@ class Scan:
         sequence = [0 for _ in range(len(pixels) + 2)]
         for pixel in range(len(pixels)):
             sequence[pixel + 1] = int(pixels[pixel])
-
-        # set peak edge we want
-        if direction == Scan.TOP_DOWN:
-            edge_type = Scan.LEADING_EDGE
-        else:
-            edge_type = Scan.TRAILING_EDGE
 
         # find luminance peaks
         threshold = int(round(threshold * Scan.LUMINANCE_SLOPE_THRESHOLD))
@@ -4388,7 +4385,6 @@ class Scan:
         scan_coord = context.scan_coord
         cross_coord = context.cross_coord
         scan_multiplier = context.scan_multiplier
-        direction = context.scan_direction
 
         xy = [x, y]
         pixel_centre = self._get_threshold_pixel(target, xy[0], xy[1], threshold)
@@ -4434,7 +4430,7 @@ class Scan:
         # NB: pixels are now in 'ascending' order irrespective of the scanning direction
         # find their peaks
         ref = self._get_threshold_level(threshold, xy[cross_coord])
-        peaks = self._find_neighbour_peaks(pixels, direction, ref)
+        peaks = self._find_neighbour_peaks(pixels, ref)
         if peaks is None:
             return None
 
@@ -6273,7 +6269,9 @@ def verify():
     # going more takes too long, 180 is a good compromise
     test_scan_angle_steps = 180
 
-    test_scan_video_mode = Scan.VIDEO_HD
+    # reducing the resolution means targets have to be closer to be detected,
+    # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
+    test_scan_video_mode = Scan.VIDEO_2K
 
     test_debug_mode = Scan.DEBUG_IMAGE
     #test_debug_mode = Scan.DEBUG_VERBOSE
@@ -6297,13 +6295,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    # test.scan_codes(test_codes_folder)
-    # test.scan_media(test_media_folder)
+    test.scan_codes(test_codes_folder)
+    test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [101], 'photo-101-v2.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     del (test)  # needed to close the log file(s)
 
