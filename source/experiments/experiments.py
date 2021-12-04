@@ -1518,8 +1518,8 @@ class Scan:
 
     # x,y pairs for neighbours when looking for inner/outer radius edges,
     # the first x,y pair *must* be 0,0 (this constraint is required for edge split detection)
-    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1]]  # ToDo: HACK-->, [0, 2], [0, -2]]
-    CONNECTED_KERNEL_HEIGHT = 2  # the max span of the kernel from 0,0
+    CONNECTED_KERNEL = [[0, 0], [0, 1], [0, -1]]
+    CONNECTED_KERNEL_HEIGHT = 1  # the max Y span of the kernel from 0,0
 
     # edge vector smoothing kernel, pairs of offset and scale factor (see _smooth_edge)
     SMOOTHING_KERNEL = [[-4, 1.25], [-3, 1], [-2, 0.75], [-1, 0.5], [0, 0], [+1, 0.5], [+2, 0.75], [+3, 1], [+4, 1.25]]
@@ -1942,10 +1942,25 @@ class Scan:
         # scan direction
         scan_direction = None
 
+        # used when detecting/joining fragments
+        min_length = None  # the minimum useful length of a fragment, those below this are discarded
+        max_gap = None  # when joining *fragments* the square of the max gap to be considered as a direct connection
+
+        max_edge_x_gap = None  # the maximum linear X gap allowed between fragments when constructing edges
+        max_edge_gap = None  # square of the max distance allowed between fragments when constructing edges
+
         def __init__(self, target, direction):
 
             self.target = target
             self.max_x, self.max_y = target.size()
+
+            self.min_length = int(max(round(self.max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
+            self.max_gap = Scan.CONNECTED_KERNEL_HEIGHT
+            self.max_gap *= self.max_gap
+            self.max_gap += 1  # this is to allow for the get_gap function treating X to X+1 as a length of 1
+
+            self.max_edge_x_gap = int(self.max_x * Scan.MAX_RADIUS_EDGE_GAP)
+            self.max_edge_gap = self.max_edge_x_gap * self.max_edge_x_gap
 
             if (direction & Scan.UP_AND_DOWN) != 0:
                 # stuff common to TOP_DOWN and BOTTOM_UP scanning (ring and radius edges)
@@ -2592,7 +2607,7 @@ class Scan:
         # return list of new start points
         return edges
 
-    def _follow_edge(self, target, context, edge_start, threshold) -> Optional[List[Fragment]]:
+    def _follow_edge(self, target, context: Context, edge_start, threshold) -> Optional[Fragment]:
         """ follow the edge start in target until come to its end for whatever reason, reasons are:
                 ran off its end (no more neighbours)
                 ran into a split (more than one neighbour)
@@ -2630,8 +2645,7 @@ class Scan:
 
         max_x = context.max_x
         max_y = context.max_y
-        max_y_gap = 1  # ToDo: HACK-->Scan.CONNECTED_KERNEL_HEIGHT
-        max_y_gap *= max_y_gap
+        max_gap = context.max_gap
 
         stepper = Scan.Stepper(Scan.LEFT_TO_RIGHT, max_x, max_y)
         stepper.reset(x=edge_start.where, y=edge_start.midpoint)
@@ -2700,18 +2714,10 @@ class Scan:
                 previous = edge[-1].midpoint
                 gap = neighbour.midpoint - previous
                 gap *= gap
-                if gap > max_y_gap:
-                    # ToDo: HACK START
+                gap += 1  # add the 'x' difference component
+                if gap > max_gap:
                     reason = Scan.JUMPED
                     break
-                    # ToDo: HACK END
-                    # too far away, end this one here and start a new one to carry on
-                    fragment = make_fragment(edge, Scan.JUMPED, None)
-                    fragments = self._follow_edge(target, context, neighbour, threshold, split=True)
-                    if fragments is not None:
-                        return [fragment] + fragments
-                    else:
-                        return [fragment]
             # add the neighbour
             edge.append(neighbour)                         # always add (so we get the merge collision point)
             if mergee is not None:
@@ -2724,12 +2730,11 @@ class Scan:
                 break
             xy = stepper.cross_to(neighbour.midpoint)      # move y to follow what we found
 
-        return [make_fragment(edge, reason, mergee)]
+        return make_fragment(edge, reason, mergee)
 
     def _find_probe_fragments(self, target, context, probe_x, threshold, inner_limit=None, outer_limit=None):
         """ look for edges in the given edges image either top-down (inner) or bottom-up (outer),
             probe_x is the x co-ord to scan up/down at,
-            min_length is the limit below which an edge should be ignored,
             inner/outer_limit when present limit the y indices probed,
             each x is probed left for an edge,
             returns a list of edge fragments found or an empty list if found nothing,
@@ -2765,10 +2770,10 @@ class Scan:
                 else:
                     stepper.skip_to(edge.first - 1)
 
-                fragments = self._follow_edge(target, context, edge, threshold)
-                if fragments is None:
+                fragment = self._follow_edge(target, context, edge, threshold)
+                if fragment is None:
                     continue
-                probe_fragments += fragments
+                probe_fragments.append(fragment)
 
         if self.logging:
             if len(probe_fragments) > 0:
@@ -2815,8 +2820,8 @@ class Scan:
             return gap, jump
 
         max_x = context.max_x
-        max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
-        max_edge_gap = max_edge_x_gap * max_edge_x_gap  # square it so don't have to square root the measured gap
+        max_edge_x_gap = context.max_edge_x_gap
+        max_edge_gap = context.max_edge_gap
 
         # clear all existing links
         for fragment in fragments:
@@ -2887,10 +2892,7 @@ class Scan:
             return
 
         max_x = context.max_x
-        # ToDo: get max_gap from context
-        max_gap = Scan.CONNECTED_KERNEL_HEIGHT
-        max_gap *= max_gap
-        max_gap += 1  # this is to allow for the get_gap function treating X to X+1 as a length of 1
+        max_gap = context.max_gap
 
         # find all combinations going forwards
         tails = []
@@ -2938,12 +2940,8 @@ class Scan:
             """
 
         max_x = context.max_x
-        # ToDo: put min_length in context
-        min_length = int(max(round(max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
-        # ToDo: put max_gap in context
-        max_gap = Scan.CONNECTED_KERNEL_HEIGHT
-        max_gap *= max_gap
-        max_gap += 1  # this is to allow for the get_gap function treating X to X+1 as a length of 1
+        min_length = context.min_length
+        max_gap = context.max_gap
 
         for fragment in fragments:
             if fragment.reason == Scan.DEAD:
@@ -3268,7 +3266,7 @@ class Scan:
             # region Jump detection...
             if prev_pixel is not None:
                 jump = self._get_gap(prev_pixel, (x, y), max_x)
-                if jump > Scan.CONNECTED_KERNEL_HEIGHT:  # 0, 1 or 2 is a direct connection
+                if jump > Scan.CONNECTED_KERNEL_HEIGHT:  # within a kernel height is considered a direct connection
                     jumps += 1
                     overall_jumps += jump
                     if jump > biggest_jump:
@@ -3422,13 +3420,9 @@ class Scan:
                 if completed >= Scan.MAX_FULL_EDGES:
                     break
 
-        # re-sort into longest first order
-        # ToDo: sort not necessary when re-jig the scan loop
-        joins.sort(key=lambda e: e.length, reverse=True)
-
         if self.logging:
-            self._log('{}: merged {} edges into {} at span {} with {} complete:'.
-                      format(context.prefix, len(edges), len(joins), int(math.sqrt(max_span)), completed))
+            self._log('{}: merged {} edges into {} with {} complete:'.
+                      format(context.prefix, len(edges), len(joins), completed))
             for edge in joins:
                 self._log('    {}'.format(edge))
 
@@ -3477,8 +3471,8 @@ class Scan:
 
         max_x = context.max_x
         prefix = context.prefix
-        max_edge_x_gap = int(max_x * Scan.MAX_RADIUS_EDGE_GAP)
-        max_edge_gap = max_edge_x_gap * max_edge_x_gap   # square it so don't have to square root the measured gap
+        max_edge_x_gap = context.max_edge_x_gap
+        max_edge_gap = context.max_edge_gap
 
         # convert all Fragment instances to the equivalent Edge instances
         edges: List[Scan.Edge] = self._make_edges(context, fragments)
@@ -6272,7 +6266,12 @@ def verify():
     test_media_folder = 'media'
     test_log_folder = 'logs'
     test_ring_width = 32
-    test_scan_angle_steps = 180  # going less than this compromises crumbled image detection, going more takes too long
+
+    # angle steps are critical,
+    # going less than 180 compromises crumbled image detection and creates edges that are too steep vertically,
+    # going more takes too long, 180 is a good compromise
+    test_scan_angle_steps = 180
+
     test_scan_video_mode = Scan.VIDEO_2K
 
     test_debug_mode = Scan.DEBUG_IMAGE
@@ -6297,13 +6296,13 @@ def verify():
     # test.codes(test_codes_folder, test_num_set, test_ring_width)
     # test.rings(test_codes_folder, test_ring_width)
 
-    # test.scan_codes(test_codes_folder)
-    # test.scan_media(test_media_folder)
+    test.scan_codes(test_codes_folder)
+    test.scan_media(test_media_folder)
 
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [101], 'photo-101-v2.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     del (test)  # needed to close the log file(s)
 
