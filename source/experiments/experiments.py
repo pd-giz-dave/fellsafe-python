@@ -1570,7 +1570,7 @@ class Scan:
     # the white band is implied as 1-(sum of the rest)
 
     # these are the levels used when detecting radius edges, only 'not-black' is relevant here
-    EDGE_THRESHOLD_LEVELS = (0.2, )      # trailing comma is required to sure make its a tuple and not a number
+    EDGE_THRESHOLD_LEVELS = (0.1, )      # trailing comma is required to sure make its a tuple and not a number
 
     # these are the levels used when translating an image into 'buckets'
     # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white or white in _compress
@@ -4344,6 +4344,9 @@ class Scan:
                         peaks.append(curr_x - 1)
                     else:
                         self._log('given unknown edge_type {}'.format(edge_type), fatal=True)
+            if len(peaks) == 0:
+                # this means we only had a single plateau at prev_x
+                peaks = [prev_x]
 
         return peaks
 
@@ -6265,9 +6268,8 @@ def verify():
     test_ring_width = 32
 
     # angle steps are critical,
-    # going less than 180 compromises crumbled image detection and creates edges that are too steep vertically,
-    # going more takes too long, 180 is a good compromise
-    test_scan_angle_steps = 180
+    # going small creates edges that are steep vertically, going more takes too long
+    test_scan_angle_steps = 120
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -6301,7 +6303,7 @@ def verify():
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [101], 'photo-101-v2.jpg')
-    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v2.jpg')
 
     del (test)  # needed to close the log file(s)
 
