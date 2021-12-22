@@ -1542,26 +1542,16 @@ class Scan:
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance of each other are dropped
     BLOB_RADIUS_STRETCH = 4  # how much to stretch blob radius to ensure always cover the whole lot
     RING_RADIUS_STRETCH = 2.0  # how much to stretch nominal ring width to ensure encompass the outer edge
-    LARGE_IMAGE_LIMIT = 4  # ratio over expected projected height to consider as a 'large' image
     MAX_NEIGHBOUR_GAP = 1  # maximum pixel gap in y between successive x's for two y's to be considered as neighbours
-    RADIUS_PROBE_MIN_LENGTH = 1/15  # min length of an edge fragment as a fraction of the max
-    RADIUS_PROBE_MIN_PIXELS = 3  # if the above is less than this pixels, use this min length in pixels
-    MAX_NEIGHBOURS = 2  # max numbers of neighbours to probe from fragment ends
-    MAX_RADIUS_EDGE_GAP = 1/8  # max gap/distance between radius edge fragments in x as a fraction of the max
-    MAX_FULL_EDGES = 8  # stop looking for fragment joins when found this many full length ones
     MIN_PIXELS_PER_RING_PROJECTED = 4  # project an image such that at least this many pixels per ring at the outer edge
-    MIN_PIXELS_PER_RING_MEASURED = 1  # min number of pixels per ring after measuring target extent
-    LUMINANCE_SLOPE_THRESHOLD = 0.9  # change to qualify a slope change as a fraction of the threshold, must be < 1
     MIN_EDGE_TO_EDGE_SPAN = 0.3  # min length of a ring edge-to-edge span as a fraction of the nominal ring width
     MIN_EDGE_TO_EDGE_PIXELS = 3  # minimum pixels if the above is below this
     MIN_BIT_TO_BIT_SPAN = 0.6  # min length of a bit edge-to-edge span as a fraction of the nominal bit length
     MIN_BIT_TO_BIT_PIXELS = 3  # minimum pixels if the above is below this
     MAX_BIT_SEQUENCE_LENGTH = 2.0  # max length of a bit sequence as a multiple of the nominal bit length
     MIN_BIT_SEQUENCE_LENGTH = 1/3  # min length of a bit sequence as a multiple of the nominal bit length
-    BLACK_THRESHOLD = 0.3  # max white samples for bit to be considered as black as a ratio of samples
-    WHITE_THRESHOLD = 0.7  # min white samples for bit to be considered as white as a ratio of samples
 
-    # region CONNECTED_KERNEL
+    # region CONNECTED_KERNEL...
     # x,y pairs for neighbours when looking for inner/outer radius edges,
     # the first x,y pair *must* be 0,0 (this constraint is required for edge split detection)
     # the connected kernel controls the Y spacing for a pixel neighbour to be considered as connected,
@@ -1573,7 +1563,7 @@ class Scan:
     CONNECTED_KERNEL_HEIGHT = 2  # the max Y span of the kernel from edge-to-edge
     # endregion
 
-    # region ISLAND_KERNEL
+    # region ISLAND_KERNEL...
     # this is used to detect single pixel islands
     # an island is a pixel surrounded by pixels all the same colour
     ISLAND_KERNEL = [(-1, -1), (0, -1), (1, -1),
@@ -1604,15 +1594,10 @@ class Scan:
     # endregion
 
     # region Scanning directions...
-    # these are bit masks, so they can be added to identify multiple directions
-    TOP_DOWN = 1  # top-down y scan direction      (looking for radius edges or ring edges)
-    BOTTOM_UP = 2  # bottom-up y scan direction     (..)
-    LEFT_TO_RIGHT = 4  # left-to-right x scan direction (looking for bit edges)
-    RIGHT_TO_LEFT = 8  # right-to-left x scan direction (..)
-
-    # useful multi-directions
-    UP_AND_DOWN = TOP_DOWN + BOTTOM_UP
-    LEFT_AND_RIGHT = LEFT_TO_RIGHT + RIGHT_TO_LEFT
+    TOP_DOWN = 'top-down'  # top-down y scan direction
+    BOTTOM_UP = 'bottom-up'  # bottom-up y scan direction
+    LEFT_TO_RIGHT = 'left-to-right'  # left-to-right x scan direction
+    RIGHT_TO_LEFT = 'right-to-left'  # right-to-left x scan direction
     # endregion
 
     # context type identifiers
@@ -1630,7 +1615,7 @@ class Scan:
     # the first bucket is the black threshold, the last is the white threshold,
     # the white band is implied as 1-(sum of the rest)
 
-    # these are the levels used when detecting inner/outer edges
+    # these are the levels used when detecting inner/outer edges (see _measure)
     # the objective when detecting inner/outer edges is to find a continous contour through all X's
     # these thresholds divide the image into N buckets, every luminance bucket change is a potential
     # edge, so more buckets is more edges and more opportunities to find a contour, every combination
@@ -1643,24 +1628,6 @@ class Scan:
     # these are the levels used when translating an image into 'buckets'
     # it creates 4 buckets which are interpreted as black, maybe-black, maybe-white or white in _compress
     BUCKET_THRESHOLD_LEVELS = (0.25, 0.25, 0.25)
-    # endregion
-
-    # region Fragment end reasons...
-    WRAPPED = 'wrapped'
-    MERGED = 'merged'
-    SPLIT = 'split'
-    SPLITEND = 'split-end'
-    JUMPED = 'jumped'
-    JOINED = 'joined'
-    DEAD = 'dead'
-    ENDED = 'ended'
-    # endregion
-
-    # region Edge state codes...
-    HEADJOIN = 'head-join'
-    TAILJOIN = 'tail-join'
-    COMPLETE = 'complete'
-    CONSIDERED = 'considered'
     # endregion
 
     # region Ring numbers of flattened image...
@@ -1729,149 +1696,6 @@ class Scan:
     # endregion
 
     # region Structures...
-    class Stepper:
-        """ this class is used to step through an image in a direction between min/max limits,
-            use of this class unifies any scanning loops in any direction and handles all wrapping
-            and cropping issues, x wraps, y does not
-            """
-
-        x = None  # current x coordinate, these wrap at image edge
-        y = None  # current y coordinate, these do not wrap at image edge
-        x_multiplier = None  # the x coord multiplier for the current direction
-        y_multiplier = None  # the y coord multiplier for the current direction
-        min_x = None  # the image scan start in x
-        max_x = None  # the image scan end in x
-        min_y = None  # the image scan start in y
-        max_y = None  # the image scan end in y
-        step = None  # how much the co-ordinates are stepping by for each increment
-        steps = None  # the maximum number of steps to do
-        iterations = None  # how many steps have been done so far
-
-        def __init__(self, direction, max_x, max_y, step=1, steps=None, min_x=0, min_y=0):
-            self.min_x = min_x
-            self.max_x = max_x
-            self.min_y = min_y
-            self.max_y = max_y
-            self.step = step
-            self.iterations = 0
-            self.steps = steps
-            self.x = self.min_x
-            self.y = self.min_y
-            self.x_multiplier = 0
-            self.y_multiplier = 0
-            if (direction & Scan.TOP_DOWN) != 0:
-                if self.steps is None:
-                    self.steps = int(round((self.max_y - self.min_y) / self.step))
-                self.y_multiplier = +1
-            elif (direction & Scan.BOTTOM_UP) != 0:
-                if self.steps is None:
-                    self.steps = int(round((self.max_y - self.min_y) / self.step))
-                self.y = self.max_y - 1
-                self.y_multiplier = -1
-            elif (direction & Scan.LEFT_TO_RIGHT) != 0:
-                if self.steps is None:
-                    self.steps = int(round((self.max_x - self.min_x) / self.step))
-                self.x_multiplier = +1
-            elif (direction & Scan.RIGHT_TO_LEFT) != 0:
-                if self.steps is None:
-                    self.steps = int(round((self.max_x - self.min_x) / self.step))
-                self.x = self.max_x - 1
-                self.x_multiplier = -1
-            else:
-                raise Exception('illegal direction {}'.format(direction))
-
-        def cycles(self):
-            """ return the number of steps left to do """
-            return self.steps - self.iterations
-
-        def reset(self, x=None, y=None, step=None, steps=None):
-            """ reset parameters, None means leave as is,
-                whatever is given here is returned as the first subsequent .next() then
-                steps resume from there, the number of iterations is always reset to 0
-                """
-            if x is not None:
-                self.x = x
-            if y is not None:
-                self.y = y
-            if step is not None:
-                self.step = step
-            if steps is not None:
-                self.steps = steps
-            self.iterations = 0
-
-        def cross_to(self, dest):
-            """ move the non-iterating co-ordinate to that given,
-                it will not allow the co-ord to exceed the min/max limits,
-                returns an xy tuple to reflect the updated position
-                """
-
-            if self.x_multiplier != 0:
-                # non-iterating co-ord is y
-                if dest >= self.min_y and dest <= self.max_y:
-                    self.y = dest
-
-            elif self.y_multiplier != 0:
-                # non-iterating co-ord is x
-                if dest >= self.min_x and dest <= self.max_x:
-                    self.x = dest
-
-            return [self.x, self.y]
-
-        def skip_to(self, dest):
-            """ skip steps until the next step will yield that given or None,
-                it returns the x,y tuple reached or None if beyond the end,
-                """
-
-            xy = [self.x, self.y]
-
-            if self.x_multiplier != 0:
-                while self.x != dest:
-                    xy = self.next()
-                    if xy is None:
-                        break
-            elif self.y_multiplier != 0 and self.y is not None:
-                while self.y != dest:
-                    xy = self.next()
-                    if xy is None:
-                        break
-
-            return xy
-
-        def next(self):
-            """ get the (first or) next x,y co-ord pair,
-                returns an x,y tuple or None if no more
-                """
-
-            # check we have something to return
-            if self.y is None:
-                # we've gone off the top or bottom of the image
-                return None
-            if self.iterations >= self.steps:
-                # we've done enough steps
-                return None
-
-            # note result for caller
-            xy = [self.x, self.y]
-
-            # set the next co-ords to return
-            self.x = int(round(self.x + (self.x_multiplier * self.step)))
-            if self.x >= self.max_x:
-                # gone off the right edge, re-start on the left edge
-                self.x = self.min_x
-            elif self.x < self.min_x:
-                # gone off the left edge, re-start on the right edge
-                self.x = self.max_x - 1
-            self.y = int(round(self.y + (self.y_multiplier * self.step)))
-            if self.y < self.min_y or self.y >= self.max_y:
-                # we've gone off the top or bottom of the image
-                # so next step must report done
-                self.y = None
-
-            # note we've done another step
-            self.iterations += 1
-
-            return xy
-
     class Target:
         """ structure to hold detected target information """
 
@@ -1892,25 +1716,6 @@ class Scan:
             self.blob_size = blob_size
             self.target_size = target_size
             self.reason = reason
-
-    class EdgePoint:
-        """ struct to hold info about an edge point """
-
-        def __init__(self, midpoint=0, where=0, first=0, last=0, pixel=None):
-            # NB: the co-ordinates given here may be out of range if they have wrapped,
-            #     it is up to the user of this object to deal with it
-            self.midpoint = midpoint  # midpoint co-ord (Y)
-            self.where = where  # the other co-ord of the point (X)
-            self.first = first  # first pixel co-ord over the threshold in this edge
-            self.last = last  # last pixel co-ord over the threshold in this edge
-            self.pixel = pixel  # the pixel value at the midpoint
-
-        def __str__(self):
-            return '(at {},{} span={}..{} pixel={})'.\
-                   format(self.where, self.midpoint, self.first, self.last, self.pixel)
-
-        def __eq__(self, other):
-            return self.midpoint == other.midpoint and self.where == other.where
 
     class Kernel:
         """ an iterator that returns a series of x,y co-ordinates for a 'kernel' in a given direction,
@@ -1964,145 +1769,6 @@ class Scan:
                 return tx, ty
             else:
                 raise StopIteration
-
-    class Context:
-        """ this struct holds all the context that is dependant on direction and the image size being processed,
-            its created once for each target, it creates a parameter set for a direction (or direction pair),
-            the properties set here allow the processing logic to be direction agnostic,
-            they only need to evaluate expressions using the properties set here
-            """
-
-        # prefix for log messages
-        prefix = None
-        type = None  # descriptive type of the edge (ring or bit) for log messages and image names
-        context = None  # type of context (CONTEXT_RING or CONTEXT_BIT)
-
-        # image and its limits
-        target = None
-        max_x = None
-        max_y = None
-        mergers = None  # see _get_mergee
-
-        # co-ordinate limits, scan-direction is the main direction, cross-direction is 90 degrees to it
-        # these are either max_x-1 or max_y-1
-        max_scan_coord = None
-        max_cross_coord = None
-
-        # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
-        # these are offsets into an [x, y] array/tuple to access the in-direction co-ordinate
-        # or the cross-direction co-ordinate, as they are 0 or 1 and mutually exclusive they can also
-        # be used as multipliers for x and y in direction agnostic loops, e.g.
-        # x += (something * cross_coord) will only update x if x is the scanning direction, and
-        # x += (something * cross_coord * scan_multiplier) will only update it in the scanning direction
-        scan_coord = None
-        cross_coord = None
-
-        # multiplier for scanning loop coordinates, either +1 or -1, use as:
-        #   xy[scan_coord] += something * scan_multiplier
-        scan_multiplier = None
-
-        # wrapping constraints
-        allow_scan_wrap = None  # scanning is allowed to wrap around image limits (e.g. bits)
-
-        # kernel matrix to use to detect connected neighbours when following edges
-        # this is set in processing logic, not here as it is dependant on more than just the direction
-        kernel = None
-
-        # scan direction
-        scan_direction = None
-
-        # used when detecting/joining fragments
-        min_length = None  # the minimum useful length of a fragment, those below this are discarded
-        max_gap = None  # when joining *fragments* the square of the max gap to be considered as a direct connection
-
-        max_edge_x_gap = None  # the maximum linear X gap allowed between fragments when constructing edges
-        max_edge_gap = None  # square of the max distance allowed between fragments when constructing edges
-
-        def __init__(self, target, direction):
-
-            self.target = target
-            self.max_x, self.max_y = target.size()
-
-            self.min_length = int(max(round(self.max_x * Scan.RADIUS_PROBE_MIN_LENGTH), Scan.RADIUS_PROBE_MIN_PIXELS))
-            self.max_gap = Scan.CONNECTED_KERNEL_HEIGHT
-            self.max_gap *= self.max_gap
-            self.max_gap += 1  # this is to allow for the get_gap function treating X to X+1 as a length of 1
-
-            self.max_edge_x_gap = int(self.max_x * Scan.MAX_RADIUS_EDGE_GAP)
-            self.max_edge_gap = self.max_edge_x_gap * self.max_edge_x_gap
-
-            if (direction & Scan.UP_AND_DOWN) != 0:
-                # stuff common to TOP_DOWN and BOTTOM_UP scanning (ring and radius edges)
-
-                self.context = Scan.CONTEXT_RING
-                self.type = 'ring'
-
-                # coordinate limits
-                self.max_scan_coord = self.max_y - 1
-                self.max_cross_coord = self.max_x - 1
-
-                # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
-                self.scan_coord = 1  # ==y
-                self.cross_coord = 0  # ==x
-
-                # wrapping constraints
-                self.allow_scan_wrap = False
-
-            elif (direction & Scan.LEFT_AND_RIGHT) != 0:
-                # stuff common to left-to-right and right-to-left scanning (bit edges)
-
-                self.context = Scan.CONTEXT_BIT
-                self.type = 'bit'
-
-                # coordinate limits
-                self.max_scan_coord = self.max_x - 1
-                self.max_cross_coord = self.max_y - 1
-
-                # indices into a [x,y] tuple for the scanning co-ord and the cross co-ord
-                self.scan_coord = 0  # ==x
-                self.cross_coord = 1  # ==y
-
-                # wrapping constraints
-                self.allow_scan_wrap = True
-
-            else:
-                raise Exception('illegal direction {}'.format(direction))
-
-            if (direction & Scan.TOP_DOWN) != 0:
-                # NB: This takes priority if doing up-and-down
-                # context is looking for ring or radius edges top-down
-                self.prefix = 'ring-down'
-                self.scan_direction = Scan.TOP_DOWN
-                # multiplier when scanning
-                self.scan_multiplier = 1
-
-            elif (direction & Scan.BOTTOM_UP) != 0:
-                # NB: This is ignored if doing up-and-down
-                # context is looking for ring or radius edges bottom-up
-                self.prefix = 'ring-up'
-                self.scan_direction = Scan.BOTTOM_UP
-                # multiplier when scanning
-                self.scan_multiplier = -1
-
-            elif (direction & Scan.LEFT_TO_RIGHT) != 0:
-                # NB: This takes priority if doing left-and-right
-                # context is looking for bit edges left-to-right
-                self.prefix = 'bit-left'
-                self.scan_direction = Scan.LEFT_TO_RIGHT
-                # multiplier when scanning
-                self.scan_multiplier = 1
-
-            elif (direction & Scan.RIGHT_TO_LEFT) != 0:
-                # NB: This is ignored if doing left-and-right
-                # context is looking for bit edges right-to-left
-                self.prefix = 'bit-right'
-                self.scan_direction = Scan.RIGHT_TO_LEFT
-                # multiplier when scanning
-                self.scan_multiplier = -1
-
-            else:
-                # can't get here!
-                raise Exception('unreachable code reached!')
 
     class Boundary:
         """ a boundary is a horizontal or vertical line that represents a ring or bit transition,
@@ -2187,90 +1853,6 @@ class Scan:
             self.outer_edge = outer_edge   # list of y's for the outer edge
             self.size = size               # orig radius or target size scaled to the original image
             self.reason = reason           # if edge detection failed, the reason
-
-    class Fragment:
-        """ info about a detection radius edge fragment """
-
-        last_id = -1
-
-        def __init__(self, start, end, points, reason, mergee=None):
-            self.start = start  # the x co-ord of the start of the fragment
-            self.end = end  # the x co-ord of the end of the fragment
-            self.points = points  # list of y co-ords for this fragment
-            self.reason = reason  # the reason the fragment ended
-            self.mergee: Optional[Scan.Fragment] = mergee  # the fragment this merges with or None if it doesn't
-            self.collisions: List[Scan.Fragment] = []  # list of fragments that collide with this one
-            Scan.Fragment.last_id += 1
-            self.id = Scan.Fragment.last_id  # unique id for this Fragment, <0 means its due for deletion
-            self.pred: List[Scan.Link] = []  # list of links to fragments that can reach this one
-            self.succ: List[Scan.Link] = []  # list of links to fragments that this one can reach
-
-        def __str__(self):
-            if len(self.points) > 4:
-                points = '{}..{}'.format(vstr(self.points[:3], 'n', close=''), vstr(self.points[-3:], 'n', open=''))
-            else:
-                points = '{}'.format(vstr(self.points, 'n'))
-            return '(#{}({}): {},{}..{},{} points({}): {}, collisions:{}, #pred:{}, #succ:{})'.\
-                format(self.id, self.reason, self.start, self.points[0], self.end, self.points[-1],
-                       len(self.points), points, len(self.collisions), len(self.pred), len(self.succ))
-
-        @staticmethod
-        def reset():
-            Scan.Fragment.last_id = -1
-
-    class Link:
-        """ info about a link between two fragments """
-
-        def __init__(self, head, tail, gap, jump):
-            self.head: Scan.Fragment = head  # fragment 1
-            self.tail: Scan.Fragment = tail  # fragment 2
-            self.gap = gap  # the distance between these two fragments
-            self.jump = jump  # the X 'jump' between these two fragments
-
-        def __str__(self):
-            return 'gap:{}, jump:{}, head:{}, tail:{}'.format(self.gap, self.jump, self.head, self.tail)
-
-    class Edge:
-        """ info about continuous edges being constructed from edge fragments """
-
-        last_id = -1
-
-        def __init__(self, fragments=None, length=None):
-            self.fragments: List[Scan.Fragment] = fragments  # list of Fragment instances making up this edge
-            self.length = length  # total length in X (None==not known yet)
-            self.state = None
-            Scan.Edge.last_id += 1
-            self.id = Scan.Edge.last_id
-
-        def __str__(self):
-            if len(self.fragments) > 1:
-                fragments = ', first={}, last={}'.format(self.fragments[0], self.fragments[-1])
-            elif len(self.fragments) > 0:
-                fragments = ', first={}'.format(self.fragments[0])
-            else:
-                fragments = ''
-            return '(#{}: state:{}, length:{}, #fragments:{}{})'.\
-                   format(self.id, self.state, self.length, len(self.fragments), fragments)
-
-        @staticmethod
-        def reset():
-            Scan.Edge.last_id = -1
-
-    class EdgeMetric:
-        """ result of measuring inner and outer edge candidates """
-
-        def __init__(self, where, slope, strength, gaps, jumps):
-            self.where = where  # tha average Y position of the edge across all X's
-            self.slope = slope  # count of number of slope changes in the edge (less is better)
-            self.strength = strength  # average pixel value along the edge
-            self.gaps = gaps  # a tuple of gap count, total gaps, biggest gap
-            self.jumps = jumps  # a tuple of jump count, total jumps, biggest jump
-
-        def __str__(self):
-            return '(y={:.2f}, slope={}, strength={:.2f}, gaps:[#{}, sum={}, max={}], jumps:[#{}, sum={:.2f}, max={:.2f}])'.\
-                   format(self.where, self.slope, self.strength,
-                          self.gaps[0], self.gaps[1], self.gaps[2],
-                          self.jumps[0], math.sqrt(self.jumps[1]), math.sqrt(self.jumps[2]))
 
     class Pulse:
         """ a Pulse is a low (head), high (top), low (tail) span across a slice,
@@ -2494,7 +2076,7 @@ class Scan:
             the outer edge is last black to white transition that goes all the way around,
             """
 
-        def make_edge(transitions):
+        def make_edge(transitions, direction):
             """ make the best continuous edge from the given transitions """
             # for an X
             #  for an edge
@@ -2584,6 +2166,10 @@ class Scan:
                     best_edge = edge
                     best_jumps = jumps
 
+            if self.logging:
+                self._log('measure {}: found {} edges, best has {} jumps'.
+                          format(direction, len(edges), best_jumps))
+
             return best_edge
 
         # make an image to detect our edges within
@@ -2633,7 +2219,7 @@ class Scan:
             if len(to_black[x]) == 0:
                 # this means the whole slice is the same intensity
                 to_black[x] = [(0, 0)]
-        inner = make_edge(to_black)
+        inner = make_edge(to_black, Scan.TOP_DOWN)
 
         # adjust threshold limit to reflect the inner edge we discovered
         for x in range(max_x):
@@ -2655,7 +2241,7 @@ class Scan:
             if len(to_white[x]) == 0:
                 # this means the whole slice is black
                 to_white[x] = [(max(threshold.limit - 1, 0), 0)]
-        outer = make_edge(to_white)
+        outer = make_edge(to_white, Scan.BOTTOM_UP)
 
         # smooth the edges
         inner_edge = self._smooth_edge(inner)
@@ -3554,7 +3140,7 @@ class Scan:
             the points of the slice are assumed to have been 'cleaned' in that leading/trailing
             edges alternate across the slice (i.e. no consecutive edges of the same type) and the
             first edge is the inner edge and is a trailing edge and
-            the last edge is the outer edge and is a is leading edge,
+            the last edge is the outer edge and is a leading edge,
             populates slice.pulses and returns the modified slice
             """
 
