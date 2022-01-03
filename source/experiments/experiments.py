@@ -185,7 +185,7 @@ class Codec:
                             self.nums[num] = code  # encode num as code
                             if edges > self.max_edges:
                                 self.max_edges = edges
-                            if edges < self.max_edges:
+                            if edges < self.min_edges:
                                 self.min_edges = edges
         if num < self.min_num:
             # nothing meets criteria!
@@ -281,6 +281,28 @@ class Codec:
         if count_bits(rings[1] ^ rings[2]) < Codec.MIN_ACROSS_RING_EDGES:
             # does not meet edges requirement across the rings
             return 0
+
+        # ToDo: HACK START
+        # # check only allowed codes across the rings
+        # valid = ((0, 0, 1),
+        #          (0, 1, 0),
+        #          (0, 1, 1),
+        #          (1, 0, 0),
+        #          (1, 1, 0),
+        #          (1, 1, 1))
+        # mask1 = msb
+        # while mask1 != 0:
+        #     seq = (0 if rings[0] & mask1 == 0 else 1,
+        #            0 if rings[1] & mask1 == 0 else 1,
+        #            0 if rings[2] & mask1 == 0 else 1)
+        #     if seq in valid:
+        #         # OK so far
+        #         mask1 >>= 1
+        #         continue
+        #     else:
+        #         # not allowed
+        #         return 0
+        # ToDo: HACK END
 
         return max(ring_edges, 1)
 
@@ -1643,23 +1665,35 @@ class Scan:
     # endregion
 
     # region Pulse classifications...
-    # head to top to tail relative sizes
-    THREE_ONE_ONE = '3:1:1'
-    TWO_ONE_TWO = '2:1:2'
-    TWO_TWO_ONE = '2:2:1'
-    ONE_ONE_ONE = '1:1:1'
-    ONE_ONE_THREE = '1:1:3'
-    ONE_TWO_TWO = '1:2:2'
-    ONE_THREE_ONE = '1:3:1'
+    # pulse head to top to tail ratios (see diagram in _measure_pulses)
+    FIVE_ZERO_ZERO_RATIOS = (5, 0, 0)
+    THREE_ONE_ONE_RATIOS = (3, 1, 1)
+    TWO_ONE_TWO_RATIOS = (2, 1, 2)
+    TWO_TWO_ONE_RATIOS = (2, 2, 1)
+    ONE_ONE_THREE_RATIOS = (1, 1, 3)
+    ONE_ONE_ONE_RATIOS = (1, 1, 1)
+    ONE_TWO_TWO_RATIOS = (1, 2, 2)
+    ONE_THREE_ONE_RATIOS = (1, 3, 1)
 
-    # pulse ratios for the above (see diagram in _measure_pulses)
-    THREE_ONE_ONE_RATIOS = ((3, 1, 1),)  # (3, 1, 0.5))
-    TWO_ONE_TWO_RATIOS = ((2, 1, 2),)  # (2, 1, 1.5))
-    TWO_TWO_ONE_RATIOS = ((2, 2, 1),)  # (2, 2, 0.5))
-    ONE_ONE_THREE_RATIOS = ((1, 1, 3),)  # (1, 1, 2.5))
-    ONE_ONE_ONE_RATIOS = ((1, 1, 1),)  # (1, 1, 0.5))
-    ONE_TWO_TWO_RATIOS = ((1, 2, 2),)  # (1, 2, 1.5))
-    ONE_THREE_ONE_RATIOS = ((1, 3, 1),)  # (1, 3, 0.5))
+    # bits represented by each pulse type
+    FIVE_ZERO_ZERO_BITS = (0, 0, 0)
+    THREE_ONE_ONE_BITS = (0, 0, 1)
+    TWO_ONE_TWO_BITS = (0, 1, 0)
+    TWO_TWO_ONE_BITS = (0, 1, 1)
+    ONE_ONE_THREE_BITS = (1, 0, 0)
+    ONE_ONE_ONE_BITS = (1, 0, 1)
+    ONE_TWO_TWO_BITS = (1, 1, 0)
+    ONE_THREE_ONE_BITS = (1, 1, 1)
+
+    # lookup table for ratios and bits for all possible pulses
+    PULSE_RATIOS = [(FIVE_ZERO_ZERO_RATIOS, FIVE_ZERO_ZERO_BITS),
+                    (THREE_ONE_ONE_RATIOS, THREE_ONE_ONE_BITS),
+                    (TWO_ONE_TWO_RATIOS, TWO_ONE_TWO_BITS),
+                    (TWO_TWO_ONE_RATIOS, TWO_TWO_ONE_BITS),
+                    (ONE_ONE_THREE_RATIOS, ONE_ONE_THREE_BITS),
+                    (ONE_ONE_ONE_RATIOS, ONE_ONE_ONE_BITS),
+                    (ONE_TWO_TWO_RATIOS, ONE_TWO_TWO_BITS),
+                    (ONE_THREE_ONE_RATIOS, ONE_THREE_ONE_BITS)]
     # endregion
 
     # slice dead reasons
@@ -1793,18 +1827,25 @@ class Scan:
 
         def __init__(self):
             self.points: List[Scan.SlicePoint] = []  # points in this slice
-            self.bits = []  # the bit sequence represented by this slice
-            self.pulses = []  # how many pulses in the slice
-            self.error = 0  # our confidence factor (0..1) in the bits decoded (0=total, 1=none)
+            self.bits: List[Scan.Bits] = []  # the bits and their error represented by this slice in least error order
+            self.pulses: List[Scan.Pulse] = []  # pulses in the slice
             self.dead = None  # when not None the reason this slice was killed
 
         def __str__(self):
             if len(self.points) > 0:
                 where = '{}'.format(self.points[0])
             else:
-                where = 'nowhere'
-            return '(at {}: bits={}, error={:.2f}, points={}, pulses={}, dead={})'.\
-                    format(where, self.bits, self.error, len(self.points), len(self.pulses), self.dead)
+                where = '(nowhere)'
+            if len(self.bits) > 0:
+                bits = '{}, first:{}'.format(len(self.bits), self.bits[0])
+            else:
+                bits = 'None'
+            if len(self.pulses) > 0:
+                pulses = '{}, first:{}'.format(len(self.pulses), self.pulses[0])
+            else:
+                pulses = 'None'
+            return '({}: bits={}, points={}, pulses={}, dead={})'.\
+                    format(where, bits, len(self.points), pulses, self.dead)
 
     class SlicePoint:
         """ a slice point is a pixel that is part of a detected edge """
@@ -1815,7 +1856,7 @@ class Scan:
             self.dead = False   # set True if point should be ignored
 
         def __str__(self):
-            return '(at {}: type={}, dead={})'.\
+            return '({}: type={}, dead={})'.\
                     format(self.where, self.type, self.dead)
 
     class SliceBits:
@@ -1825,7 +1866,7 @@ class Scan:
 
         def __init__(self, bits=None, length=1, error=0, where=None):
             self.where = where  # the x co-ord where it starts
-            self.bits: List[int] = [] if bits is None else bits  # an array of three bits, 0 or 1 or None
+            self.bits: List[int] = [] if bits is None else bits  # an array of bits, 0 or 1
             self.length = length  # how many consecutive slices this pattern covers
             self.error = error  # the average slice error associated with this pattern
             self.dead = None  # set to a reason if this bit sequence is rejected
@@ -1863,14 +1904,25 @@ class Scan:
             self.head = head  # the relative length of the low period up to the leading edge
             self.top = top  # the relative length of the high period up to the trailing edge
             self.tail = tail  # the relative length of the low period after the trailing edge
-            self.type = None  # the classification according to the relative lengths of the head, top and tail
-            self.error = 0  # the deviation (squared) from the ideal relative lengths, 0=no deviation
-            self.type2 = None  # next best type
-            self.error2 = 0  # and its deviation
+            self.types: List[Scan.Bits] = []  # the bits and error of every possible interpretation
 
         def __str__(self):
-            return '({:.2f}-{:.2f}-{:.2f} type={} error={:.2f}, type2={} error2={:.2f})'.\
-                    format(self.head, self.top, self.tail, self.type, self.error, self.type2, self.error2)
+            if len(self.types) > 0:
+                types = '{}, first:{}'.format(len(self.types), self.types[0])
+            else:
+                types = 'None'
+            return '({:.2f}-{:.2f}-{:.2f} types={})'.\
+                    format(self.head, self.top, self.tail, types)
+
+    class Bits:
+        """ Bits encapsulates a sequence of bits and an associated error """
+
+        def __init__(self, bits, error):
+            self.bits = bits  # array of N bits
+            self.error = error  # error associated with those bits
+
+        def __str__(self):
+            return '({}, error:{:.2f})'.format(self.bits, self.error)
 
     class Detection:
         """ struct to hold info about a Scan detected code """
@@ -2069,7 +2121,7 @@ class Scan:
 
         return code, limit_radius
 
-    def _measure(self, target: Frame, orig_radius):
+    def _measure(self, target: Frame, orig_radius) -> Extent:
         """ find the inner and outer radius edges in the given target,
             returns an instance of Extent with the detected edges,
             the inner edge is the first white to black transition that goes all the way around,
@@ -2149,6 +2201,7 @@ class Scan:
                     edges.append(make_candidate(x, transition[0]))
 
             # pick best
+            # ToDo: improve this to allow for big jumps out then in - interpolate across the gap
             best_edge = None
             best_jumps = None
             for edge in edges:
@@ -2348,7 +2401,7 @@ class Scan:
         # that's it
         return dest, offset_1_out, offset_2_out
 
-    def _flatten(self, measured):
+    def _flatten(self, measured: Extent) -> Extent:
         """ measured is the output from the _measure function, it can be passed in here naked, if it was
             aborted (reason not None) we'll just abort out of here too,
             remove perspective distortions from the given 'measured' image and its inner/outer edges,
@@ -3034,7 +3087,7 @@ class Scan:
 
         max_x, max_y = target.size()
         if direction == Scan.TOP_DOWN:
-            min_span = max((max_y / Scan.NUM_RINGS) * Scan.MIN_EDGE_TO_EDGE_SPAN, Scan.MIN_EDGE_TO_EDGE_PIXELS)
+            min_span = 1  # ToDo: HACK-->max((max_y / Scan.NUM_RINGS) * Scan.MIN_EDGE_TO_EDGE_SPAN, Scan.MIN_EDGE_TO_EDGE_PIXELS)
             scan_coord = 1
             sum_coord = 0
             max_scan_coord = max_y
@@ -3175,46 +3228,49 @@ class Scan:
             next_pulse = slice.pulses[p+1]
             this_pulse.tail = next_pulse.head
 
-        # the last (partial) pulse is to the outer edge and not wanted
-        del slice.pulses[-1]
+        # if there is only 1 pulse instance it means we've got a zero,
+        # otherwise the last (partial) pulse is to the outer edge and not wanted
+        if len (slice.pulses) == 1:
+            # make a 'zero' pulse - i.e. top and tail are zero, head is already set as the full width
+            slice.pulses[0].top = 0.0
+            slice.pulses[0].tail = 0.0
+        else:
+            # chuck the final partial pulse
+            del slice.pulses[-1]
 
         return slice
 
-    def _pulse_error(self, pulse, ideals):
-        """ calculate the pulse error betw`een actual and ideal pulse component lengths,
-            each ideal consists of a list of ratios and the classification to assign if those ratios match,
-            this is the *only* function that knows the structure of the ideals presented here
+    def _pulse_error(self, pulse: Pulse, ideal):
+        """ calculate the pulse error between actual and ideal pulse component lengths,
+            ideal consists of ratios and the classification to assign if those ratios match,
+            this is the *only* function that knows the structure of the ideal presented here
             """
 
         # determine error based on sizes relative to one ring width,
         # the pulse component lengths are currently relative to the whole target width
         # which is 5 rings (inner black, data 1, data 2, data 2, outer black), so each
         # component relative to 1 ring is that measured multiplied by 5
-        rings = Scan.NUM_RINGS - 3             # using this to show our dependence on it
+        rings = Scan.NUM_RINGS - 3             # using NUM_RINGS to show our dependence on it
         head_length = (pulse.head * rings)
         top_length = pulse.top * rings
         tail_length = (pulse.tail * rings)
 
         # Note: various error functions have been tried,
         #       this very simple average of the square of the differences works best
-        best_error = None
-        for ideal in ideals:
-            head_error = ideal[0] - head_length
-            head_error *= head_error
+        head_error = ideal[0] - head_length
+        head_error *= head_error
 
-            top_error = ideal[1] - top_length
-            top_error *= top_error
+        top_error = ideal[1] - top_length
+        top_error *= top_error
 
-            tail_error = ideal[2] - tail_length
-            tail_error *= tail_error
+        tail_error = ideal[2] - tail_length
+        tail_error *= tail_error
 
-            error = (head_error + top_error + tail_error) / 3  # use average error of the components
-            if best_error is None or error < best_error:
-                best_error = error
+        error = (head_error + top_error + tail_error) / 3  # use average error of the components
 
-        return best_error
+        return int(error * 10)  # only want 1 dp for error discrimination
 
-    def _measure_pulses(self, slice):
+    def _measure_pulses(self, slice: Slice) -> Slice:
         """ measure the pulses in the given slice,
             pulse component lengths range between 1 and 3 in an 'ideal' image,
             variations from this ideal are an error measure (calculated later),
@@ -3224,9 +3280,9 @@ class Scan:
                  inner edge----+                                  +----outer edge
                                | Head                        Tail |
                                V<---->...                ...<---->V
-            [0, 0, 0]    ------+                                  +------
-                               |                                  |           zero pulses is unambiguous
-                               +------+------+------+------+------+
+            [0, 0, 0]    ------+                                  +------     pulse, head/tail, head/top, top/tail
+                               |                                  |           5:0:0
+                               +------+------+------+------+------+           zero pulses is unambiguous
                                                        Top
                                                     +<---->+
             [0, 0, 1]    ------+                    +------+      +------     pulse, head/tail, head/top, top/tail
@@ -3256,34 +3312,21 @@ class Scan:
                          ------+      +------+-----+-------+      +------
             [1, 1, 1]          |      |                    |      |           1:3:1     1:1   1:3   3:1
                                +------+      +     +       +------+
-            we test every pulse against every possibility and pick the one with the
-            least deviation from these ideals,
-            populates pulse.type and pulse.error and returns the number of pulses
+            we test every pulse against every possibility and produce a list in least error
+            order for each one,
+            populates pulse.types and returns pulses
             """
 
-        ratios = [(Scan.THREE_ONE_ONE_RATIOS, Scan.THREE_ONE_ONE),
-                  (Scan.TWO_ONE_TWO_RATIOS, Scan.TWO_ONE_TWO),
-                  (Scan.TWO_TWO_ONE_RATIOS, Scan.TWO_TWO_ONE),
-                  (Scan.ONE_ONE_THREE_RATIOS, Scan.ONE_ONE_THREE),
-                  (Scan.ONE_ONE_ONE_RATIOS, Scan.ONE_ONE_ONE),
-                  (Scan.ONE_TWO_TWO_RATIOS, Scan.ONE_TWO_TWO),
-                  (Scan.ONE_THREE_ONE_RATIOS, Scan.ONE_THREE_ONE)]
-
-        # find the best match
         for pulse in slice.pulses:
-            errors = []
-            for ratio in range(len(ratios)):
-                errors.append((self._pulse_error(pulse, ratios[ratio][0]), ratios[ratio][1]))
-            errors.sort(key=lambda e: e[0])
+            pulse.types = []
+            for ratio in range(len(Scan.PULSE_RATIOS)):
+                pulse.types.append(Scan.Bits(Scan.PULSE_RATIOS[ratio][1],
+                                             self._pulse_error(pulse, Scan.PULSE_RATIOS[ratio][0])))
 
-            # record best 2 options
-            pulse.error = errors[0][0]
-            pulse.type = errors[0][1]
+            # put into least error order
+            pulse.types.sort(key=lambda e: e.error)
 
-            pulse.error2 = errors[1][0]
-            pulse.type2 = errors[1][1]
-
-        return len(slice.pulses)
+        return slice.pulses
 
     def _find_slice_boundaries(self, target, slices: List[Slice], direction) -> List[Boundary]:
         """ find all the boundaries in the given set of slices in the requested direction,
@@ -3497,80 +3540,36 @@ class Scan:
         """ determine the bits represented by each slice by an analysis of pulses,
             the relevant part of a slice extends from the inner edge to the outer edge,
             in between there can be zero, one or two pulses, zero pulses can only be 000,
-            two pulses can only 101, one pulse can be the other six possibilities,
+            two pulses can only be 101, one pulse can be the other six possibilities,
             returns the modified slices with the bits and pulses properties set,
             """
 
-        # for every slice determine the bits represented
+        # ToDo: every pulse has every possibility in least error order
+        #       use that to produce a list of bit possibilities in least error order
+
+        # for every slice determine the most likely bits represented
+        # this is just pulling out all the bit possibilities from the pulse types into the slice
         for slice in slices:
             pulses = self._measure_pulses(self._make_pulses(slice))
-            if pulses == 0:
-                slice.bits = [0, 0, 0]
-                slice.error = 0
-                continue
-            if pulses > 2:
-                # at least one of these is junk, drop the ones with the biggest error
-                if self.logging:
-                    self._log('slices: dropping excess pulses in slice {}'.format(slice))
-                    for pulse in slice.pulses:
-                        self._log('    {}'.format(pulse))
-                while pulses > 2:
-                    worst_error = 0
-                    worst_at = None
-                    for pulse in range(pulses):
-                        if slice.pulses[pulse].error > worst_error:
-                            worst_error = slice.pulses[pulse].error
-                            worst_at = pulse
-                    if self.logging:
-                        self._log('        dropping {}'.format(slice.pulses[worst_at]))
-                    del slice.pulses[worst_at]
-                    pulses -= 1
-            if pulses == 2:
-                # filter out junk, to be a true 2 pulse both must be 1:1:1
-                if slice.pulses[0].type == Scan.ONE_ONE_ONE and slice.pulses[1].type == Scan.ONE_ONE_ONE:
-                    # its a goody
-                    slice.bits = [1, 0, 1]
-                    slice.error = slice.pulses[0].error + slice.pulses[1].error
-                    continue
-                # one or both are not 1:1:1, drop the one with biggest error and proceed as 1 pulse
-                if self.logging:
-                    self._log('slices: dropping bad pulse in slice {}'.format(slice))
-                    for pulse in slice.pulses:
-                        self._log('    {}'.format(pulse))
-                if slice.pulses[0].error > slice.pulses[1].error:
-                    if self.logging:
-                        self._log('        dropping {}'.format(slice.pulses[0]))
-                    del slice.pulses[0]
-                else:
-                    if self.logging:
-                        self._log('        dropping {}'.format(slice.pulses[1]))
-                    del slice.pulses[1]
-                pulses -= 1
-            # pulses == 1
-            pulse = slice.pulses[0]
-            slice.error = pulse.error
-            if pulse.type == Scan.THREE_ONE_ONE:
-                slice.bits = [0, 0, 1]
-            elif pulse.type == Scan.TWO_ONE_TWO:
-                slice.bits = [0, 1, 0]
-            elif pulse.type == Scan.TWO_TWO_ONE:
-                slice.bits = [0, 1, 1]
-            elif pulse.type == Scan.ONE_ONE_THREE:
-                slice.bits = [1, 0, 0]
-            elif pulse.type == Scan.ONE_TWO_TWO:
-                slice.bits = [1, 1, 0]
-            elif pulse.type == Scan.ONE_THREE_ONE:
-                slice.bits = [1, 1, 1]
-            elif pulse.type == Scan.ONE_ONE_ONE:
-                # this is only legal when we've got two pulses, treat like 2:1:2 with an error to match
-                if self.logging:
-                    self._log('slices: bad single pulse in slice {}'.format(slice))
-                    self._log('    interpreting 1:1:1 as 2:1:2 {}'.format(pulse))
-                slice.bits = [0, 1, 0]
-                pulse.error = self._pulse_error(pulse, Scan.TWO_ONE_TWO_RATIOS)  # set new pulse error
-                slice.error = pulse.error                                        # put the new error in
-            else:
-                raise Exception('unknown pulse type: {}'.format(pulse.type))
+            slice.bits = []
+            for pulse in pulses:
+                for type in pulse.types:
+                    # NB: these are in least error order, so our bits will be too
+                    if len(slice.bits) == 0:
+                        slice.bits.append(type)
+                    elif type.bits == slice.bits[-1].bits:
+                        # this pulse agrees, update the error
+                        # this should only happen for two 1:1:1 pulses
+                        slice.bits[-1].error = max(slice.bits[-1].error, type.error)
+                    elif type.error < slice.bits[-1].error:
+                        # conflict with a better error, switch to this
+                        slice.bits[-1] = type
+                    elif type.error > slice.bits[-1].error:
+                        # conflict with a worse error, start a new bits sequence
+                        slice.bits.append(type)
+                    else:
+                        # conflict with same error, start a new bits sequence
+                        slice.bits.append(type)
 
         if self.logging:
             self._log('slices: ({})'.format(len(slices)))
@@ -3578,16 +3577,23 @@ class Scan:
                 self._log('    {}'.format(slice))
                 if len(slice.pulses) > 0:
                     for pulse in slice.pulses:
-                        self._log('        {}'.format(pulse))
+                        self._log('        pulses: {}'.format(len(pulse.types)))
+                        for type in pulse.types:
+                            self._log('            {}'.format(type))
+                    self._log('        bits: {}'.format(len(slice.bits)))
+                    for bits in slice.bits:
+                        self._log('            {}'.format(bits))
 
         return slices
 
-    def _filter_slices(self, target, slices):
+    def _filter_slices(self, target, slices: List[Slice]) -> List[Slice]:
         """ given a set of slices filter out single sample sequences,
             this is removing 'noise' before we start accumulating similar bits,
-            the updates slices list is returned,
+            the updated slices list is returned,
             the target and direction parameters are purely for diagnostic image drawing,
             """
+
+        # ToDo: re-jig for multiple bits choices
 
         if self.logging:
             header = 'slices: killing single sample slices'
@@ -3596,7 +3602,7 @@ class Scan:
             pred = slices[(slice - 1) % len(slices)]
             succ = slices[(slice + 1) % len(slices)]
             me = slices[slice % len(slices)]
-            if me.bits != pred.bits and me.bits != succ.bits:
+            if me.bits[0].bits != pred.bits[0].bits and me.bits[0].bits != succ.bits[0].bits:
                 # got a single sample, kill it
                 me.dead = Scan.SINGLE_SAMPLE
                 if self.logging:
@@ -3611,7 +3617,7 @@ class Scan:
 
         return slices
 
-    def _make_bits_from_slices(self, slices) -> List[SliceBits]:
+    def _make_bits_from_slices(self, slices: List[Slice]) -> List[SliceBits]:
         """ make the bit sequence across all slices
             from a consideration of the bits in each slice generate the bit sequence across the target,
             from the construction of the target we know there is a bit transition for every bit, thus
@@ -3619,6 +3625,8 @@ class Scan:
             list with the length of each sequence,
             returns the list of bits
             """
+
+        # ToDo: re-jig for multiple bits per slice
 
         Scan.SliceBits.reset()                     # reset bit counter
 
@@ -3631,15 +3639,15 @@ class Scan:
             where = slice.points[0].where[0]
             if len(bits) == 0:
                 # this is the first one
-                bits.append(Scan.SliceBits(slice.bits, 1, slice.error, where))  # init a new bit sequence
-            elif bits[-1].bits == slice.bits:
+                bits.append(Scan.SliceBits(slice.bits[0].bits, 1, slice.bits[0].error, where))
+            elif bits[-1].bits == slice.bits[0].bits:
                 # got another one the same
                 bits[-1].length += 1                 # up the sequence length of this one
-                bits[-1].error += slice.error
+                bits[-1].error += slice.bits[0].error
             else:
                 # got a new one, finish the previous and start a new
                 bits[-1].error /= bits[-1].length
-                bits.append(Scan.SliceBits(slice.bits, 1, slice.error, where))  # init a new bit sequence
+                bits.append(Scan.SliceBits(slice.bits[0].bits, 1, slice.bits[0].error, where))
         # set error of the last one
         bits[-1].error /= bits[-1].length
 
@@ -3657,7 +3665,7 @@ class Scan:
 
         return bits
 
-    def _filter_slice_bits(self, target, bits: List[SliceBits]):
+    def _filter_slice_bits(self, target, bits: List[SliceBits]) -> List[SliceBits]:
         """ given the vector of bits decoded from the slices, filter out the junk and split merges,
             in an ideal target the length of the bits array given here will be the same as the number of
             bits in the code, but noise and distortion can lead to less or more, where two 'corners' meet
@@ -3874,22 +3882,22 @@ class Scan:
         compressed = self._compress(target, inner_edge, outer_edge)
         slices = self._make_slices(compressed, Scan.TOP_DOWN)
         # ToDo: HACK START
-        strips = self._make_slices(compressed, Scan.LEFT_TO_RIGHT)
-        patches = self._make_patches(compressed, strips, slices)
-        bit_boundaries = self._find_slice_boundaries(patches, strips, direction=Scan.LEFT_TO_RIGHT)
-        ring_boundaries = self._find_slice_boundaries(patches, slices, direction=Scan.TOP_DOWN)
-        grid = self._draw_boundaries(patches, bit_boundaries, ring_boundaries)
-        self._unload(grid, '08-edges-2')
-        grid = self._draw_slices(compressed, strips)
-        self._unload(grid, '08-strips')
-        grid = self._draw_slices(patches, strips)
-        self._unload(grid, '08-strips-2')
-        bits = self._make_bits_from_boundaries(patches, bit_boundaries, ring_boundaries)
-        grid = self._draw_bits(patches, bits)
-        self._unload(grid, '09-bits-2')
-        code = self._decode_bits(bits)
-        number, doubt, digits = self.decoder.unbuild(code)
-        self._log('number={}, doubt={}, digits={}'.format(number, doubt, digits), console=True)
+        # strips = self._make_slices(compressed, Scan.LEFT_TO_RIGHT)
+        # patches = self._make_patches(compressed, strips, slices)
+        # bit_boundaries = self._find_slice_boundaries(patches, strips, direction=Scan.LEFT_TO_RIGHT)
+        # ring_boundaries = self._find_slice_boundaries(patches, slices, direction=Scan.TOP_DOWN)
+        # grid = self._draw_boundaries(patches, bit_boundaries, ring_boundaries)
+        # self._unload(grid, '08-edges-2')
+        # grid = self._draw_slices(compressed, strips)
+        # self._unload(grid, '08-strips')
+        # grid = self._draw_slices(patches, strips)
+        # self._unload(grid, '08-strips-2')
+        # bits = self._make_bits_from_boundaries(patches, bit_boundaries, ring_boundaries)
+        # grid = self._draw_bits(patches, bits)
+        # self._unload(grid, '09-bits-2')
+        # code = self._decode_bits(bits)
+        # number, doubt, digits = self.decoder.unbuild(code)
+        # self._log('number={}, doubt={}, digits={}'.format(number, doubt, digits), console=True)
         # ToDo: HACK END
         slices = self._decode_slices(slices)
         slices = self._filter_slices(compressed, slices)
@@ -3925,7 +3933,7 @@ class Scan:
 
             # do the inner/outer edge detection
             measured = self._measure(projected, orig_radius)
-            flattened = self._flatten(measured)
+            flattened = measured  # ToDo: HACK-->self._flatten(measured)
             reason = flattened.reason
             if reason is not None:
                 # failed - this means some constraint was not met (its already been logged)
@@ -4893,7 +4901,7 @@ def verify():
     # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
     # test.scan(test_media_folder, [101], 'photo-101.jpg')
-    test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
+    # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v4.jpg')
 
     del (test)  # needed to close the log file(s)
 
