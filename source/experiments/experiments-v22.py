@@ -96,47 +96,17 @@ def count_bits(mask):
 
 
 class Codec:
-    """ Encode and decode a code-word or a code-block,
-        a code-word is a number with specific properties,
-        a code-block is three copies of a code-word, with each copy rotated by N bits,
-        split into 4 sequences and encoded such that it can be decoded even if the block
-        has been rotated by any number of bits, also the bits at position N across the
-        four words are constrained such that they have two and only two bits transitions
-        when prefixed by 10 and suffixed by 0 (one 0->1 transition and one 1->0 transition),
+    """ Encode and decode a number or a bit or a blob
+        a number is a payload, it can be encoded and decoded
+        a bit is a raw bit decoded from 3 blobs
+        a blob is decoded from 3 luminance level samples
         this class encapsulates all the encoding and decoding and their constants
         """
 
-    BITS = 15  # number bits in a code-word
-    COPIES = 3  # number of code-word copies in a code-block
-    WORDS = 4  # number of words in a code-block
-    # a 'slice' is a set of bits at position N across the code-block,
-    # only slices that meet the transition constraints are allowed, these
-    # constraints are arranged such that when viewed as a single 'pulse'
-    # (i.e. 0=low, 1=high) a 3-bit sequence can be decoded purely by looking
-    # at the length ratio between the leading low and trailing high (when a
-    # prefix of 10 and a suffix of 0 is applied)
-    # data-slices are the un-encoded slices from the 3 skewed code-words
-    # code-slices are the corresponding encoded 4-bit slices for drawing/detecting
-    DATA_SLICES = ([0, 0, 0],     # ratio 4:1
-                   [1, 0, 0],     # ratio 3:1
-                   [0, 1, 0],     # ratio 2:1
-                   [1, 1, 0],     # ratio 1:1
-                   [0, 0, 1],     # ratio 2/3:1
-                   [1, 0, 1],     # ratio 1/2:1
-                   [0, 1, 1],     # ratio 1/3:1
-                   [1, 1, 1])     # ratio 3/2:1
-    #               R1,R2,R3,R4 (R1 is lsb)
-    CODE_SLICES = ([0, 0, 0, 1],  # ratio 4:1    rings WWB:BBBW:B
-                   [0, 0, 1, 0],  # ratio 3:1    rings WWB:BBWB:B
-                   [0, 1, 0, 0],  # ratio 2:1    rings WWB:BWBB:B
-                   [0, 1, 1, 0],  # ratio 1:1    rings WWB:WBBB:B
-                   [0, 1, 1, 1],  # ratio 2/3:1  rings WWB:BWWW:B
-                   [1, 1, 0, 0],  # ratio 1/2:1  rings WWB:BWWB:B
-                   [1, 1, 1, 0],  # ratio 1/3:1  rings WWB:WWWB:B
-                   [0, 0, 1, 1])  # ratio 3/2:1  rings WWB:BBWW:B
-    SYNC_SLICE   = (1, 1, 1, 1)   # ratio 1/4:1  rings WWB:WWWW:B  # ToDo: Use this instead of the marker bits
+    BITS = 15  # total bits in the code
     MARKER_BITS = 4  # number of bits in our alignment marker
     MARKER_PATTERN = 0b_0110  # the bit 0 sync pattern
+    MIN_ACROSS_RING_EDGES = 5  # min bit transitions across the rings
 
     # ring XOR masks (-1 just inverts the whole ring)
     INNER_MASK = 0
@@ -163,7 +133,7 @@ class Codec:
             """
 
         # setup, and verify, code characteristics
-        self.skew = int(Codec.BITS / Codec.COPIES)  # ring to ring skew in bits
+        self.skew = int(Codec.BITS / 3)  # ring to ring skew in bits
         self.code_bits = Codec.BITS - Codec.MARKER_BITS  # code word bits is what's left
         if self.code_bits < 1:
             raise Exception('BITS must be greater than {}, {} is not'.format(Codec.MARKER_BITS, Codec.BITS))
@@ -203,7 +173,7 @@ class Codec:
                     check >>= 1  # NB: introduces a leading 0 (required, see above)
                 if check is not None:
                     # got a potential code, check if it meets our edges requirement
-                    edges = self._allowable(code)
+                    edges = self.allowable(code)
                     if edges > 0:
                         # got enough edges, give it to next number
                         num += 1
@@ -236,83 +206,21 @@ class Codec:
         return self.codes[code]
 
     def build(self, num):
-        """ build the codes needed for the data rings
-            returns the N integers required to build a 'target'
+        """ build the codes needed for the 3 rings
+            returns the three integers required to build a 'target'
             """
         if num is None:
             return None
         code_word = self.encode(num)
         if code_word is None:
             return None
-        return self._rings(code_word)
+        return self.rings(code_word)
 
-    def unbuild(self, slices):
-        """ given an array of N code-word rings with random alignment return the encoded number or None,
-            each ring must be given as an array of bit values in bit number order,
-            returns the number (or None), the level of doubt and the bit classification for each bit,
-            """
-
-        # step 1 - decode slice bits
-        samples = [[0 for _ in range(Codec.BITS)] for _ in range(Codec.COPIES)]
-        for n in range(Codec.BITS):
-            code_slice = [0 for _ in range(Codec.WORDS)]
-            for slice in range(Codec.WORDS):
-                code_slice[slice] = slices[slice][n]
-            for idx, seq in enumerate(Codec.CODE_SLICES):
-                if seq == code_slice:
-                    for word in range(Codec.COPIES):
-                        samples[word][n] = Codec.DATA_SLICES[idx][word]
-
-        # step 2 - decode the rings bits
-        bits = [None for _ in range(Codec.BITS)]
-        for n in range(Codec.BITS):
-            rings = self._ring_bits_pos(n)
-            bit_mask = 1 << (Codec.BITS - (n + 1))
-            s1_mask = (self.inner_mask & bit_mask)
-            s2_mask = (self.middle_mask & bit_mask)
-            s3_mask = (self.outer_mask & bit_mask)
-            s1 = samples[0][rings[0]]
-            s2 = samples[1][rings[1]]
-            s3 = samples[2][rings[2]]
-            bits[n] = self._bit(s1, s1_mask, s2, s2_mask, s3, s3_mask)
-
-        # step 3 - find the alignment marker candidates
-        maybe_at = [[] for _ in range(4*5)]  # 0..max maybe possibilities, worst case is 4 missing (at 5 each)
-        for n in range(Codec.BITS):
-            marker = self._is_marker(n, bits)
-            if marker is None:
-                continue  # no marker at this bit position, look at next
-            # got a potential marker with marker maybe values, 0 == exact, 4 == all maybe
-            maybe_at[marker].append(n)
-        # maybe_at now contains a list of all possibilities for all maybe options
-        # the array is organised such that the best choice is first
-
-        # step 4 - extract all potential code words for each candidate alignment for each maybe level
-        # any that yield more than one are crap and a give-up condition
-        found = None
-        for maybe in maybe_at:           # NB: must consider in array index order (best choice first)
-            for n in maybe:
-                # n is the next one we are going to try, demote all others
-                word = [bit for bit in bits]  # make a copy
-                code = self._extract_word(n, word)
-                if code is not None:
-                    if found is not None:
-                        # got more than 1 - that's crap
-                        return None, self._count_errors(bits), self._show_bits(bits)
-                    found = code  # note the first one we find
-            if found is not None:
-                # only got 1 from this maybe level, go with it
-                return found, self._count_errors(bits), self._show_bits(bits)
-
-        # no candidates qualify
-        return None, self._count_errors(bits), self._show_bits(bits)
-
-    def _rings(self, code_word):
+    def rings(self, code_word):
         """ build the data ring codes for the given code word,
-            there are two stages: first the code-word is replicated 3 times with each copy skewed
-            and XOR'd as required, then each 3 bit 'slice' through those copies are encoded into
-            4 bits such that they represent a single 'pulse' (0->1 then 1->0 transition) when viewed
-            along a radii, the result is 4 integers that can be used to draw the target
+            it returns 3 integers, the LS n bits are the code word and alignment marker, each word
+            is rotated clockwise by n bits to give the required skew, each ring is XOR'd with a mask
+            specific to that ring (see discussion above)
             """
         # the bit shift is relative to the MSB, this matters when 3 * shift is not the code size
         # for each shift the LS n bits must be moved to the MS n bits
@@ -327,35 +235,20 @@ class Codec:
         r2 = (r2 >> self.skew) + ((r2 & mask) << shift)
         r3 = (r3 >> self.skew) + ((r3 & mask) << shift)  # one shift block
         r3 = (r3 >> self.skew) + ((r3 & mask) << shift)  # ..and again to do it twice
-        # encode the 3-bit slices into 4-bit slices containing our encoding (see SLICES).
-        data = (r1, r2, r3)
-        code = [0 for _ in range(len(Codec.CODE_SLICES[0]))]
-        msb = 1 << (Codec.BITS - 1)  # 1 in the MSB of a code word
-        mask = msb
-        while mask != 0:
-            data_slice = [0 if data[ring] & mask == 0 else 1 for ring in range(len(data))]
-            for idx, seq in enumerate(Codec.DATA_SLICES):
-                if seq == data_slice:
-                    code_slice = Codec.CODE_SLICES[idx]
-                    for bit in range(len(Codec.CODE_SLICES[0])):
-                        if code_slice[bit] == 1:
-                            code[bit] |= mask
-                    break
-            mask >>= 1
         # return result
-        return code
+        return r1, r2, r3
 
-    def _allowable(self, code_word):
+    def allowable(self, code_word):
         """ given a code word return True if its allowable as a code word,
-            codes are not allowed if they do not meet our bit transition requirements around the rings,
-            the requirement is that at least one bit transition must exist for every bit within the rings,
-            this ensures all bit transitions can be detected,
+            codes are not allowed if they do not meet our bit transition requirements around or across the rings,
+            the requirement is that at least one bit transition must exist for every bit within the rings and
+            at least 5 bit transition across the rings, this ensures all bit transitions can be detected,
             returns 0 if the code word is not allowed or the number of bit transitions if it is
             """
 
         msb = 1 << (Codec.BITS - 1)  # 1 in the MSB of a code word
         all_ones = (1 << Codec.BITS) - 1  # all 1's in the relevant bits
-        rings = self._rings(code_word)
+        rings = self.rings(code_word)
         # check meets edges requirements around the rings (across all rings must be an edge for each bit)
         all_edges = 0
         for ring in rings:
@@ -381,18 +274,98 @@ class Codec:
             # does not meet edges requirement around the rings
             return 0
 
+        # check meets edge requirements across the rings
+        if count_bits(rings[0] ^ rings[1]) < Codec.MIN_ACROSS_RING_EDGES:
+            # does not meet edges requirement across the rings
+            return 0
+        if count_bits(rings[1] ^ rings[2]) < Codec.MIN_ACROSS_RING_EDGES:
+            # does not meet edges requirement across the rings
+            return 0
+
+        # ToDo: HACK START
+        # # check only allowed codes across the rings
+        # valid = ((0, 0, 1),
+        #          (0, 1, 0),
+        #          (0, 1, 1),
+        #          (1, 0, 0),
+        #          (1, 1, 0),
+        #          (1, 1, 1))
+        # mask1 = msb
+        # while mask1 != 0:
+        #     seq = (0 if rings[0] & mask1 == 0 else 1,
+        #            0 if rings[1] & mask1 == 0 else 1,
+        #            0 if rings[2] & mask1 == 0 else 1)
+        #     if seq in valid:
+        #         # OK so far
+        #         mask1 >>= 1
+        #         continue
+        #     else:
+        #         # not allowed
+        #         return 0
+        # ToDo: HACK END
+
         return max(ring_edges, 1)
 
-    def _ring_bits_pos(self, n):
+    def ring_bits_pos(self, n):
         """ given a bit index return a list of the indices of all the same bits from each ring """
         n1 = n
         n2 = int((n1 + self.skew) % Codec.BITS)
         n3 = int((n2 + self.skew) % Codec.BITS)
         return [n1, n2, n3]
 
-    def _marker_bits_pos(self, n):
+    def marker_bits_pos(self, n):
         """ given a bit index return a list of the indices of all the bits that would make a marker """
         return [int(pos % Codec.BITS) for pos in range(n, n + Codec.MARKER_BITS)]
+
+    def unbuild(self, samples):
+        """ given an array of 3 code-word rings with random alignment return the encoded number or None,
+            each ring must be given as an array of bit values in bit number order,
+            returns the number (or None), the level of doubt and the bit classification for each bit,
+            """
+
+        # step 1 - decode the 3 rings bits
+        bits = [None for _ in range(Codec.BITS)]
+        for n in range(Codec.BITS):
+            rings = self.ring_bits_pos(n)
+            bit_mask = 1 << (Codec.BITS - (n + 1))
+            s1_mask = (self.inner_mask & bit_mask)
+            s2_mask = (self.middle_mask & bit_mask)
+            s3_mask = (self.outer_mask & bit_mask)
+            s1 = samples[0][rings[0]]
+            s2 = samples[1][rings[1]]
+            s3 = samples[2][rings[2]]
+            bits[n] = self.bit(s1, s1_mask, s2, s2_mask, s3, s3_mask)
+
+        # step 2 - find the alignment marker candidates
+        maybe_at = [[] for _ in range(4*5)]  # 0..max maybe possibilities, worst case is 4 missing (at 5 each)
+        for n in range(Codec.BITS):
+            marker = self.is_marker(n, bits)
+            if marker is None:
+                continue  # no marker at this bit position, look at next
+            # got a potential marker with marker maybe values, 0 == exact, 4 == all maybe
+            maybe_at[marker].append(n)
+        # maybe_at now contains a list of all possibilities for all maybe options
+        # the array is organised such that the best choice is first
+
+        # step 3 - extract all potential code words for each candidate alignment for each maybe level
+        # any that yield more than one are crap and a give-up condition
+        found = None
+        for maybe in maybe_at:           # NB: must consider in array index order (best choice first)
+            for n in maybe:
+                # n is the next one we are going to try, demote all others
+                word = [bit for bit in bits]  # make a copy
+                code = self.extract_word(n, word)
+                if code is not None:
+                    if found is not None:
+                        # got more than 1 - that's crap
+                        return None, self._count_errors(bits), self._show_bits(bits)
+                    found = code  # note the first one we find
+            if found is not None:
+                # only got 1 from this maybe level, go with it
+                return found, self._count_errors(bits), self._show_bits(bits)
+
+        # no candidates qualify
+        return None, self._count_errors(bits), self._show_bits(bits)
 
     def _count_errors(self, bits):
         """ given a set of categorised bits, count how many digits have errors,
@@ -424,14 +397,14 @@ class Codec:
             csv += ',' + symbols[bit]
         return csv[1:]
 
-    def _is_marker(self, n, bits):
+    def is_marker(self, n, bits):
         """ given a set of bits and a bit position check if an alignment marker is present there
             the function returns a doubt level (0==exact match, >0 increasing levels of doubt, None=no match)
             """
         exact = 0
         likely = 0
         missing = 0
-        i = self._marker_bits_pos(n)
+        i = self.marker_bits_pos(n)
         b1 = bits[i[0]]
         b2 = bits[i[1]]
         b3 = bits[i[2]]
@@ -466,18 +439,18 @@ class Codec:
         # NB: if exact is 4 then likely and missing are both 0
         return likely + (5 * missing)    # 1 missing is worse than 4 likely
 
-    def _data_bits(self, n, bits):
+    def data_bits(self, n, bits):
         """ return an array of the data-bits from bits array starting at bit position n,
             this is effectively rotating the bits array and removing the marker bits such
             that the result is an array with [0] the first data bit and [n] the last
             """
         return [bits[int(pos % Codec.BITS)] for pos in range(n + Codec.MARKER_BITS, n + Codec.BITS)]
 
-    def _extract_word(self, n, bits):
+    def extract_word(self, n, bits):
         """ given an array of bit values with the alignment marker at position n
             extract the code word and decode it (via decode()), returns None if cannot
             """
-        word = self._data_bits(n, bits)
+        word = self.data_bits(n, bits)
         code = 0
         for bit in range(len(word)):
             code <<= 1  # make room for next bit
@@ -490,7 +463,7 @@ class Codec:
                 return None  # got junk
         return self.decode(code)
 
-    def _classify(self, sample, invert):
+    def classify(self, sample, invert):
         """ given a bit value and its inversion mask determine its classification,
             the returned bit classification is one of IS_ZERO, IS_ONE, MAYBE_EITHER or UNKNOWN
             """
@@ -513,7 +486,7 @@ class Codec:
         # anything else is junk (means caller gave us samples that were not 0 or 1 or None)
         return self.UNKNOWN
 
-    def _bit(self, s1, m1, s2, m2, s3, m3):
+    def bit(self, s1, m1, s2, m2, s3, m3):
         """ given 3 bit values and their inversion masks determine the most likely overall bit value,
             bit values must be 'black' or 'white',
             the return bit is one of 'is' or 'likely' one or zero or neither
@@ -523,9 +496,9 @@ class Codec:
         ones = 0
         either = 0
 
-        c1 = self._classify(s1, m1)
-        c2 = self._classify(s2, m2)
-        c3 = self._classify(s3, m3)
+        c1 = self.classify(s1, m1)
+        c2 = self.classify(s2, m2)
+        c3 = self.classify(s3, m3)
 
         if c1 == Codec.IS_ZERO:
             zeroes += 1
@@ -784,7 +757,7 @@ class Ring:
         see description above for the overall target structure
         """
 
-    NUM_RINGS = Codec.WORDS + 4  # total rings in our complete code
+    NUM_RINGS = 8  # total rings in our complete code
 
     def __init__(self, centre_x, centre_y, width, frame, contrast, offset):
         # set constant parameters
@@ -836,7 +809,7 @@ class Ring:
             colour = MID_LUMINANCE
         self._pixel(x, y, colour)
 
-    def _border(self, ring_num):
+    def border(self, ring_num):
         """ draw a thin black/white broken border at the given ring_num,
             it must be broken to stop it being detected as an outer radius edge,
             this is only intended as a visual marker to stop people cutting into important parts of the code
@@ -881,7 +854,7 @@ class Ring:
                 else:
                     self._point(x, y, 0)
 
-    def _draw_ring(self, ring_num, data_bits, ring_width):
+    def draw(self, ring_num, data_bits, ring_width):
         """ draw a data ring with the given data_bits and width,
             """
         start_ring = int(ring_num * self.w)
@@ -889,7 +862,7 @@ class Ring:
         for radius in range(start_ring, end_ring):
             self._draw(radius, data_bits)
 
-    def _label(self, number):
+    def label(self, number):
         """ draw a 3 digit number at the top left edge of the rings in a size compatible with the ring width
             we do it DIY using a 4 x 5 grid
             """
@@ -990,30 +963,34 @@ class Ring:
             only one that knows the overall target ring structure
             """
 
-        # draw the bullseye and the inner white/black rings
-        self._draw_ring(0.0, -1, 2.0)
-        self._draw_ring(2.0, 0, 1.0)
+        # draw the bullseye and its enclosing ring
+        self.draw(0.0, -1, 2.0)
+        self.draw(2.0, 0, 1.0)
         draw_at = 3.0
 
         # draw the data rings
         for ring in rings:
-            self._draw_ring(draw_at, ring, 1.0)
+            self.draw(draw_at, ring, 1.0)
             draw_at += 1.0
 
-        # draw the outer black ring
-        self._draw_ring(draw_at, 0, 1.0)
-        draw_at += 1.0
+        # draw the outer black/white rings
+        self.draw(draw_at, 0, 1.0)
+        self.draw(draw_at + 1.0, -1, 1.0)
+        draw_at += 2.0
 
         if int(draw_at) != draw_at:
             raise Exception('number of target rings is not integral ({})'.format(draw_at))
         draw_at = int(draw_at)
 
-        # safety check
+        # draw a border
+        self.border(draw_at)
+
+        # safety check in case I forgot to update the constant
         if draw_at != Ring.NUM_RINGS:
             raise Exception('number of rings exported ({}) is not {}'.format(Ring.NUM_RINGS, draw_at))
 
         # draw a human readable label
-        self._label(number)
+        self.label(number)
 
 
 class Frame:
@@ -4563,25 +4540,19 @@ class Test:
         self._log('')
         self._log('******************')
         self._log('Check code-words (visual)')
-        frm_bin = '{:0' + str(self.bits) + 'b}'
-        frm_prefix = '{}(' + frm_bin + ')=('
-        suffix = ')'
+        bin = '{:0' + str(self.bits) + 'b}'
+        frm_ok = '{}(' + bin + ')=(' + bin + ', ' + bin + ', ' + bin + ')'
+        frm_bad = '{}(' + bin + ')=(None)'
         try:
             for n in numbers:
                 if n is None:
                     # this means a test code pattern is not available
                     continue
-                prefix = frm_prefix.format(n, n)
                 rings = self.codec.build(n)
                 if rings is None:
-                    infix = 'None'
+                    self._log(frm_bad.format(n, n))
                 else:
-                    infix = ''
-                    for ring in rings:
-                        bits = frm_bin.format(ring)
-                        infix = '{}, {}'.format(infix, bits)
-                    infix = infix[2:]  # remove leading comma space
-                self._log('{}{}{}'.format(prefix, infix, suffix))
+                    self._log(frm_ok.format(n, n, rings[0], rings[1], rings[2]))
         except:
             traceback.print_exc()
         self._log('******************')
@@ -4661,17 +4632,7 @@ class Test:
             self.frame.new(image_width, image_width, MID_LUMINANCE)
             x, y = self.frame.size()
             ring = Ring(x >> 1, y >> 1, width, self.frame, self.contrast, self.offset)
-            bits = 0x5555  # alternating 0's and 1'
-            block = []
-            for word in range(Codec.WORDS):
-                if (word & 1) == 0:
-                    # even ring
-                    bits <<= 1
-                else:
-                    # odd ring
-                    bits >>= 1
-                block.append(bits)
-            ring.code(000, block)
+            ring.code(000, (0x5555, 0xAAAA, 0x5555))
             self.frame.unload('test-code-000')
         except:
             traceback.print_exc()
@@ -4927,12 +4888,12 @@ def verify():
     # build a test code set
     test_num_set = test.test_set(10, [161, 191])
 
-    test.coding()
-    test.decoding()
-    test.circles()
-    test.code_words(test_num_set)
-    test.codes(test_codes_folder, test_num_set, test_ring_width)
-    test.rings(test_codes_folder, test_ring_width)
+    # test.coding()
+    # test.decoding()
+    # test.circles()
+    # test.code_words(test_num_set)
+    # test.codes(test_codes_folder, test_num_set, test_ring_width)
+    # test.rings(test_codes_folder, test_ring_width)
 
     # test.scan_codes(test_codes_folder)
     # test.scan_media(test_media_folder)
