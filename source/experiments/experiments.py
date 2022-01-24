@@ -1602,6 +1602,19 @@ class Scan:
                 ideal = ', ideal:{}'.format(vstr(self.ideal))
             return '({}, {}{}{})'.format(self.bits, self.error, actual, ideal)
 
+    class Run:
+        """ a Run is a sequence of the same bits from a start position """
+
+        def __init__(self, x, bits, samples, error):
+            self.start = x
+            self.bits = bits
+            self.samples = samples
+            self.error = error
+
+        def __str__(self):
+            return '(start={}, bits={}, samples={}, error={:.2f})'. \
+                format(self.start, self.bits, self.samples, self.error)
+
     class Segment:
         """ a Segment describes a contiguous, in angle, sequence of Pulses """
 
@@ -2674,17 +2687,29 @@ class Scan:
                                       format(x, pulse, inner[x], new_lead))
                         pulse.lead = new_lead
                         pulse.start = inner[x]
-                elif idx ==0 and pulse.start > (inner[x] + 1):
+                elif idx == 0 and pulse.start > inner[x]:
                     # first half-pulse starts late
-                    # this probably means the pulse has merged into the inner white,
-                    # we assume this happens when the black ring is very small,
-                    # so insert a pulse before with a lead length of 1 and a head length of the overshoot
-                    good_pulses.append(Scan.Pulse(inner[x], 1, pulse.start - inner[x] - 1))
-                    if self.logging:
-                        if header is not None:
-                            self._log(header)
-                            header = None
-                        self._log('    {}: {} starts late, inserting {}'.format(x, pulse, good_pulses[-1]))
+                    # this is either just 'jitter' or the pulse has merged into the inner white,
+                    if pulse.start > inner[x] + 1:
+                        # we've got room to insert another pulse, so assume we've merged with the inner white
+                        # we assume this happens when the black ring is very small,
+                        # so insert a pulse before with a lead length of 1 and a head length of the overshoot
+                        good_pulses.append(Scan.Pulse(inner[x], 1, pulse.start - inner[x] - 1))
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}: {} starts late, inserting {}'.format(x, pulse, good_pulses[-1]))
+                    else:
+                        # its just jitter, move start to inner and increase lead
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}: {} starts late, moving to inner {} with lead {}'.
+                                      format(x, pulse, inner[x], pulse.lead + 1))
+                        pulse.start = inner[x]
+                        pulse.lead += 1
                 head_start = pulse.start + pulse.lead
                 if head_start == outer[x]:
                     # this is really the final pulse, so add that as a final pulse and then stop
@@ -2919,8 +2944,14 @@ class Scan:
             pulses[x] = full_pulse
 
         if self.logging:
-            self._log('pulses: {} qualifying full pulses:'.format(len(pulses)))
+            qualifiers = 0
+            for pulse in pulses:
+                if pulse is not None:
+                    qualifiers += 1
+            self._log('pulses: {} qualifying full pulses:'.format(qualifiers))
             for x, pulse in enumerate(pulses):
+                if pulse is None:
+                    continue
                 self._log('    {}: {}'.format(x, pulse))
 
         return pulses
@@ -2991,7 +3022,7 @@ class Scan:
             self._log('extract: bits and their errors:')
             for x, pulse in enumerate(pulses):
                 if pulse is None:
-                    self._log('    {}: None'.format(x))
+                    continue
                 elif len(pulse.bits) <= 1:
                     self._log('    {}: {}'.format(x, pulse.bits[0]))
                 else:
@@ -3069,15 +3100,20 @@ class Scan:
                 # nothing here
                 continue
 
-        self._log('resolve: {} resolutions, chosen:'.format(resolutions))
-        for x, choice in enumerate(chosen):
-            if choice is None:
-                self._log('    {}: None'.format(x))
-            else:
-                msg = ''
-                for bits in choice:
-                    msg = '{}, ({}, {})'.format(msg, bits.bits, bits.error)
-                self._log('    {}: {}'.format(x, msg[2:]))
+        if self.logging:
+            qualifiers = 0
+            for choice in chosen:
+                if choice is not None:
+                    qualifiers += 1
+            self._log('resolve: {} resolutions, chosen {}:'.format(resolutions, qualifiers))
+            for x, choice in enumerate(chosen):
+                if choice is None:
+                    continue
+                else:
+                    msg = ''
+                    for bits in choice:
+                        msg = '{}, ({}, {})'.format(msg, bits.bits, bits.error)
+                    self._log('    {}: {}'.format(x, msg[2:]))
 
         return chosen
 
@@ -3087,20 +3123,97 @@ class Scan:
         # ToDo: use chosen to create choices,
         #       for each x construct the longest run, picking like choices
         #       now got lots of overlapping possibilities
+        #       drop 'short' ones spanned by something else
+        #       drop 'long' ones spanned by smaller ones
+        #       what's left?
 
         # ToDo: HACK START
+        def get_run(x, bits: Scan.Bits) -> List[Scan.Run]:
+            """ build the longest run consisting of bits from x in chosen """
+            run = Scan.Run(x, bits.bits, 1, 1/bits.error)
+            for _ in range(max_x - 1):
+                x = (x + 1) % max_x
+                bits_list = chosen[x]
+                if bits_list is None:
+                    break
+                extended = False
+                for bits in bits_list:
+                    if bits.bits == run.bits:
+                        run.samples += 1
+                        run.error += 1/bits.error
+                        extended = True
+                        break
+                if not extended:
+                    break
+            run.error = run.samples / run.error
+            return run
+
+        # build full list
+        covered = [[] for _ in range(max_x)]
+        runs = [[] for _ in range(max_x)]
+        for x, bits_list in enumerate(chosen):
+            if bits_list is None:
+                continue
+            for bits in bits_list:
+                if bits.bits in covered[x]:
+                    # already covered this bit pattern at this location, don't cover it again
+                    continue
+                run = get_run(x, bits)
+                # note we've covered this range with these bits now
+                for run_x in range(run.samples):
+                    dx = (x + run_x) % max_x
+                    if bits.bits in covered[dx]:
+                        # this means we've wrapped with this run,
+                        # there will be run in runs[0] with these bits that needs removing
+                        for xx, dup in enumerate(runs[0]):
+                            if dup.bits == bits.bits:
+                                del runs[0][xx]
+                                break
+                    covered[dx].append(bits.bits)
+                runs[x].append(run)
+
+        # remove runs that are too short
+        if self.logging:
+            header = 'segments: dropping short runs'
+        for run in runs:
+            if run is None:
+                continue
+            for bits in range(len(run)-1, -1, -1):
+                if run[bits].samples < Scan.MIN_SEGMENT_LENGTH:
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    {}'.format(run[bits]))
+                    del run[bits]
+
+        # remove nulls
+        for x in range(len(runs)-1, -1, -1):
+            run = runs[x]
+            if run is None or len(run) == 0:
+                del runs[x]
+
+        if self.logging:
+            self._log('segments: {} runs:'.format(len(runs)))
+            for run in runs:
+                msg = ''
+                for bits in run:
+                    msg = '{}, {}'.format(msg, bits)
+                self._log('    {}'.format(msg[2:]))
+
+        # ToDo: build every segment list possibility by forking on every choice
 
         # ToDo: HACK END
 
         # amalgamate like bits (chosen is now a list of bits not pulses)
         segments = []
-        for x, pulse in enumerate(chosen):
-            if pulse is None:
+        for x, bits_list in enumerate(chosen):
+            if bits_list is None:
                 pulse_bits = None
                 pulse_error = 1  # error irrelevant when no bits but must not be 0
             else:
-                pulse_bits = pulse[0].bits
-                pulse_error = pulse[0].error
+                pulse_bits = bits_list[0].bits
+                pulse_error = bits_list[0].error
             if len(segments) == 0:
                 # first one, start a sequence
                 segments.append(Scan.Segment(x, pulse_bits, error=(1/pulse_error)))
