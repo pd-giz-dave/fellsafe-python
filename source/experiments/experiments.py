@@ -2411,8 +2411,6 @@ class Scan:
                 # being told not to do it
                 return full_edge, edge
 
-            # return full_edge, edge  # ToDo: HACK
-
             trimmed_full_edge = full_edge.copy()
             trimmed_edge = Scan.Edge(edge.where, edge.type, edge.samples.copy())
             for x, samples in enumerate(overlaps):
@@ -3888,21 +3886,6 @@ class Scan:
             # everything is None if get here
             return None
 
-        def donate(segment, samples, offset):
-            """ donate given samples to given segment and move start back by offset """
-            nonlocal header
-            if samples == 0:
-                return
-            segment.samples += samples
-            segment.start = (segment.start - offset) % max_x
-            # ToDo: use segment.extend
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    donated {} samples and moved start back by {} in {}'.
-                          format(samples, offset, segment))
-
         if self.logging:
             header = 'separate: removing overlaps:'
         for x, segment in enumerate(segments):
@@ -3929,42 +3912,6 @@ class Scan:
                 if self.logging:
                     self._log('        dropping {}'.format(segment))
                 segments[x] = None
-
-        # # remove short segments abutting 000's
-        # if self.logging:
-        #     header = 'separate: removing 000 incursions:'
-        # for x, segment in enumerate(segments):
-        #     if segment is None:
-        #         continue
-        #     if segment.size() < Scan.MIN_SEGMENT_LENGTH:
-        #         left_x = neighbour(x, -1)
-        #         if left_x is None:
-        #             continue
-        #         right_x = neighbour(x, +1)
-        #         if right_x is None:
-        #             continue
-        #         left = segments[left_x]
-        #         right = segments[right_x]
-        #         if left.bits != Scan.DIGITS[0] and right.bits != Scan.DIGITS[0]:
-        #             continue
-        #         if left.bits == Scan.DIGITS[0] and right.bits == Scan.DIGITS[0]:
-        #             # 000's both sides - drop it and merge the 000's
-        #             donate(left, segment.samples, 0)
-        #             segments[x] = None
-        #             if self.logging:
-        #                 self._log('        dropping {}'.format(segment))
-        #             donate(left, right.samples, 0)
-        #             segments[right_x] = None
-        #             if self.logging:
-        #                 self._log('        dropping {}'.format(right))
-        #             continue
-        #         if left.bits == Scan.DIGITS[0]:
-        #             donate(left, segment.samples, 0)
-        #         else:  # right.bits == Scan.DIGITS[0]:
-        #             donate(right, segment.samples, segment.samples)
-        #         segments[x] = None
-        #         if self.logging:
-        #             self._log('        dropping {}'.format(segment))
 
         # remove our dropped segments
         dropped = 0
