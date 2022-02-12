@@ -4286,6 +4286,21 @@ class Scan:
 
         return targets, labels
 
+    def _decode_bits(self, bits):
+        """ decode the bits for the least doubt and return its corresponding number """
+        # in bits we have a list of bit sequence choicess across the data rings, i.e. bits x rings
+        # we need to rotate that to rings x bits to present it to our decoder
+        # ToDo: deal with choices
+        code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
+        for bit in range(Scan.NUM_SEGMENTS):
+            rings = bits[bit][0]
+            if rings is not None:
+                for ring in range(len(rings)):
+                    sample = rings[ring]
+                    code[ring][bit] = sample
+        number, doubt, digits = self.decoder.unbuild(code)
+        return number, doubt, digits
+
     def decode_targets(self):
         """ find and decode the targets in the source image,
             returns a list of x,y blob co-ordinates, the encoded number there (or None) and the level of doubt
@@ -4315,16 +4330,16 @@ class Scan:
             image = target.image
             bits = target.bits
 
-            # ToDo: build options from bit choices
-            code = self._decode_bits(bits)
-            number, doubt, digits = self.decoder.unbuild(code)
+            # decode the bits for the best result
+            number, doubt, digits = self._decode_bits(bits)
 
             # add this result
             numbers.append(Scan.Detection(number, doubt, self.centre_x, self.centre_y, target_size, blob_size, digits))
 
             if self.logging:
                 number = numbers[-1]
-                self._log('decode: number={}, digits={}'.format(number.number, number.digits), number.centre_x, number.centre_y)
+                self._log('decode: number={}, digits={}'.
+                          format(number.number, number.digits), number.centre_x, number.centre_y)
                 # for ring in range(len(code)):
                 #     self._log('    {}'.format(code[ring]), number.centre_x, number.centre_y)
             if self.save_images:
@@ -4350,19 +4365,6 @@ class Scan:
         return numbers
 
     # region Helpers...
-    def _decode_bits(self, bits):
-        # in bits we have a list of bit sequence choicess across the data rings, i.e. bits x rings
-        # we need to rotate that to rings x bits to present it to our decoder
-        # ToDo: deal with choices
-        code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
-        for bit in range(Scan.NUM_SEGMENTS):
-            rings = bits[bit][0]
-            if rings is not None:
-                for ring in range(len(rings)):
-                    sample = rings[ring]
-                    code[ring][bit] = sample
-        return code
-
     def _overlaps(self, this_segment, that_segment, exact=False):
         """ see if this and that segments have overlapping 1 bits or have a common choice,
             if exact is True want same bits in both, else just most common one bits,
