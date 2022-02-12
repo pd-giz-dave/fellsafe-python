@@ -1443,6 +1443,7 @@ class Scan:
     NO_CHOICE_ERROR = 1  # a choice error of this is no error, i.e. a dead cert
     MAX_CHOICE_ERR_DIFF = int(0.1 * RATIO_QUANTA)  # 2nd choices ignored if err diff more than this
     MAX_CHOICE_ERR_DIFF_SQUARED = MAX_CHOICE_ERR_DIFF * MAX_CHOICE_ERR_DIFF
+    MAX_BIT_CHOICES = 1024  # max bit choices to explore when decoding bits to the associated number
     # endregion
 
     # region Video modes image height...
@@ -1697,13 +1698,13 @@ class Scan:
     class Target:
         """ structure to hold detected target information """
 
-        def __init__(self, centre_x, centre_y, blob_size, target_size, image, bits):
+        def __init__(self, centre_x, centre_y, blob_size, target_size, image, result):
             self.centre_x = centre_x  # x co-ord of target in original image
             self.centre_y = centre_y  # y co-ord of target in original image
             self.blob_size = blob_size  # blob size originally detected by the blob detector
             self.target_size = target_size  # target size scaled to the original image (==outer edge average Y)
             self.image = image  # the image of the target(s)
-            self.bits = bits  # list of bit sequences across the data rings
+            self.result = result  # the number, doubt and digits of the target
 
     class Reject:
         """ struct to hold info about rejected targets """
@@ -4166,11 +4167,11 @@ class Scan:
         if self.logging:
             self._log('analyse: {} bits from {} segments, {} with choices and {} as gaps:'.
                       format(len(bits), orig_segments, num_choices, num_gaps))
-            for bit_list in bits:
+            for x, bit_list in enumerate(bits):
                 msg = ''
                 for bit in bit_list:
                     msg = '{}, {}'.format(msg, bit)
-                self._log('    {}'.format(msg[2:]))
+                self._log('    {}: {}'.format(x, msg[2:]))
 
         if self.save_images:
             grid = self._draw_segments(segments, max_x, max_y)
@@ -4198,6 +4199,57 @@ class Scan:
                       format(target_size, stretch_factor))
 
         return target_size
+
+    def _decode_bits(self, bits):
+        """ decode the bits for the least doubt and return its corresponding number,
+            in bits we have a list of bit sequence choices across the data rings, i.e. bits x rings
+            we need to rotate that to rings x bits to present it to our decoder,
+            we present each combination to the decoder and pick the result with the least doubt
+            """
+
+        def build_choice(start_x, choice, choices):
+            for x in range(start_x, Scan.NUM_SEGMENTS):
+                bit_list = bits[x]
+                if len(bit_list) > 1 and len(choices) < Scan.MAX_BIT_CHOICES:
+                    # got choices - recurse for the others
+                    for dx in range(1, len(bit_list)):
+                        bit_choice = choice.copy()
+                        bit_choice[x] = bit_list[dx]
+                        choices = build_choice(x+1, bit_choice, choices)
+                choice[x] = bit_list[0]
+            choices.append(choice)
+            return choices
+
+        # build all the choices
+        choices = build_choice(0, [None for _ in range(Scan.NUM_SEGMENTS)], [])
+
+        # try them all
+        results = []
+        for choice in choices:
+            code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
+            for bit in range(Scan.NUM_SEGMENTS):
+                rings = choice[bit]
+                if rings is not None:
+                    for ring in range(len(rings)):
+                        sample = rings[ring]
+                        code[ring][bit] = sample
+            number, doubt, digits = self.decoder.unbuild(code)
+            results.append((number, doubt, digits, choice))
+
+        # put into least doubt order with numbers before None's
+        # ToDo: or pick the one that has most solutions?
+        results.sort(key=lambda r: (r[0] is None, r[1]))
+
+        number, doubt, digits, choice = results[0]
+
+        if self.logging:
+            self._log('decode: {} results (limit is {}), best is: number={}, doubt={}, digits={}, bits:'.
+                      format(len(results), Scan.MAX_BIT_CHOICES, number, doubt, digits))
+            for x, bits in enumerate(choice):
+                self._log('    {}: {}'.format(x, bits))
+
+        # return best
+        return number, doubt, digits
 
     def _find_codes(self):
         """ find the codes within each blob in our image,
@@ -4265,7 +4317,10 @@ class Scan:
                     rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, target_size, reason))
                 continue
 
-            targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, target, bits))
+            # decode the bits for the best result
+            result = self._decode_bits(bits)
+
+            targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, target, result))
 
         if self.save_images:
             # label all the blobs we processed that were rejected
@@ -4285,21 +4340,6 @@ class Scan:
             labels = None
 
         return targets, labels
-
-    def _decode_bits(self, bits):
-        """ decode the bits for the least doubt and return its corresponding number """
-        # in bits we have a list of bit sequence choicess across the data rings, i.e. bits x rings
-        # we need to rotate that to rings x bits to present it to our decoder
-        # ToDo: deal with choices
-        code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
-        for bit in range(Scan.NUM_SEGMENTS):
-            rings = bits[bit][0]
-            if rings is not None:
-                for ring in range(len(rings)):
-                    sample = rings[ring]
-                    code[ring][bit] = sample
-        number, doubt, digits = self.decoder.unbuild(code)
-        return number, doubt, digits
 
     def decode_targets(self):
         """ find and decode the targets in the source image,
@@ -4328,20 +4368,11 @@ class Scan:
             blob_size = target.blob_size
             target_size = target.target_size
             image = target.image
-            bits = target.bits
-
-            # decode the bits for the best result
-            number, doubt, digits = self._decode_bits(bits)
+            number, doubt, digits = target.result
 
             # add this result
             numbers.append(Scan.Detection(number, doubt, self.centre_x, self.centre_y, target_size, blob_size, digits))
 
-            if self.logging:
-                number = numbers[-1]
-                self._log('decode: number={}, digits={}'.
-                          format(number.number, number.digits), number.centre_x, number.centre_y)
-                # for ring in range(len(code)):
-                #     self._log('    {}'.format(code[ring]), number.centre_x, number.centre_y)
             if self.save_images:
                 number = numbers[-1]
                 if number.number is None:
@@ -5316,14 +5347,14 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        # test.scan_codes(test_codes_folder)
-        # test.scan_media(test_media_folder)
+        test.scan_codes(test_codes_folder)
+        test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
         # test.scan(test_media_folder, [101], 'photo-101.jpg')
-        test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+        # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     except:
         traceback.print_exc()
