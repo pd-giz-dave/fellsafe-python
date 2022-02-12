@@ -1417,8 +1417,9 @@ class Scan:
     MIN_BLOB_SIZE = 6  # minimum blob size, in pixels, we want - NB: this is the 'diameter' of the detected blob
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance (in pixels) of each other are dropped
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything
-    THRESHOLD_SPAN = 1/2  # how much of image height to use for threshold calculation
-    THRESHOLD_SPAN_MIN = 0.7  # minimum threshold span as fraction of min image height (used if above is too small)
+    THRESHOLD_START = 1/8  # where to start threshold calculation within image height
+    THRESHOLD_END = 6/8  # where to end threshold calculation within image height
+    THRESHOLD_END_MIN = 0.8  # minimum threshold end as fraction of min image height (used if above is too small)
     THRESHOLD_RANGE = [-1, +1]  # x offsets to include when calculating the threshold at x
     THRESHOLD_OFFSET = 1.0  # fiddle with threshold for heuristic reasons
     MAX_NEIGHBOUR_ANGLE_TAN = 0.6  # ~=30 degrees, tan of the max acceptable angle when joining edge fragments
@@ -1673,7 +1674,7 @@ class Scan:
         def error(self):
             """ get the harmonic mean error for the segment """
             if self.errors > 0:
-                err = int(round(self.samples / self.errors))  # get harmonic mean as the error
+                err = max(int(round(self.samples / self.errors)), 1)  # get harmonic mean as the error
             else:
                 err = 0
             return err
@@ -1996,12 +1997,13 @@ class Scan:
             return buckets
 
         # ToDo: do threshold span on slice-by-slice basis and not simple y-span for all
-        span_y = max_y * Scan.THRESHOLD_SPAN
-        min_span = int(Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS * Scan.THRESHOLD_SPAN_MIN)
+        start_y = int(max_y * Scan.THRESHOLD_START)
+        span_y = max_y * Scan.THRESHOLD_END
+        min_span = int(Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS * Scan.THRESHOLD_END_MIN)
         if span_y < min_span:
             span_y = min_span
         span_y = min(int(round(span_y)), max_y - 1)
-        range_y = range(0, span_y + 1)
+        range_y = range(start_y, span_y + 1)
         range_x = Scan.THRESHOLD_RANGE + [0]  # last element must be 0
         buckets = make_binary(range_x, range_y)
 
@@ -2020,7 +2022,7 @@ class Scan:
         if self.save_images:
             threshold_lines = []
             for x in range(max_x):
-                threshold_lines.append((x, 0, x, span_y))
+                threshold_lines.append((x, start_y, x, span_y))
             plot = self._draw_lines(target, threshold_lines, colour=Scan.GREEN, bleed=0.8)
             self._unload(plot, '03-threshold')
             self._unload(buckets, '04-buckets')
@@ -2872,7 +2874,7 @@ class Scan:
                                 good_pulses.append(pulse)  # keep this adjusted pulse
                             else:
                                 # no room for action 1, do action 2 instead
-                                prior_pulse.lead = outer[x] - prior_pulse.start
+                                prior_pulse.lead = max(outer[x] - prior_pulse.start, 1)
                                 prior_pulse.head = 0
                                 if self.logging:
                                     if header is not None:
@@ -2953,7 +2955,7 @@ class Scan:
 
     def _pulses(self, half_pulses: List[List[Pulse]]) -> List[Pulse]:
         """ find the radial pulses in the given half_pulses,
-            returns a pulse list
+            returns a full pulse list
             """
 
         def find_predecessor(idx, slice_pulses):
@@ -3035,7 +3037,60 @@ class Scan:
                             self._log('    {}: merge {} into predecessor head {}'.format(x, pulse, slice_pulses[pred]))
                     continue
 
-        # combine first two half-pulses into a full pulse
+        # merge extra half-pulses
+        # due to the action of _constrain we know the first half-pulse starts at the inner edge
+        # and the last half-pulse head starts at the outer edge, we expect there to be no other
+        # half-pulses in between, if there are they are noise and the smallest is merged into
+        # one of its neighbours (extra lead in its predecessor or extra head in its successor).
+        if self.logging:
+            header = 'pulses: merge extra half-pulses:'
+        for x, slice_pulses in enumerate(half_pulses):
+            if slice_pulses is None:
+                continue
+            # drop None pulses
+            for idx in range(len(slice_pulses)-1, -1, -1):
+                if slice_pulses[idx] is None:
+                    del slice_pulses[idx]
+            if len(slice_pulses) == 0:
+                half_pulses[x] = None
+                continue
+            while len(slice_pulses) > 2:
+                for idx in range(1, len(slice_pulses)-1):
+                    pulse = slice_pulses[idx]
+                    if pulse is None:
+                        continue
+                    # merge this extra with the most appropriate neighbour
+                    pred = slice_pulses[idx - 1]
+                    if pred.head > pulse.head:
+                        # predecessor head is bigger - merge us into the lead of our successor
+                        succ = slice_pulses[idx + 1]
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}: merge extra pulse {} into successor lead {}'
+                                      ' (predecessor {} has bigger head)'.
+                                      format(x, pulse, succ, pred))
+                        succ.start = pulse.start
+                        succ.lead += pulse.lead + pulse.head
+                        del slice_pulses[idx]
+                        break
+                    else:  # pred.head <= pulse.head:
+                        # we're bigger, merge predecessor into our lead
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}: merge extra pulse {} into successor lead {}'
+                                      ' (successor {} has bigger or same head)'.
+                                      format(x, pred, pulse, pulse))
+                        pulse.start = pred.start
+                        pulse.lead += pred.lead + pred.head
+                        del slice_pulses[idx - 1]
+                        break
+
+        # combine two half-pulses into a full pulse
+        # when we get here there are either zero, one or two half-pulses per slice, never more
         if self.logging:
             header = 'pulses: combining two half-pulses into full-pulses:'
         pulses = [None for _ in range(max_x)]
@@ -3054,14 +3109,8 @@ class Scan:
                     full_pulse = pulse
                     full_pulse.tail = 0
                 elif full_pulse.tail > 0:
-                    # this means we've found a junk half pulse after our end, consider it to be part of our tail
-                    full_pulse.tail += (pulse.lead + prev_pulse.head)
-                    if self.logging:
-                        if header is not None:
-                            self._log(header)
-                            header = None
-                        self._log('    {}: extra half-pulse of {} contributing to tail of {}'.
-                                  format(x, pulse, full_pulse))
+                    # this means we've found an extra half-pulse, which implies the previous loop failed
+                    self._log('pulses: extra half-pulse at {} of {}'.format(x, pulse), fatal=True)
                 else:
                     # found the second one, its lead is our full pulse tail
                     full_pulse.tail = pulse.lead
@@ -3118,13 +3167,13 @@ class Scan:
         def move_head_start(x, pulse, from_start, to_start, context):
             """ move the head start of pulse as directed """
             nonlocal header
+            change = from_start - to_start
             if self.logging:
                 if header is not None:
                     self._log(header)
                     header = None
-                self._log('    {}: ({}) moving head start from {} to {} in {}'.
-                          format(x, context, from_start, to_start, pulse))
-            change = from_start - to_start
+                self._log('    {}: ({}) moving head start from {} to {} in {} (change is {})'.
+                          format(x, context, from_start, to_start, pulse, change))
             pulse.lead -= change
             pulse.head += change
             return pulse
@@ -3132,13 +3181,13 @@ class Scan:
         def move_head_end(x, pulse, from_end, to_end, context):
             """ move the head end of pulse as directed """
             nonlocal header
+            change = from_end - to_end
             if self.logging:
                 if header is not None:
                     self._log(header)
                     header = None
-                self._log('    {}: ({}) moving head end from {} to {} in {}'.
-                          format(x, context, from_end, to_end, pulse))
-            change = from_end - to_end
+                self._log('    {}: ({}) moving head end from {} to {} in {} (change is {})'.
+                          format(x, context, from_end, to_end, pulse, change))
             pulse.head -= change
             pulse.tail += change
             return pulse
@@ -3440,7 +3489,7 @@ class Scan:
                                              error=pulse_error, choices=pulse_choices, ideal=ideal_length))
             elif same_choices(pulse_bits, segments[-1].bits,
                               pulse_choices, segments[-1].choices,
-                              pulse_error, segments[-1].error()) and segments[-1].size() < 1.0:
+                              pulse_error, segments[-1].error()):
                 # got another the same
                 segments[-1].extend(1, pulse_error)
             else:
@@ -3450,7 +3499,7 @@ class Scan:
         if len(segments) > 1:
             if same_choices(segments[0].bits, segments[-1].bits,
                             segments[0].choices, segments[-1].choices,
-                            segments[0].error(), segments[-1].error()) and segments[-1].size() < 1.0:
+                            segments[0].error(), segments[-1].error()):
                 # got a wrapping segment
                 segments[-1].extend(segments[0].samples, segments[0].error())
                 del segments[0]
@@ -3506,7 +3555,7 @@ class Scan:
                     segment.choices.append(choice)
                     segment.choices.sort(key=lambda c: c.error())
             segment.bits = bits
-            segment.start -= offset
+            segment.start = (segment.start - offset) % max_x
             merge_choices(segment, mergee, bits)
             if self.logging:
                 self._log('{} into {}'.format(header, segment))
@@ -3671,6 +3720,35 @@ class Scan:
                 count += 1
             return count
 
+        # combine same bits
+        if self.logging:
+            header = 'combine: combine same bits:'
+        updates = 0
+        changes = True
+        while changes:
+            changes = False
+            for x, segment in enumerate(segments):
+                if segment is None:
+                    continue
+                if segment.choices is not None:
+                    # leave these for later
+                    continue
+                right_x = neighbour(x, +1)
+                if right_x is None:
+                    continue
+                right = segments[right_x]
+                if right.choices is not None:
+                    # leave these for later
+                    continue
+                if segment.bits == right.bits:
+                    # same bits - merge them
+                    merge_pair(x, right_x, segment.bits)
+                    changes = True
+                    updates += 1
+                    break
+        if self.logging and updates > 0:
+            log('combined same bits')
+
         # combine matching choices
         if self.logging:
             header = 'combine: combine matching choices:'
@@ -3699,37 +3777,37 @@ class Scan:
         if self.logging and updates > 0:
             log('combined matching choices')
 
-        # combine most common 1's choices
-        if self.logging:
-            header = 'combine: combine most common 1\'s choices:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if not can_merge(segment, right):
-                    continue
-                join_bits = self._overlaps(segment, right)
-                if join_bits is None:
-                    continue
-                # merge this pair
-                # if half the pair is much bigger than the other, we use its bits rather than the common ones
-                if segment.samples / right.samples > Scan.DOMINANT_SEGMENT_RATIO:
-                    join_bits = segment.bits
-                elif right.samples / segment.samples > Scan.DOMINANT_SEGMENT_RATIO:
-                    join_bits = right.bits
-                merge_pair(x, right_x, join_bits)
-                changes = True
-                updates += 1
-                break
-        if self.logging:
-            log('combined most common 1\'s choices')
+        # # combine most common 1's choices
+        # if self.logging:
+        #     header = 'combine: combine most common 1\'s choices:'
+        # updates = 0
+        # changes = True
+        # while changes:
+        #     changes = False
+        #     for x, segment in enumerate(segments):
+        #         if segment is None:
+        #             continue
+        #         right_x = neighbour(x, +1)
+        #         if right_x is None:
+        #             continue
+        #         right = segments[right_x]
+        #         if not can_merge(segment, right):
+        #             continue
+        #         join_bits = self._overlaps(segment, right)
+        #         if join_bits is None:
+        #             continue
+        #         # merge this pair
+        #         # if half the pair is much bigger than the other, we use its bits rather than the common ones
+        #         if segment.samples / right.samples > Scan.DOMINANT_SEGMENT_RATIO:
+        #             join_bits = segment.bits
+        #         elif right.samples / segment.samples > Scan.DOMINANT_SEGMENT_RATIO:
+        #             join_bits = right.bits
+        #         merge_pair(x, right_x, join_bits)
+        #         changes = True
+        #         updates += 1
+        #         break
+        # if self.logging:
+        #     log('combined most common 1\'s choices')
 
         # combine 000 abutting choices
         if self.logging:
@@ -3769,93 +3847,93 @@ class Scan:
         if self.logging:
             log('combined 000 abutting choices')
 
-        # combine anything that is short
-        if self.logging:
-            header = 'combine: combine short segments:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if not can_merge(segment, right):
-                    continue
-                if segment.bits == Scan.DIGITS[0] and right.bits != Scan.DIGITS[0]:
-                    # cannot merge 000's into non-000's unless the 000's are very short
-                    if segment.size() > Scan.MIN_0_SEGMENT_LENGTH:
-                        continue
-                elif segment.bits != Scan.DIGITS[0] and right.bits == Scan.DIGITS[0]:
-                    # cannot merge 000's into non-000's unless the 000's are very short
-                    if segment.size() > Scan.MIN_0_SEGMENT_LENGTH:
-                        continue
-                if segment.size() > right.size():
-                    # merge right into segment
-                    merge(segment, right, segment.bits)
-                    segments[right_x] = None
-                    changes = True
-                elif right.size() > segment.size():
-                    # merge segment into right
-                    merge(right, segment, right.bits, segment.samples)
-                    segments[x] = None
-                    changes = True
-                else:
-                    # both same size, merge right into segment
-                    merge(segment, right, segment.bits)
-                    segments[right_x] = None
-                    changes = True
-                if changes:
-                    updates += 1
-                    break
-        if self.logging:
-            log('combined short segments')
+        # # combine anything that is short
+        # if self.logging:
+        #     header = 'combine: combine short segments:'
+        # updates = 0
+        # changes = True
+        # while changes:
+        #     changes = False
+        #     for x, segment in enumerate(segments):
+        #         if segment is None:
+        #             continue
+        #         right_x = neighbour(x, +1)
+        #         if right_x is None:
+        #             continue
+        #         right = segments[right_x]
+        #         if not can_merge(segment, right):
+        #             continue
+        #         if segment.bits == Scan.DIGITS[0] and right.bits != Scan.DIGITS[0]:
+        #             # cannot merge 000's into non-000's unless the 000's are very short
+        #             if segment.size() > Scan.MIN_0_SEGMENT_LENGTH:
+        #                 continue
+        #         elif segment.bits != Scan.DIGITS[0] and right.bits == Scan.DIGITS[0]:
+        #             # cannot merge 000's into non-000's unless the 000's are very short
+        #             if segment.size() > Scan.MIN_0_SEGMENT_LENGTH:
+        #                 continue
+        #         if segment.size() > right.size():
+        #             # merge right into segment
+        #             merge(segment, right, segment.bits)
+        #             segments[right_x] = None
+        #             changes = True
+        #         elif right.size() > segment.size():
+        #             # merge segment into right
+        #             merge(right, segment, right.bits, segment.samples)
+        #             segments[x] = None
+        #             changes = True
+        #         else:
+        #             # both same size, merge right into segment
+        #             merge(segment, right, segment.bits)
+        #             segments[right_x] = None
+        #             changes = True
+        #         if changes:
+        #             updates += 1
+        #             break
+        # if self.logging:
+        #     log('combined short segments')
 
-        # finally: change choice if got consecutive segments of the same bit
-        if self.logging:
-            header = 'combine: swapping consecutive segments with same bits:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if segment.bits == right.bits:
-                    # got two the same - if there is a different choice use that
-                    if segment.choices is None:
-                        # cannot change this, but maybe can the other
-                        if swap_bits(right):
-                            changes = True
-                            updates += 1
-                            break
-                        continue
-                    elif right.choices is None:
-                        # cannot change this, but maybe can the other
-                        if swap_bits(segment):
-                            changes = True
-                            updates += 1
-                            break
-                        continue
-                    # swap the one with the biggest error
-                    if segment.error() > right.error():
-                        if swap_bits(segment):
-                            changes = True
-                            updates += 1
-                            break
-                    if swap_bits(right):
-                        changes = True
-                        updates += 1
-                        break
-        if self.logging:
-            log('swapped duplicate segments')
+        # # finally: change choice if got consecutive segments of the same bit
+        # if self.logging:
+        #     header = 'combine: swapping consecutive segments with same bits:'
+        # updates = 0
+        # changes = True
+        # while changes:
+        #     changes = False
+        #     for x, segment in enumerate(segments):
+        #         if segment is None:
+        #             continue
+        #         right_x = neighbour(x, +1)
+        #         if right_x is None:
+        #             continue
+        #         right = segments[right_x]
+        #         if segment.bits == right.bits:
+        #             # got two the same - if there is a different choice use that
+        #             if segment.choices is None:
+        #                 # cannot change this, but maybe can the other
+        #                 if swap_bits(right):
+        #                     changes = True
+        #                     updates += 1
+        #                     break
+        #                 continue
+        #             elif right.choices is None:
+        #                 # cannot change this, but maybe can the other
+        #                 if swap_bits(segment):
+        #                     changes = True
+        #                     updates += 1
+        #                     break
+        #                 continue
+        #             # swap the one with the biggest error
+        #             if segment.error() > right.error():
+        #                 if swap_bits(segment):
+        #                     changes = True
+        #                     updates += 1
+        #                     break
+        #             if swap_bits(right):
+        #                 changes = True
+        #                 updates += 1
+        #                 break
+        # if self.logging:
+        #     log('swapped duplicate segments')
 
         # remove our dropped segments
         for x in range(len(segments)-1, -1, -1):
@@ -3910,7 +3988,10 @@ class Scan:
                     continue
                 # got an overlap
                 if self.logging:
-                    self._log('        dropping {}'.format(segment))
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    dropping {}'.format(segment))
                 segments[x] = None
 
         # remove our dropped segments
@@ -3929,7 +4010,10 @@ class Scan:
 
     def _analyse(self, segments: List[Segment], max_x, max_y):
         """ analyse the segments to extract the bit sequences for each segment,
-            each segment's bits consists of one or more of the encoding BITS or None
+            each segment's bits consists of one or more of the encoding BITS or None,
+            this is the function that is 'expected number of bits aware', all preceding
+            functions are (mostly) number of bits agnostic,
+            returns a list of bit choices for each segment
             """
 
         num_choices = 0
@@ -3946,7 +4030,46 @@ class Scan:
         reason = None
 
         if self.logging:
-            header = 'analyse: too many segments: got {}, only want {}'.format(len(segments), Scan.NUM_SEGMENTS)
+            header = 'analyse: too many segments: got {}, only want {}, dropping duplicates'.\
+                     format(len(segments), Scan.NUM_SEGMENTS)
+        while len(segments) > Scan.NUM_SEGMENTS:
+            # got too many - chuck duplicates with no choices
+            drop_x = None
+            for x in range(len(segments)):
+                segment = segments[x]
+                neighbour_x = (x + 1) % len(segments)
+                neighbour = segments[neighbour_x]
+                if segment.bits == neighbour.bits:
+                    # two in a row - drop the one with the least choices
+                    if segment.choices is None and neighbour.choices is not None:
+                        drop_x = x
+                    elif segment.choices is not None and neighbour.choices is None:
+                        drop_x = neighbour_x
+                    elif segment.choices is None and neighbour.choices is None:
+                        if segment.samples < neighbour.samples:
+                            drop_x = x
+                        else:
+                            drop_x = neighbour_x
+                    elif len(segment.choices) > len(neighbour.choices):
+                        drop_x = neighbour_x
+                    elif len(segment.choices) < len(neighbour.choices):
+                        drop_x = x
+                    elif segment.samples < neighbour.samples:
+                        drop_x = x
+                    else:
+                        drop_x = neighbour_x
+                    break
+            if drop_x is None:
+                break
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    dropping {}'.format(segments[drop_x]))
+            del segments[drop_x]
+
+        if self.logging:
+            header = 'analyse: too many segments: got {}, only want {}, dropping shortest'.format(len(segments), Scan.NUM_SEGMENTS)
         while len(segments) > Scan.NUM_SEGMENTS:
             # got too many - chuck shortest with biggest error
             shortest = None
@@ -4028,19 +4151,26 @@ class Scan:
                                                   segment.bits, split_samples,
                                                   segment.error(), ideal=segment.ideal))
 
-        # return the bits from the final segment mix
-        bits = []
-        for segment in segments:
+        # return the bit choices from the final segment mix
+        bits = [[] for _ in range(len(segments))]
+        for x, segment in enumerate(segments):
             if segment.bits is None:
-                bits.append([None for _ in range(Scan.NUM_DATA_RINGS)])
+                bits[x].append([None for _ in range(Scan.NUM_DATA_RINGS)])
+            elif segment.choices is None:
+                bits[x].append(segment.bits)
             else:
-                bits.append(segment.bits)
+                bits[x].append(segment.bits)
+                for choice in segment.choices:
+                    bits[x].append(choice.bits)
 
         if self.logging:
-            self._log('analyse: {} bits from {} segments with {} choices and {} gaps:'.
+            self._log('analyse: {} bits from {} segments, {} with choices and {} as gaps:'.
                       format(len(bits), orig_segments, num_choices, num_gaps))
-            for bit in bits:
-                self._log('    {}'.format(bit))
+            for bit_list in bits:
+                msg = ''
+                for bit in bit_list:
+                    msg = '{}, {}'.format(msg, bit)
+                self._log('    {}'.format(msg[2:]))
 
         if self.save_images:
             grid = self._draw_segments(segments, max_x, max_y)
@@ -4185,6 +4315,7 @@ class Scan:
             image = target.image
             bits = target.bits
 
+            # ToDo: build options from bit choices
             code = self._decode_bits(bits)
             number, doubt, digits = self.decoder.unbuild(code)
 
@@ -4220,11 +4351,12 @@ class Scan:
 
     # region Helpers...
     def _decode_bits(self, bits):
-        # in bits we have a list of bit sequences across the data rings, i.e. bits x rings
+        # in bits we have a list of bit sequence choicess across the data rings, i.e. bits x rings
         # we need to rotate that to rings x bits to present it to our decoder
+        # ToDo: deal with choices
         code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
         for bit in range(Scan.NUM_SEGMENTS):
-            rings = bits[bit]
+            rings = bits[bit][0]
             if rings is not None:
                 for ring in range(len(rings)):
                     sample = rings[ring]
@@ -4259,7 +4391,9 @@ class Scan:
                 if exact:
                     if diff_count == 0:
                         return this_choice
-                elif one_count > 0:
+                    else:
+                        continue
+                if one_count > 0:
                     if one_count > best_ones:
                         best_ones = one_count
                         best_zeroes = zero_count
@@ -5180,14 +5314,14 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        test.scan_codes(test_codes_folder)
-        test.scan_media(test_media_folder)
+        # test.scan_codes(test_codes_folder)
+        # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
-        # test.scan(test_media_folder, [182], 'photo-102.jpg')
-        # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+        # test.scan(test_media_folder, [101], 'photo-101.jpg')
+        test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     except:
         traceback.print_exc()
