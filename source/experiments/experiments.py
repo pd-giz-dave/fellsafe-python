@@ -1434,6 +1434,7 @@ class Scan:
     MAX_NEIGHBOUR_LENGTH_JUMP = 6  # max x jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
+    MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
     MAX_EDGE_HEIGHT_JUMP = 2  # max jump in y, in pixels, along an edge before smoothing is triggered
     INNER_OUTER_MARGIN = 1.7  # minimum margin between the inner edge and the outer edge
     MAX_INNER_OVERLAP = 0.2  # max num of samples of outer edge fragment allowed to be inside the inner edge
@@ -2249,7 +2250,8 @@ class Scan:
         """ determine the target inner and outer edges,
             there should be a consistent set of falling edges for the inner black ring
             and another set of rising edges for the outer white ring,
-            edges that are within a few pixels of each other going right round is what we want
+            edges that are within a few pixels of each other going right round is what we want,
+            returns the inner, outer edges and their fail reasons or None, None if not failed
             """
 
         def make_full(edge):
@@ -2545,7 +2547,10 @@ class Scan:
             return edge
 
         def extrapolate(edge):
-            """ extrapolate across the gaps in the given edge """
+            """ extrapolate across the gaps in the given edge,
+                this can fail if a gap is too big,
+                returns the updated edge and None if OK or the partial edge and a fail reason if not OK
+                """
 
             def fill_gap(edge, size, start_x, stop_x, start_y, stop_y):
                 """ fill a gap by linear extrapolation across it """
@@ -2563,7 +2568,10 @@ class Scan:
                     edge[x] = int(round(y))
                 return edge
 
+            max_gap = max_x * Scan.MAX_EDGE_GAP_SIZE
+
             # we need to start from a known position, so find the first non gap
+            reason = None
             start_x = None
             for x in range(max_x):
                 if edge[x] is None:
@@ -2605,6 +2613,9 @@ class Scan:
                         else:
                             # current gap getting bigger
                             gap_size += 1
+                            if gap_size > max_gap:
+                                reason = 'edge gap: {}+'.format(gap_size)
+                                break
                         continue
                     if gap_start is not None:
                         # we're coming out of a gap, extrapolate across it
@@ -2614,12 +2625,13 @@ class Scan:
                     gap_size = 0
                     start_y = y
 
-            return edge
+            return edge, reason
 
         def compose(edges, direction=None, offset=0):
             """ we attempt to compose a complete edge by starting at every edge, then adding
                 near neighbours until no more merge, then pick the longest and extrapolate
-                across any remaining gaps
+                across any remaining gaps,
+                if OK returns the edge and None or the partial edge and a fail reason if not OK
                 """
 
             distance_span = range(2, Scan.MAX_NEIGHBOUR_LENGTH_JUMP + 1)
@@ -2667,7 +2679,10 @@ class Scan:
                     log_edge(edge[1])
 
             # extrapolate across any remaining gaps in the longest edge
-            composed = extrapolate(full_edges[0][1])
+            composed, reason = extrapolate(full_edges[0][1])
+            if reason is not None:
+                # failed
+                return composed, reason
 
             # remove y 'steps'
             smoothed = smooth(composed, direction)
@@ -2676,7 +2691,7 @@ class Scan:
                 for x in range(len(smoothed)):
                     smoothed[x] += offset
 
-            return smoothed
+            return smoothed, None
 
         def log_edge(edge):
             """ log the edge in 32 byte chunks """
@@ -2694,9 +2709,9 @@ class Scan:
         falling_edges, rising_edges = edges
 
         # make the inner edge first, this tends to be more reliably detected
-        inner = compose(falling_edges, Scan.FALLING, Scan.INNER_OFFSET)  # smoothing the inner edge is not so critical
+        inner, inner_fail = compose(falling_edges, Scan.FALLING, Scan.INNER_OFFSET)  # smoothing the inner edge is not so critical
         if self.logging:
-            self._log('extent: inner (offset={})'.format(Scan.INNER_OFFSET))
+            self._log('extent: inner (offset={}) (fail={})'.format(Scan.INNER_OFFSET, inner_fail))
             log_edge(inner)
 
         # remove rising edges that come before or too close to the inner
@@ -2708,6 +2723,8 @@ class Scan:
             for dx, y in enumerate(edge.samples):
                 x = (edge.where + dx) % max_x
                 inner_y = inner[x]
+                if inner_y is None:
+                    continue
                 min_outer_y = int(round(inner_y * Scan.INNER_OUTER_MARGIN))
                 if y < min_outer_y:
                     # this is too close, note it
@@ -2728,13 +2745,13 @@ class Scan:
             outer = [max_y - 1 for _ in range(max_x)]
         else:
             # make the outer edge from what is left and smooth it (it typically jumps around)
-            outer = compose(rising_edges, Scan.RISING, Scan.OUTER_OFFSET)  # smoothing the outer edge is important
+            outer, outer_fail = compose(rising_edges, Scan.RISING, Scan.OUTER_OFFSET)  # smoothing the outer edge is important
 
         if self.logging:
-            self._log('extent: outer (offset={})'.format(Scan.OUTER_OFFSET))
+            self._log('extent: outer (offset={}) (fail={})'.format(Scan.OUTER_OFFSET, outer_fail))
             log_edge(outer)
 
-        return inner, outer
+        return inner, outer, inner_fail, outer_fail
 
     def _constrain(self, half_pulses: List[List[Pulse]], edges) -> List[List[Pulse]]:
         """ remove half-pulses that are not within the given (inner and outer) edges,
@@ -2742,7 +2759,8 @@ class Scan:
             or have their head start on the outer edge or between the two
             """
 
-        inner, outer = edges
+        inner = edges[0]
+        outer = edges[1]
 
         def adjust(x, pulse):
             """ adjust pulse if its parts are within the inner/outer offset """
@@ -4181,6 +4199,17 @@ class Scan:
                 plot = self._draw_edges(edges, extent, target)
                 self._unload(plot, '05-edges')
 
+            if extent[2] is not None or extent[3] is not None:
+                # failed - this means we did not find a suitable inner and/or outer edge
+                if self.save_images:
+                    # add to reject list for labelling on the original image
+                    if extent[2] is not None:
+                        reason = extent[2]
+                    else:
+                        reason = extent[3]
+                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size, reason))
+                continue
+
             # do the pulse detection
             half_pulses = self._transitions(slices)
             half_pulses = self._constrain(half_pulses, extent)
@@ -4585,13 +4614,16 @@ class Scan:
         """ make the area outside the inner and outer edges on the given target """
 
         max_x, max_y = target.size()
-        inner, outer = extent
+        inner = extent[0]
+        outer = extent[1]
 
         inner_lines = []
         outer_lines = []
         for x in range(max_x):
-            inner_lines.append((x, 0, x, inner[x]))
-            outer_lines.append((x, outer[x], x, max_y - 1))
+            if inner[x] is not None:
+                inner_lines.append((x, 0, x, inner[x]))
+            if outer[x] is not None:
+                outer_lines.append((x, outer[x], x, max_y - 1))
         target = self._draw_lines(target, inner_lines, colour=Scan.RED, bleed=bleed)
         target = self._draw_lines(target, outer_lines, colour=Scan.RED, bleed=bleed)
 
@@ -4633,7 +4665,8 @@ class Scan:
     def _draw_edges(self, edges, extent, target):
         """ draw the edges and the inner and outer extent on the given target image """
 
-        falling_edges, rising_edges = edges
+        falling_edges = edges[0]
+        rising_edges = edges[1]
 
         # mark the image area outside the inner and outer extent
         plot = self._draw_extent(extent, target, bleed=0.8)
@@ -5247,7 +5280,7 @@ def verify():
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
-        # test.scan(test_media_folder, [102], 'photo-102.jpg')
+        # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     except:
