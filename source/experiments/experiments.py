@@ -160,6 +160,7 @@ class Codec:
     SPAN = RINGS + 2  # total span of the code including its margin black rings
     WORD = DIGITS_PER_NUM + 1  # number of digits in a 'word' (+1 for the '0')
     DIGITS = WORD * COPIES  # number of digits in a full code-word
+    MAX_DOUBT = COPIES * (DIGITS_PER_NUM + 1)  # max doubt set when see an invalid code in unbuild()
     # endregion
 
     def __init__(self, min_num, max_num):
@@ -237,7 +238,7 @@ class Codec:
         for digit in range(Codec.DIGITS):
             word = int(digit / Codec.WORD)
             bit = digit % Codec.WORD
-            code_slice = [0 for _ in range(Codec.RINGS)]
+            code_slice = [None for _ in range(Codec.RINGS)]
             for slice in range(Codec.RINGS):
                 code_slice[slice] = slices[slice][digit]
             for idx, seq in enumerate(Codec.ENCODING):
@@ -248,39 +249,30 @@ class Codec:
         # step 2 - amalgamate digit copies into most likely with a doubt
         merged = [[None, None] for _ in range(Codec.WORD)]  # number and doubt for each digit in a word
         for digit in range(len(digits)):
-            # the counts structure contains the digit and a count of how many copies of that digit
-            # exist or its neighbours, the rendered pulses are such that a stretch or shrink in either
-            # the low lead-in or high lead-out (due to image distortion) result in the digit migrating
-            # by +1 or -1, so we count the +/- 1 neighbours as well as self, for the digit the count
-            # is increased by N', for its neighbours its 1, so N direct hits results in N'*N and a single
-            # indirect hit results in 1 (N' is Codec.RINGS, N is Codec.COPIES), increasing a direct hit
-            # by N' ensures it will always beat N'-1 indirect hits,
-            # the doubt on a digit is then just count minus N**2
+            # the counts structure contains the digit and a count of how many copies of that digit exist
             counts = [[0, idx] for idx in range(Codec.BASE + 1)]  # +1 for the 0
-            for bit in digits[digit]:
-                if bit is None:
+            for element in digits[digit]:
+                if element is None:
                     # no count for this
                     continue
-                counts[bit][0] += Codec.RINGS
-                if bit == 0 or counts[bit - 1] is None:
-                    # no previous for this
-                    pass
-                else:
-                    counts[bit - 1][0] += 1
-                if bit == Codec.BASE or counts[bit + 1] is None:
-                    # no next for this
-                    pass
-                else:
-                    counts[bit + 1][0] += 1
+                counts[element][0] += 1
             # pick digit with the biggest count (i.e. first in sorted counts)
             counts.sort(key=lambda c: c[0], reverse=True)
-            merged[digit] = (counts[0][1], Codec.RINGS * Codec.COPIES - counts[0][0])
+            if counts[0][0] == 1:
+                # this means all N copies are different - this is a show stopper with a huge doubt
+                return None, Codec.MAX_DOUBT, digits
+            merged[digit] = (counts[0][1], Codec.COPIES - counts[0][0])
 
         # step 3 - look for the '0' and extract the code
         code = None
         doubt = None
+        zero_at = None
         for idx, digit in enumerate(merged):
             if digit[0] == 0:
+                if zero_at is not None:
+                    # got more than one 0 - this is a show stopper with a huge doubt
+                    return None, Codec.MAX_DOUBT, digits
+                zero_at = idx
                 for _ in range(Codec.DIGITS_PER_NUM):
                     idx = (idx - 1) % Codec.WORD
                     digit = merged[idx]
@@ -290,16 +282,33 @@ class Codec:
                     code *= Codec.BASE
                     code += digit[0] - 1  # digit is in range 1..base, we want 0..base-1
                     doubt += digit[1]
-                break
-        if doubt is None:
-            # this means we did not find a 0 - so the doubt is huge
-            doubt = Codec.RINGS * Codec.COPIES * Codec.DIGITS_PER_NUM
+        if zero_at is None:
+            # this means we did not find a 0 - this is a show stopper with a huge doubt
+            return None, Codec.MAX_DOUBT, digits
+        else:
+            # re-align the digits so the 0 is first (this is just a visual aid)
+            aligned_digits = []
+            idx = zero_at
+            for _ in range(Codec.DIGITS_PER_NUM + 1):
+                aligned_digits.append(digits[idx])
+                idx = (idx + 1) % Codec.WORD
+            digits = aligned_digits
 
         # step 4 - lookup number
         number = self.decode(code)
+        if number is None:
+            doubt = Codec.MAX_DOUBT
 
         # that's it
         return number, doubt, digits
+
+    def digits(self, code):
+        """ given a code return the digits for that code """
+        partial = [0]  # the 'sync' digit
+        for digit in range(Codec.DIGITS_PER_NUM):
+            partial.append((code % Codec.BASE) + 1)
+            code = int(code / Codec.BASE)
+        return partial
 
     def _rings(self, code_word):
         """ build the data ring codes for the given code-word,
@@ -327,10 +336,7 @@ class Codec:
             the encoding is little-endian (LS digit first),
             it is returned as a list of digits
             """
-        partial = [0]
-        for digit in range(Codec.DIGITS_PER_NUM):
-            partial.append((code % Codec.BASE) + 1)
-            code = int(code / Codec.BASE)
+        partial = self.digits(code)
         code_word = []
         for _ in range(Codec.COPIES):
             code_word += partial
@@ -4082,27 +4088,61 @@ class Scan:
             results.append((number, doubt, digits, choice))
 
         # put into least doubt order with numbers before None's
-        # ToDo: or pick the one that has most solutions?
-        results.sort(key=lambda r: (r[0] is None, r[1]))
+        results.sort(key=lambda r: (r[0] is None, r[1], r[0]))
 
-        number, doubt, digits, choice = results[0]
+        best = 0
+        best_number, best_doubt, best_digits, _ = results[best]
+        if best_number is not None:
+            # find the most frequent result with a similar doubt
+            # ToDo: use a doubt range not just equality?
+            choices = []
+            for x in range(len(results)):
+                number, doubt, digits, _ = results[x]
+                if number is None:
+                    break
+                if doubt != best_doubt:
+                    break
+                found = False
+                for choice in choices:
+                    if choice[0] == number:
+                        choice[1] += 1
+                        found = True
+                        break
+                if not found:
+                    choices.append([number, 1, x])
+            choices.sort(key=lambda c: c[1], reverse=True)
+            best = choices[0][2]
+            best_number, best_doubt, best_digits, _ = results[best]
 
         if self.logging:
-            self._log('decode: {} results (limit is {}), best is: number={}, doubt={}, digits={}, bits:'.
-                      format(len(results), Scan.MAX_BIT_CHOICES, number, doubt, digits))
-            for x, bits in enumerate(choice):
-                self._log('    {}: {}'.format(x, bits))
+            show = len(results)
+            if show > 15:
+                show = 15
+                if best >= show:
+                    show = best + 1
+                self._log('decode: top {} results from {}, best is {} (result limit is {}):'.
+                          format(show, len(results), best, Scan.MAX_BIT_CHOICES))
+            else:
+                self._log('decode: all {} results, best is {} (result limit is {}):'.
+                          format(show, best, Scan.MAX_BIT_CHOICES))
+            for r in range(show):
+                result = results[r]
+                self._log('    number={}, doubt={}, digits={}'.format(result[0], result[1], result[2]))
+                if r == best:
+                    self._log('        best result bits:')
+                    for x, bits in enumerate(result[3]):
+                        self._log('            {}: {}'.format(x, bits))
 
         if self.save_images:
             segments = []
             size = int(max_x / Scan.NUM_SEGMENTS)
-            for x, bits in enumerate(choice):
+            for x, bits in enumerate(results[best][3]):
                 segments.append(Scan.Segment(x * size, bits, size))
             grid = self._draw_segments(segments, max_x, max_y)
             self._unload(grid, '08-bits')
 
         # return best
-        return number, doubt, digits
+        return best_number, best_doubt, best_digits
 
     def _find_codes(self):
         """ find the codes within each blob in our image,
@@ -5017,7 +5057,7 @@ class Test:
                             # found another expected number
                             found[n] = True
                             found_num = num
-                            expected = '{:b}'.format(self.codec.encode(num))
+                            expected = '{}'.format(self.codec.encode(num))
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, bits])
                 # create dummy result for those not found
@@ -5030,7 +5070,7 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = '{:b}'.format(expected)
+                            expected = '{}'.format(expected)
                         analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
@@ -5082,7 +5122,8 @@ class Test:
                                     actual_code = 'not-valid'
                                     prefix = ''
                                 else:
-                                    actual_code = '{} ({:b})'.format(num, actual_code)
+                                    actual_code = 'code={}, digits={}'.\
+                                                  format(actual_code, self.codec.digits(actual_code))
                                     prefix = '**** UNEXPECTED **** ---> '
                             self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {}{}'.
                                       format(prefix, num, actual_code, centre_x, centre_y, size, doubt, bits))
@@ -5206,7 +5247,7 @@ def verify():
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
-        # test.scan(test_media_folder, [101], 'photo-101.jpg')
+        # test.scan(test_media_folder, [102], 'photo-102.jpg')
         # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
 
     except:
