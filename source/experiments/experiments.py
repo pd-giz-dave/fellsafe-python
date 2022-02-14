@@ -38,7 +38,8 @@ import copy
           the targets to present the results in distance order, nearest (i.e. biggest) first. This is
           important to determine finish order.
           
-    This Python implementation is just a proof-of-concept.
+    This Python implementation is just a proof-of-concept. In particular, it does not represent good
+    coding practice, not does it utilise the Python language to its fullest extent.
                 
     """
 
@@ -161,6 +162,7 @@ class Codec:
     WORD = DIGITS_PER_NUM + 1  # number of digits in a 'word' (+1 for the '0')
     DIGITS = WORD * COPIES  # number of digits in a full code-word
     MAX_DOUBT = COPIES * (DIGITS_PER_NUM + 1)  # max doubt set when see an invalid code in unbuild()
+    DOUBT_LIMIT = int(COPIES / 2)  # we want the majority to agree, so doubt must not exceed half
     # endregion
 
     def __init__(self, min_num, max_num):
@@ -257,11 +259,13 @@ class Codec:
                     continue
                 counts[element][0] += 1
             # pick digit with the biggest count (i.e. first in sorted counts)
-            counts.sort(key=lambda c: c[0], reverse=True)
-            if counts[0][0] == 1:
-                # this means all N copies are different - this is a show stopper with a huge doubt
+            counts.sort(key=lambda c: (c[0], c[1]), reverse=True)
+            doubt = Codec.COPIES - counts[0][0]
+            # possible doubt values are: 0==all copies the same, 1==1 different, 2+==2+ different
+            if doubt > Codec.DOUBT_LIMIT:
+                # to get here there is too much ambiguity - this is a show stopper with a huge doubt
                 return None, Codec.MAX_DOUBT, digits
-            merged[digit] = (counts[0][1], Codec.COPIES - counts[0][0])
+            merged[digit] = (counts[0][1], doubt)
 
         # step 3 - look for the '0' and extract the code
         code = None
@@ -297,7 +301,7 @@ class Codec:
         # step 4 - lookup number
         number = self.decode(code)
         if number is None:
-            doubt = Codec.MAX_DOUBT
+            doubt += Codec.MAX_DOUBT
 
         # that's it
         return number, doubt, digits
@@ -4790,8 +4794,6 @@ class Test:
             are set such that the middle 1/3rd of the luminance range is considered 'grey'
             """
 
-        # ToDo: add random rotate digits and error rate params
-
         def rotate(word, shift, bits):
             """ rotate the given word by shift right within a length of bits """
             msb = 1 << (bits - 1)
@@ -5090,7 +5092,8 @@ class Test:
                             # found another expected number
                             found[n] = True
                             found_num = num
-                            expected = '{}'.format(self.codec.encode(num))
+                            code = self.codec.encode(num)
+                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, bits])
                 # create dummy result for those not found
@@ -5275,7 +5278,7 @@ def verify():
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         test.scan_codes(test_codes_folder)
-        test.scan_media(test_media_folder)
+        # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
