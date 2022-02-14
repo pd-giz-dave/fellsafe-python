@@ -2747,6 +2747,7 @@ class Scan:
         if len(rising_edges) == 0:
             # everything is too close!
             outer = [max_y - 1 for _ in range(max_x)]
+            outer_fail = 'no outer'
         else:
             # make the outer edge from what is left and smooth it (it typically jumps around)
             outer, outer_fail = compose(rising_edges, Scan.RISING, Scan.OUTER_OFFSET)  # smoothing the outer edge is important
@@ -4211,7 +4212,7 @@ class Scan:
                         reason = extent[2]
                     else:
                         reason = extent[3]
-                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size, reason))
+                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*2, reason))
                 continue
 
             # do the pulse detection
@@ -5277,8 +5278,8 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        test.scan_codes(test_codes_folder)
-        # test.scan_media(test_media_folder)
+        # test.scan_codes(test_codes_folder)
+        test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
