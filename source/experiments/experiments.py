@@ -161,7 +161,6 @@ class Codec:
     SPAN = RINGS + 2  # total span of the code including its margin black rings
     WORD = DIGITS_PER_NUM + 1  # number of digits in a 'word' (+1 for the '0')
     DIGITS = WORD * COPIES  # number of digits in a full code-word
-    MAX_DOUBT = COPIES * (DIGITS_PER_NUM + 1)  # max doubt set when see an invalid code in unbuild()
     DOUBT_LIMIT = int(COPIES / 2)  # we want the majority to agree, so doubt must not exceed half
     # endregion
 
@@ -262,32 +261,40 @@ class Codec:
             counts.sort(key=lambda c: (c[0], c[1]), reverse=True)
             doubt = Codec.COPIES - counts[0][0]
             # possible doubt values are: 0==all copies the same, 1==1 different, 2+==2+ different
-            if doubt > Codec.DOUBT_LIMIT:
-                # to get here there is too much ambiguity - this is a show stopper with a huge doubt
-                return None, Codec.MAX_DOUBT, digits
             merged[digit] = (counts[0][1], doubt)
+
+        # step 2B - calculate overall doubt
+        doubt = 0
+        bad_doubt = False
+        for digit in merged:
+            doubt += digit[1]
+            if doubt > Codec.DOUBT_LIMIT:
+                # too much ambiguity
+                bad_doubt = True
+        if bad_doubt:
+            # too much ambiguity - this is a show stopper
+            return None, doubt, digits
 
         # step 3 - look for the '0' and extract the code
         code = None
-        doubt = None
         zero_at = None
         for idx, digit in enumerate(merged):
             if digit[0] == 0:
                 if zero_at is not None:
-                    # got more than one 0 - this is a show stopper with a huge doubt
-                    return None, Codec.MAX_DOUBT, digits
+                    # got more than one 0 - this is a show stopper
+                    if doubt == 0:
+                        doubt = Codec.DIGITS_PER_NUM
+                    return None, doubt, digits
                 zero_at = idx
                 code = 0
-                doubt = digit[1]
                 for _ in range(Codec.DIGITS_PER_NUM):
                     idx = (idx - 1) % Codec.WORD
                     digit = merged[idx]
                     code *= Codec.BASE
                     code += digit[0] - 1  # digit is in range 1..base, we want 0..base-1
-                    doubt += digit[1]
         if zero_at is None:
-            # this means we did not find a 0 - this is a show stopper with a huge doubt
-            return None, Codec.MAX_DOUBT, digits
+            # this means we did not find a 0 - this is a show stopper
+            return None, doubt, digits
         else:
             # re-align the digits so the 0 is first (this is just a visual aid)
             aligned_digits = []
@@ -300,7 +307,8 @@ class Codec:
         # step 4 - lookup number
         number = self.decode(code)
         if number is None:
-            doubt += Codec.MAX_DOUBT
+            if doubt == 0:
+                doubt = Codec.DIGITS_PER_NUM
 
         # that's it
         return number, doubt, digits
@@ -1429,8 +1437,8 @@ class Scan:
     THRESHOLD_START = 1/8  # where to start threshold calculation within image height
     THRESHOLD_END = 6/8  # where to end threshold calculation within image height
     THRESHOLD_END_MIN = 0.8  # minimum threshold end as fraction of min image height (used if above is too small)
-    THRESHOLD_RANGE = [-1, +1]  # x offsets to include when calculating the threshold at x
-    THRESHOLD_OFFSET = 1.0  # fiddle with threshold for heuristic reasons
+    THRESHOLD_RANGE = []  # ToDo: HACK-->[-1, +1]  # x offsets to include when calculating the threshold at x
+    THRESHOLD_OFFSET = 1.08  # ToDo: HACK-->1.0  # fiddle with threshold for heuristic reasons, >1==raise threshold, <1==lower, 1==same
     MAX_NEIGHBOUR_ANGLE_TAN = 0.6  # ~=30 degrees, tan of the max acceptable angle when joining edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max y jump allowed when following an edge
     MAX_NEIGHBOUR_HEIGHT_GAP_SQUARED = MAX_NEIGHBOUR_HEIGHT_GAP * MAX_NEIGHBOUR_HEIGHT_GAP
@@ -1441,7 +1449,7 @@ class Scan:
     MAX_EDGE_HEIGHT_JUMP = 2  # max jump in y, in pixels, along an edge before smoothing is triggered
     INNER_OUTER_MARGIN = 1.7  # minimum margin between the inner edge and the outer edge
     MAX_INNER_OVERLAP = 0.2  # max num of samples of outer edge fragment allowed to be inside the inner edge
-    INNER_OFFSET = -1  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
+    INNER_OFFSET = 0  # ToDo: HACK-->-1  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
     OUTER_OFFSET = +1  # move outer edge by this many pixels (to reduce effect of very narrow black ring)
     MIN_PULSE_LEAD = 2  # minimum pixels for a valid pulse lead (or tail) period, pulse ignored if less than this
     MIN_PULSE_HEAD = 1  # minimum pixels for a valid pulse head period, pulse ignored if less than this
@@ -1802,10 +1810,10 @@ class Scan:
         self.image = self.transform.downsize(blurred, self.video_mode)  # re-size to given video mode
 
         # set filter parameters
-        threshold = (MIN_LUMINANCE, MAX_LUMINANCE, 8)  # min, max luminance, luminance step
-        circularity = (0.75, None)  # min, max 'corners' in blob edge or None
+        threshold = (MIN_LUMINANCE, MAX_LUMINANCE, 16)  # min, max luminance, luminance step
+        circularity = (0.5, None)  # min, max 'corners' in blob edge or None
         convexity = (0.5, None)  # min, max 'gaps' in blob edge or None
-        inertia = (0.4, None)  # min, max 'squashed-ness' or None
+        inertia = (0.5, None)  # min, max 'squashed-ness' or None
         min_area = 2 * math.pi * (Scan.MIN_BLOB_AREA_RADIUS * Scan.MIN_BLOB_AREA_RADIUS)
         max_area = 2 * math.pi * (Scan.MAX_BLOB_AREA_RADIUS * Scan.MAX_BLOB_AREA_RADIUS)
         area = (min_area, max_area)  # min, max area in pixels, or None
@@ -3963,9 +3971,9 @@ class Scan:
             # got too many - chuck shortest with biggest error
             shortest = None
             for x, segment in enumerate(segments):
-                if segment.bits == Scan.DIGITS[0]:
-                    # don't drop 000's
-                    continue
+                # if segment.bits == Scan.DIGITS[0]:
+                #     # don't drop 000's
+                #     continue
                 if shortest is None:
                     shortest = x
                     continue
@@ -4096,15 +4104,18 @@ class Scan:
             """
 
         def build_choice(start_x, choice, choices):
+            """ build a list of all combinations of the bit choices (up to some limit),
+                each choice is a list of segments and the number of choices at that segment position
+                """
             for x in range(start_x, Scan.NUM_SEGMENTS):
                 bit_list = bits[x]
                 if len(bit_list) > 1 and len(choices) < Scan.MAX_BIT_CHOICES:
                     # got choices - recurse for the others
                     for dx in range(1, len(bit_list)):
                         bit_choice = choice.copy()
-                        bit_choice[x] = bit_list[dx]
+                        bit_choice[x] = (bit_list[dx], len(bit_list))
                         choices = build_choice(x+1, bit_choice, choices)
-                choice[x] = bit_list[0]
+                choice[x] = (bit_list[0], len(bit_list))
             choices.append(choice)
             return choices
 
@@ -4115,17 +4126,21 @@ class Scan:
         results = []
         for choice in choices:
             code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
+            bit_doubt = 0
             for bit in range(Scan.NUM_SEGMENTS):
-                rings = choice[bit]
+                rings = choice[bit][0]
+                if choice[bit][1] > 1:
+                    bit_doubt += choice[bit][1] - 1
                 if rings is not None:
                     for ring in range(len(rings)):
                         sample = rings[ring]
                         code[ring][bit] = sample
             number, doubt, digits = self.decoder.unbuild(code)
-            results.append((number, doubt, digits, choice))
+            results.append((number, doubt + (min(bit_doubt, 99) / 100), digits, choice))
 
         # put into least doubt order with numbers before None's
-        results.sort(key=lambda r: (r[0] is None, r[1], r[0]))
+        # doubt has two parts: integer part is digits doubt, fractional part is bits doubt
+        results.sort(key=lambda r: (r[0] is None, int(r[1]), r[0]))
 
         best = 0
         best_number, best_doubt, best_digits, _ = results[best]
@@ -4137,7 +4152,7 @@ class Scan:
                 number, doubt, digits, _ = results[x]
                 if number is None:
                     break
-                if doubt != best_doubt:
+                if int(doubt) != int(best_doubt):
                     break
                 found = False
                 for choice in choices:
@@ -4174,7 +4189,7 @@ class Scan:
             segments = []
             size = int(max_x / Scan.NUM_SEGMENTS)
             for x, bits in enumerate(results[best][3]):
-                segments.append(Scan.Segment(x * size, bits, size))
+                segments.append(Scan.Segment(x * size, bits[0], size))
             grid = self._draw_segments(segments, max_x, max_y)
             self._unload(grid, '08-bits')
 
@@ -5290,15 +5305,15 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        # test.scan_codes(test_codes_folder)
-        # test.scan_media(test_media_folder)
+        test.scan_codes(test_codes_folder)
+        test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
-        test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
 
     except:
         traceback.print_exc()
