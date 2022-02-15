@@ -166,14 +166,15 @@ class Codec:
 
     def __init__(self, min_num, max_num):
         """ create the valid code set for a number in the range min_num..max_num,
+            the min_num cannot be zero,
             we create two arrays - one maps a number to its code and the other maps a code to its number.
             """
 
         self.code_range = int(math.pow(Codec.BASE, Codec.DIGITS_PER_NUM))
 
         # params
-        self.min_num = min_num  # minimum number we want to be able to encode
-        self.max_num = max_num  # maximum number we want to be able to encode
+        self.min_num = max(min_num, 1)  # minimum number we want to be able to encode (0 not allowed)
+        self.max_num = max(max_num, self.min_num)  # maximum number we want to be able to encode
 
         # build code tables
         self.codes = [None for _ in range(self.code_range)]  # set all invalid initially
@@ -268,7 +269,7 @@ class Codec:
         bad_doubt = False
         for digit in merged:
             doubt += digit[1]
-            if doubt > Codec.DOUBT_LIMIT:
+            if digit[1] > Codec.DOUBT_LIMIT:
                 # too much ambiguity
                 bad_doubt = True
         if bad_doubt:
@@ -1434,8 +1435,8 @@ class Scan:
     MIN_BLOB_SIZE = 6  # minimum blob size, in pixels, we want - NB: this is the 'diameter' of the detected blob
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance (in pixels) of each other are dropped
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything
-    THRESHOLD_START = 1/8  # where to start threshold calculation within image height
-    THRESHOLD_END = 6/8  # where to end threshold calculation within image height
+    THRESHOLD_START = 0  # where to start threshold calculation within image height
+    THRESHOLD_END = 5/8  # where to end threshold calculation within image height
     THRESHOLD_END_MIN = 0.8  # minimum threshold end as fraction of min image height (used if above is too small)
     THRESHOLD_RANGE = []  # ToDo: HACK-->[-1, +1]  # x offsets to include when calculating the threshold at x
     THRESHOLD_OFFSET = 1.08  # ToDo: HACK-->1.0  # fiddle with threshold for heuristic reasons, >1==raise threshold, <1==lower, 1==same
@@ -1462,7 +1463,7 @@ class Scan:
     NO_CHOICE_ERROR = 1  # a choice error of this is no error, i.e. a dead cert
     MAX_CHOICE_ERR_DIFF = int(0.1 * RATIO_QUANTA)  # 2nd choices ignored if err diff more than this
     MAX_CHOICE_ERR_DIFF_SQUARED = MAX_CHOICE_ERR_DIFF * MAX_CHOICE_ERR_DIFF
-    MAX_BIT_CHOICES = 1024  # max bit choices to explore when decoding bits to the associated number
+    MAX_BIT_CHOICES = 512  # max bit choices to allow/explore when decoding bits to the associated number
     # endregion
 
     # region Video modes image height...
@@ -1821,6 +1822,7 @@ class Scan:
         colour = MAX_LUMINANCE  # we want bright blobs, use MIN_LUMINANCE for dark blobs
 
         # find the blobs
+        # ToDo: Do a DIY blob detector? openCV somtimes gets the outer white ring not the inner
         blobs = self.transform.blobs(self.image, threshold, circularity, convexity, inertia, area, gaps, colour)
         blobs = list(blobs)
 
@@ -3622,7 +3624,6 @@ class Scan:
                         break
                 if is_dup:
                     continue
-                # ToDo: HACK causes too much identity change-->old_choices.append(new_choice)
             # pick the given bits choice
             for x, choice in enumerate(old_choices):
                 if choice.bits == bits:
@@ -4145,26 +4146,43 @@ class Scan:
         best = 0
         best_number, best_doubt, best_digits, _ = results[best]
         if best_number is not None:
-            # find the most frequent result with a similar doubt
-            # ToDo: use a doubt range not just equality?
+            # check for ambiguity,
+            # if we have more than one result with the same doubt and same count we cannot choose,
+            # so rather than give a potential 'false-positive' result we give nothing (which is number 000)
             choices = []
             for x in range(len(results)):
                 number, doubt, digits, _ = results[x]
                 if number is None:
                     break
                 if int(doubt) != int(best_doubt):
+                    # only want same doubt choices
                     break
                 found = False
                 for choice in choices:
                     if choice[0] == number:
+                        # another result with the same number and doubt
                         choice[1] += 1
                         found = True
                         break
                 if not found:
+                    # found another number with the same doubt
                     choices.append([number, 1, x])
             choices.sort(key=lambda c: c[1], reverse=True)
             best = choices[0][2]
             best_number, best_doubt, best_digits, _ = results[best]
+            if len(choices) > 1 and choices[0][1] == choices[1][1]:
+                # more than one choice with the same count, so ambiguous
+                if self.logging:
+                    self._log('decode: ambiguous best choice: number={}, doubt={}, digits={}'.
+                              format(best_number, best_doubt, best_digits))
+                best_number = 0 - best_number  # make -ve as a signal its ambiguous
+            elif len(results) >= Scan.MAX_BIT_CHOICES:
+                # too many results, treat as ambiguous
+                if self.logging:
+                    self._log('decode: too many results {} (limit is {}), '
+                              'ambiguous best choice: number={}, doubt={}, digits={}'.
+                              format(len(results), Scan.MAX_BIT_CHOICES, best_number, best_doubt, best_digits))
+                best_number = 0 - best_number  # make -ve as a signal its ambiguous
 
         if self.logging:
             show = len(results)
@@ -4334,7 +4352,10 @@ class Scan:
                 number = numbers[-1]
                 if number.number is None:
                     colour = Scan.PURPLE
-                    label = 'code is invalid ({})'.format(number.doubt)
+                    label = 'invalid ({})'.format(number.doubt)
+                elif number.number < 0:
+                    colour = Scan.RED
+                    label = 'ambiguous {} ({})'.format(0-number.number, number.doubt)
                 else:
                     colour = Scan.GREEN
                     label = 'code is {} ({})'.format(number.number, number.doubt)
@@ -5180,6 +5201,15 @@ class Test:
                             if num is None:
                                 actual_code = 'not-valid'
                                 prefix = ''
+                            elif num < 0:
+                                num = 0 - num
+                                actual_code = self.codec.encode(num)
+                                if actual_code is None:
+                                    actual_code = 'not-valid'
+                                else:
+                                    actual_code = 'code={}, digits={}'. \
+                                                  format(actual_code, self.codec.digits(actual_code))
+                                prefix = '**** AMBIGUOUS **** --> '
                             else:
                                 actual_code = self.codec.encode(num)
                                 if actual_code is None:
