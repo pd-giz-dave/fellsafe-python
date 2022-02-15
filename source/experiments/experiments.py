@@ -277,12 +277,11 @@ class Codec:
                     # got more than one 0 - this is a show stopper with a huge doubt
                     return None, Codec.MAX_DOUBT, digits
                 zero_at = idx
+                code = 0
+                doubt = digit[1]
                 for _ in range(Codec.DIGITS_PER_NUM):
                     idx = (idx - 1) % Codec.WORD
                     digit = merged[idx]
-                    if code is None:
-                        code = 0
-                        doubt = 0
                     code *= Codec.BASE
                     code += digit[0] - 1  # digit is in range 1..base, we want 0..base-1
                     doubt += digit[1]
@@ -1445,10 +1444,11 @@ class Scan:
     INNER_OFFSET = -1  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
     OUTER_OFFSET = +1  # move outer edge by this many pixels (to reduce effect of very narrow black ring)
     MIN_PULSE_LEAD = 2  # minimum pixels for a valid pulse lead (or tail) period, pulse ignored if less than this
-    MIN_PULSE_HEAD = 2  # minimum pixels for a valid pulse head period, pulse ignored if less than this
+    MIN_PULSE_HEAD = 1  # minimum pixels for a valid pulse head period, pulse ignored if less than this
     MIN_SEGMENT_LENGTH = 0.3  # min (relative) segment length, shorter segments are merged/dropped
     MAX_SEGMENT_LENGTH = 1.3  # max (relative) segment length, longer segments are split
     MIN_0_SEGMENT_LENGTH = 0.2  # 000's segments shorter than this are candidates for merging/dropping
+    MIN_SEGMENT_SAMPLES = 2  # minimum samples in a valid segment, segments of this or less are dropped
     DOMINANT_SEGMENT_RATIO = 3  # a segment this much bigger than its neighbour dominates it so its properties prevail
     RATIO_QUANTA = 99  # number of quanta in a ratio error, errors are in the range 1..RATIO_QUANTA+1
     NO_CHOICE_ERROR = 1  # a choice error of this is no error, i.e. a dead cert
@@ -3825,7 +3825,8 @@ class Scan:
                                                                 A(len)>B(len) and C(len)>B(len) and
                                                                 B(len)<some limit (the short limit)
               share B len with A and C, shortest first, drop B,
-              overlaps occur due to pixel bleeding in low resolution images
+              overlaps occur due to pixel bleeding in low resolution images,
+            also remove very small segments (they are noise)
             """
 
         def neighbour(start_x, increment):
@@ -3862,6 +3863,19 @@ class Scan:
                 if self._overlaps(right, segment) is None:
                     continue
                 # got an overlap
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    dropping {}'.format(segment))
+                segments[x] = None
+
+        if self.logging:
+            header = 'separate: removing very small segments:'
+        for x, segment in enumerate(segments):
+            if segment is None:
+                continue
+            if segment.samples <= Scan.MIN_SEGMENT_SAMPLES:
                 if self.logging:
                     if header is not None:
                         self._log(header)
@@ -4236,7 +4250,8 @@ class Scan:
             segments = self._separate(segments, max_x)
 
             # analyse segments to get the most likely bit sequences
-            bits, reason = self._analyse(segments, max_x, max_y)
+            outer_y = Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS  # y scale for drawing diagnostic images
+            bits, reason = self._analyse(segments, max_x, outer_y)
             if reason is not None:
                 # failed - this means some constraint was not met (its already been logged)
                 if self.save_images:
@@ -4245,7 +4260,7 @@ class Scan:
                 continue
 
             # decode the bits for the best result
-            result = self._decode_bits(bits, max_x, max_y)
+            result = self._decode_bits(bits, max_x, outer_y)
 
             targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, target, result))
 
@@ -5102,12 +5117,12 @@ class Test:
                     if not found[n]:
                         # this one is missing
                         num = numbers[n]
-                        expected = self.codec.encode(num)
-                        if expected is None:
+                        code = self.codec.encode(num)
+                        if code is None:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = '{}'.format(expected)
+                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
                         analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
@@ -5120,10 +5135,7 @@ class Test:
                         size = result[5]
                         expected = result[6]
                         bits = result[7]
-                        if doubt == 0:
-                            bits = ''
-                        else:
-                            bits = ', bits {}'.format(bits)
+                        bits = ', bits {}'.format(bits)
                         if found is not None:
                             if loop != 0:
                                 # don't want these in this loop
@@ -5279,13 +5291,14 @@ def verify():
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
-        test.scan_media(test_media_folder)
+        # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [444], 'test-code-444.png')
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
-        # test.scan(test_media_folder, [101, 102, 182, 247, 301, 424, 448, 500, 537, 565], 'photo-101-102-182-247-301-424-448-500-537-565-v1.jpg')
+        # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
+        test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
 
     except:
         traceback.print_exc()
