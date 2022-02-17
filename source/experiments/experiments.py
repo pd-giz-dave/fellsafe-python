@@ -105,8 +105,8 @@ class Codec:
         """
 
     # region constants...
-    DIGITS_PER_NUM = 4 # how many digits per encoded number
-    COPIES = 3  # number of copies in a code-word (thus 'bits' around a ring is DIGITS_PER_NUM * COPIES)
+    DIGITS_PER_NUM = 4  # how many digits per encoded number
+    COPIES = 3  # number of copies in a code-word (thus 'bits' around a ring is DIGITS_PER_NUM * COPIES), must be odd
     EDGES = 6  # min number of edges per rendered ring (to stop accidental solid rings looking like a blob)
     # the ratio is referring to the across rings pulse shape (lead:head:tail relative lengths)
     # base 6 encoding in 4 rings (yields 520 usable codes)
@@ -127,6 +127,8 @@ class Codec:
                   #1, 1, 1, 0     # ratio 1:3:2
                   [0, 1, 1, 0],   # ratio 2:2:2 digit 5
                   [1, 1, 1, 1]]   # ratio 1:4:1 digit 6
+    # encoding as a number (just used as a diagnostic visual aid) - maps digit to ring bit pattern
+    BITS_4 = [0, 1, 2, 4, 8, 6, 15]
     # these are the ratios for the above (1:1 index correspondence), each digit's ratios must sum to SPAN
     # its defined here to be close to the encoding table but its only used externally
     RATIOS_4 = [[6, 0, 0],  # digit 0
@@ -145,6 +147,8 @@ class Codec:
                   #1, 0, 1    # ratio 1:1:3 digit 4 (double pulse is truncated to first, so same as 0100)
                   [1, 1, 0],  # ratio 1:2:2 digit 5
                   [1, 1, 1]]  # ratio 1:3:1 digit 6
+    # encoding as a number (just used as a diagnostic visual aid) - maps digit to ring bit pattern
+    BITS_3 = [0, 1, 2, 3, 4, 6, 7]
     # these are the ratios for the above (1:1 index correspondence), each digit's ratios must sum to SPAN
     # its defined here to be close to the encoding table but its only used externally
     RATIOS_3 = [[5, 0, 0],  # digit 0
@@ -156,6 +160,7 @@ class Codec:
                 [1, 3, 1]]  # digit 6
     ENCODING = ENCODING_3
     RATIOS = RATIOS_3
+    BITS = BITS_3
     BASE = len(ENCODING) - 1  # number base of each digit (-1 to exclude the '0')
     RINGS = len(ENCODING[0])  # number of data rings to encode each digit in a code-block
     SPAN = RINGS + 2  # total span of the code including its margin black rings
@@ -232,11 +237,12 @@ class Codec:
     def unbuild(self, slices):
         """ given an array of N code-word rings with random alignment return the encoded number or None,
             each ring must be given as an array of bit values in bit number order,
-            returns the number (or None), the level of doubt and the decoded slice digits,
+            returns the number (or None), the level of doubt and the decoded slice digits (as bit patterns),
             """
 
-        # step 1 - decode slice digits
+        # step 1 - decode slice digits (and bits)
         digits = [[None for _ in range(Codec.COPIES)] for _ in range(Codec.WORD)]
+        bits = [[None for _ in range(Codec.COPIES)] for _ in range(Codec.WORD)]
         for digit in range(Codec.DIGITS):
             word = int(digit / Codec.WORD)
             bit = digit % Codec.WORD
@@ -246,6 +252,7 @@ class Codec:
             for idx, seq in enumerate(Codec.ENCODING):
                 if seq == code_slice:
                     digits[bit][word] = idx
+                    bits[bit][word] = Codec.BITS[idx]
                     break
 
         # step 2 - amalgamate digit copies into most likely with a doubt
@@ -264,28 +271,34 @@ class Codec:
             # possible doubt values are: 0==all copies the same, 1==1 different, 2+==2+ different
             merged[digit] = (counts[0][1], doubt)
 
-        # step 2B - calculate overall doubt
+        # step 3 - verify presence of a single 0, calculate overall doubt and build bits to return to caller
         doubt = 0
+        zeroes = 0
         bad_doubt = False
         for digit in merged:
             doubt += digit[1]
             if digit[1] > Codec.DOUBT_LIMIT:
                 # too much ambiguity
                 bad_doubt = True
+            if digit[0] == 0:
+                zeroes += 1
+        if zeroes > 1:
+            # too many zeroes - this is a show stopper
+            doubt += zeroes * Codec.COPIES
+            bad_doubt = True
+        elif zeroes < 1:
+            # no zero - this is a show stopper
+            doubt += Codec.DIGITS_PER_NUM + 1
+            bad_doubt = True
         if bad_doubt:
             # too much ambiguity - this is a show stopper
-            return None, doubt, digits
+            return None, doubt, bits
 
-        # step 3 - look for the '0' and extract the code
+        # step 4 - look for the '0' and extract the code
         code = None
         zero_at = None
         for idx, digit in enumerate(merged):
             if digit[0] == 0:
-                if zero_at is not None:
-                    # got more than one 0 - this is a show stopper
-                    if doubt == 0:
-                        doubt = Codec.DIGITS_PER_NUM
-                    return None, doubt, digits
                 zero_at = idx
                 code = 0
                 for _ in range(Codec.DIGITS_PER_NUM):
@@ -294,25 +307,33 @@ class Codec:
                     code *= Codec.BASE
                     code += digit[0] - 1  # digit is in range 1..base, we want 0..base-1
         if zero_at is None:
-            # this means we did not find a 0 - this is a show stopper
-            return None, doubt, digits
+            # this should not be possible due to step 3 loop above
+            return None, doubt, bits
         else:
-            # re-align the digits so the 0 is first (this is just a visual aid)
-            aligned_digits = []
+            # re-align the bits so the 0 is first (this is just a visual aid)
+            aligned_bits = []
             idx = zero_at
             for _ in range(Codec.DIGITS_PER_NUM + 1):
-                aligned_digits.append(digits[idx])
+                aligned_bits.append(bits[idx])
                 idx = (idx + 1) % Codec.WORD
-            digits = aligned_digits
+            bits = aligned_bits
 
-        # step 4 - lookup number
+        # step 5 - lookup number
         number = self.decode(code)
         if number is None:
             if doubt == 0:
-                doubt = Codec.DIGITS_PER_NUM
+                doubt = Codec.DIGITS_PER_NUM * Codec.COPIES
 
         # that's it
-        return number, doubt, digits
+        return number, doubt, bits
+
+    def bits(self, code):
+        """ given a code return its bit pattern across the rings """
+        digits = self.digits(code)
+        bits = []
+        for digit in digits:
+            bits.append(Codec.BITS[digit])
+        return bits
 
     def digits(self, code):
         """ given a code return the digits for that code """
@@ -1427,19 +1448,20 @@ class Scan:
     # a 'cell' is the intersection of a segment and a ring
     # these constraints set minimums that override the cells() property given to Scan
     MIN_PIXELS_PER_CELL = 4  # min pixels making up a cell length
-    MIN_PIXELS_PER_RING = 4  # min pixels making up a ring width
+    MIN_PIXELS_PER_RING = 6  # min pixels making up a ring width
 
     # region Tuning constants...
     MIN_BLOB_AREA_RADIUS = 2  # min blob radius we want (any smaller and get too many false targets)
     MAX_BLOB_AREA_RADIUS = 80  # max blob radius we want (any bigger means they are too close to the camera!)
-    MIN_BLOB_SIZE = 6  # minimum blob size, in pixels, we want - NB: this is the 'diameter' of the detected blob
+    MIN_BLOB_SIZE = 5  # minimum blob size, in pixels, we want - NB: this is the 'diameter' of the detected blob
     MIN_BLOB_SEPARATION = 5  # smallest blob within this distance (in pixels) of each other are dropped
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything
+    MAX_BLOB_OVER_SIZE = 2  # limit to how oversize an initial blob detection is allowed to be before re-processing
     THRESHOLD_START = 0  # where to start threshold calculation within image height
     THRESHOLD_END = 5/8  # where to end threshold calculation within image height
     THRESHOLD_END_MIN = 0.8  # minimum threshold end as fraction of min image height (used if above is too small)
-    THRESHOLD_RANGE = []  # ToDo: HACK-->[-1, +1]  # x offsets to include when calculating the threshold at x
-    THRESHOLD_OFFSET = 1.08  # ToDo: HACK-->1.0  # fiddle with threshold for heuristic reasons, >1==raise threshold, <1==lower, 1==same
+    THRESHOLD_RANGE = []  # x offsets to include when calculating the threshold at x
+    THRESHOLD_OFFSET = 1.08  # fiddle with threshold for heuristic reasons, >1==raise threshold, <1==lower, 1==same
     MAX_NEIGHBOUR_ANGLE_TAN = 0.6  # ~=30 degrees, tan of the max acceptable angle when joining edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max y jump allowed when following an edge
     MAX_NEIGHBOUR_HEIGHT_GAP_SQUARED = MAX_NEIGHBOUR_HEIGHT_GAP * MAX_NEIGHBOUR_HEIGHT_GAP
@@ -1450,8 +1472,8 @@ class Scan:
     MAX_EDGE_HEIGHT_JUMP = 2  # max jump in y, in pixels, along an edge before smoothing is triggered
     INNER_OUTER_MARGIN = 1.7  # minimum margin between the inner edge and the outer edge
     MAX_INNER_OVERLAP = 0.2  # max num of samples of outer edge fragment allowed to be inside the inner edge
-    INNER_OFFSET = 0  # ToDo: HACK-->-1  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
-    OUTER_OFFSET = +1  # move outer edge by this many pixels (to reduce effect of very narrow black ring)
+    INNER_OFFSET = 0  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
+    OUTER_OFFSET = 0  # move outer edge by this many pixels (to reduce effect of very narrow black ring)
     MIN_PULSE_LEAD = 2  # minimum pixels for a valid pulse lead (or tail) period, pulse ignored if less than this
     MIN_PULSE_HEAD = 1  # minimum pixels for a valid pulse head period, pulse ignored if less than this
     MIN_SEGMENT_LENGTH = 0.3  # min (relative) segment length, shorter segments are merged/dropped
@@ -1459,10 +1481,11 @@ class Scan:
     MIN_0_SEGMENT_LENGTH = 0.2  # 000's segments shorter than this are candidates for merging/dropping
     MIN_SEGMENT_SAMPLES = 2  # minimum samples in a valid segment, segments of this or less are dropped
     DOMINANT_SEGMENT_RATIO = 3  # a segment this much bigger than its neighbour dominates it so its properties prevail
-    RATIO_QUANTA = 99  # number of quanta in a ratio error, errors are in the range 1..RATIO_QUANTA+1
-    NO_CHOICE_ERROR = 1  # a choice error of this is no error, i.e. a dead cert
-    MAX_CHOICE_ERR_DIFF = int(0.1 * RATIO_QUANTA)  # 2nd choices ignored if err diff more than this
+    RATIO_QUANTA = 99  # number of quanta in a ratio error, errors are in the range 0..RATIO_QUANTA
+    NO_CHOICE_ERROR = 0  # a choice error of this is no error, i.e. a dead cert
+    MAX_CHOICE_ERR_DIFF = int(0.05 * (RATIO_QUANTA + 1))  # 2nd choices ignored if err diff more than this
     MAX_CHOICE_ERR_DIFF_SQUARED = MAX_CHOICE_ERR_DIFF * MAX_CHOICE_ERR_DIFF
+    MAX_PULSE_ERROR = int(1 * (RATIO_QUANTA + 1))  # max tolerable error to keep a pulse
     MAX_BIT_CHOICES = 512  # max bit choices to allow/explore when decoding bits to the associated number
     # endregion
 
@@ -1491,6 +1514,20 @@ class Scan:
     RATIOS = Codec.RATIOS
     DIGITS = Codec.ENCODING
     SPAN = Codec.SPAN  # total span of the target rings
+    # endregion
+
+    # region Pulse size/position 'nudges'...
+    # when measuring pulses we try several 'nudge' possibility (+/- 1 on lead, head, tail sizes)
+    # and pick the best this mitigates against low resolution effects where true edges are between
+    # pixels or the (noisy/blurry) image is in the process of migrating from one pulse to another
+    # a 'nudge' is a lead+head+tail offset to apply when calculating pulse ratios
+    PULSE_NUDGES = [[0, 0, 0],    # leave as is
+                    [-1, 0, +1],  # move head 'up' 1 pixel
+                    [+1, 0, -1],  # move head 'down' 1 pixel
+                    [-1, +1, 0],  # make head fatter in up direction
+                    [0, +1, -1],  # make head fatter in down direction
+                    [0, -1, +1],  # make head thinner in up direction
+                    [+1, -1, 0]]  # make head thinner in down direction
     # endregion
 
     # region Segment transition types...
@@ -1565,7 +1602,7 @@ class Scan:
 
         def ratio(self, lead_delta=0, head_delta=0, tail_delta=0):
             """ return the ratios that represent this pulse,
-                the ..._delta parameters added to the relevant component first,
+                the ..._delta parameters are added to the relevant component first,
                 this allows for the determination of a ratio with 'jitter' on the pulse edges
                 """
             # deal with special cases
@@ -1580,20 +1617,19 @@ class Scan:
                 return [Scan.SPAN, 0, 0]
             # apply deltas unless they make us too small
             lead = self.lead + lead_delta
-            if lead < 2:
-                lead -= lead_delta
-                lead_delta = 0
+            if lead < 1:
+                # can't go that small
+                return []
             head = self.head + head_delta
-            if head < 2:
-                head -= head_delta
-                head_delta = 0
+            if head < 1:
+                # can't go that small
+                return []
             tail = self.tail + tail_delta
-            if tail < 2:
-                tail -= tail_delta
-                tail_delta = 0
+            if tail < 1:
+                # can't go that small
+                return []
             # calculate the ratios
-            span = self.lead + self.head + self.tail  # this represents the entire pulse span, it cannot be 0
-            span += lead_delta + head_delta + tail_delta
+            span = lead + head + tail  # this represents the entire pulse span, it cannot be 0
             span /= Scan.SPAN  # scale so units of result are the same as Scan.RATIOS
             lead /= span
             head /= span
@@ -1611,16 +1647,11 @@ class Scan:
                    format(self.start, self.lead, self.head, self.tail, ratio, bits)
 
     class Bits:
-        """ this encapsulates a bit sequence for a digit and its error,
-            NB: error() returns a harmonic mean calculated as samples/errors
-            where 'errors' is an accumulator of samples/error-value,
-            the relations error==samples/errors and errors==samples/error always hold
-            (apart from quantisation issues)
-            """
+        """ this encapsulates a bit sequence for a digit and its error """
 
         def __init__(self, bits, error, samples=1, actual=None, ideal=None):
             self.bits = bits  # the bits across the data rings
-            self.errors = samples / error  # the harmonic mean error accumulator
+            self.errors = error  # the error accumulator for these samples
             self.samples = samples  # how many of these there are before a change
             self.actual = actual  # actual pulse head, top, tail measured
             self.ideal = ideal  # the ideal head, top, tail for these bits
@@ -1628,14 +1659,11 @@ class Scan:
         def extend(self, samples, error):
             """ extend the bits by the given number of samples with the given error """
             self.samples += samples
-            self.errors += samples / error  # the error given is assumed to be the inverse of some measure
+            self.errors += error
 
         def error(self):
-            """ get the harmonic mean error for the bits """
-            if self.errors > 0:
-                return int(round(self.samples / self.errors))  # get harmonic mean as the error
-            else:
-                return 0
+            """ get the mean error for the bits """
+            return int(round(self.errors / self.samples))
 
         def format(self, short=False):
             if short or self.actual is None:
@@ -1652,18 +1680,13 @@ class Scan:
             return self.format()
 
     class Segment:
-        """ a Segment describes a contiguous, in angle, sequence of Pulses,
-            NB: error() returns a harmonic mean calculated as samples/errors
-            where 'errors' is an accumulator of samples/error-value,
-            the relations error==samples/errors and errors==samples/error always hold
-            (apart from quantisation issues)
-            """
+        """ a Segment describes a contiguous, in angle, sequence of Bits and its choices """
 
-        def __init__(self, start, bits, samples=1, error=1, choices=None, ideal=None):
+        def __init__(self, start, bits, samples=1, error=0, choices=None, ideal=None):
             self.start = start  # the start x of this sequence
             self.bits = bits  # the bit pattern for this sequence
             self.samples = samples  # how many of them we have
-            self.errors = samples / error  # the harmonic mean error accumulator
+            self.errors = error  # the error accumulator for the given samples
             self.choices = choices  # if there are bits choices, these are they
             self.ideal = ideal  # used to calculate the relative size of the segment, <1==small, >1==big
 
@@ -1675,12 +1698,12 @@ class Scan:
                 return self.samples / self.ideal
 
         def extend(self, samples, error):
-            """ extend the segment and its choices by the given number of samples with the given error """
+            """ extend the segment by the given number of samples with the given error """
             self.samples += samples
-            self.errors += samples / error
-            if self.choices is not None:
-                for choice in self.choices:
-                    choice.extend(samples, error)
+            self.errors += error
+            # if self.choices is not None:
+            #     for choice in self.choices:
+            #         choice.extend(samples, error)
 
         def replace(self, bits=None, samples=None, error=None):
             """ replace the given properties if they are not None """
@@ -1690,15 +1713,11 @@ class Scan:
                 # NB: if samples are replaced, error must be too
                 self.samples = samples
             if error is not None:
-                self.errors = self.samples / error
+                self.errors = error
 
         def error(self):
-            """ get the harmonic mean error for the segment """
-            if self.errors > 0:
-                err = max(int(round(self.samples / self.errors)), 1)  # get harmonic mean as the error
-            else:
-                err = 0
-            return err
+            """ get the mean error for the segment """
+            return int(round(self.errors / self.samples))
 
         def __str__(self):
             if self.choices is None:
@@ -1718,12 +1737,11 @@ class Scan:
     class Target:
         """ structure to hold detected target information """
 
-        def __init__(self, centre_x, centre_y, blob_size, target_size, image, result):
+        def __init__(self, centre_x, centre_y, blob_size, target_size, result):
             self.centre_x = centre_x  # x co-ord of target in original image
             self.centre_y = centre_y  # y co-ord of target in original image
             self.blob_size = blob_size  # blob size originally detected by the blob detector
             self.target_size = target_size  # target size scaled to the original image (==outer edge average Y)
-            self.image = image  # the image of the target(s)
             self.result = result  # the number, doubt and digits of the target
 
     class Reject:
@@ -2692,6 +2710,10 @@ class Scan:
                               format(e + 1, len(full_edges), edge[0]))
                     log_edge(edge[1])
 
+            if len(full_edges) == 0:
+                # no edges detected!
+                return [None for _ in range(max_x)], 'no edges'
+
             # extrapolate across any remaining gaps in the longest edge
             composed, reason = extrapolate(full_edges[0][1])
             if reason is not None:
@@ -2723,7 +2745,7 @@ class Scan:
         falling_edges, rising_edges = edges
 
         # make the inner edge first, this tends to be more reliably detected
-        inner, inner_fail = compose(falling_edges, Scan.FALLING, Scan.INNER_OFFSET)  # smoothing the inner edge is not so critical
+        inner, inner_fail = compose(falling_edges, Scan.FALLING, Scan.INNER_OFFSET)
         if self.logging:
             self._log('extent: inner (offset={}) (fail={})'.format(Scan.INNER_OFFSET, inner_fail))
             log_edge(inner)
@@ -2760,13 +2782,63 @@ class Scan:
             outer_fail = 'no outer'
         else:
             # make the outer edge from what is left and smooth it (it typically jumps around)
-            outer, outer_fail = compose(rising_edges, Scan.RISING, Scan.OUTER_OFFSET)  # smoothing the outer edge is important
+            outer, outer_fail = compose(rising_edges, Scan.RISING, Scan.OUTER_OFFSET)
 
         if self.logging:
             self._log('extent: outer (offset={}) (fail={})'.format(Scan.OUTER_OFFSET, outer_fail))
             log_edge(outer)
 
         return inner, outer, inner_fail, outer_fail
+
+    def _identify(self, blob_size):
+        """ identify the target in the current image with the given blob size (its diameter),
+            the process is done in two passes, pass one uses the blob_size as given,
+            the extent discovered from that is then used to determine a more accurate
+            blob_size and the process repeated,
+            this two pass process is an attempt to overcome the tendency of the openCV blob
+            detector finding a blob that is too big, this prejudices our pulse detection within
+            the inner and outer edges due to inaccurate threshold levels created by considering
+            too much of the image
+            """
+
+        while True:
+            # do the polar to cartesian projection
+            limit_radius = self._radius(self.centre_x, self.centre_y, blob_size)
+            target, stretch_factor = self._project(self.centre_x, self.centre_y, limit_radius)
+            max_x, max_y = target.size()
+
+            # do the edge detection
+            buckets = self._threshold(target)
+            slices = self._slices(buckets)
+            edges = self._edges(slices, max_x, max_y)
+            extent = self._extent(edges, max_x, max_y)
+
+            if self.save_images:
+                plot = self._draw_edges(edges, extent, target)
+                self._unload(plot, '05-edges')
+
+            # see if we need to do it all over again
+            if extent[2] is None and extent[3] is None:
+                # we found both edges, so worth looking deeper
+                max_outer_y = max(filter(lambda y: y is not None, extent[1]))  # this represents all the target rings except the outer white
+                ring_size = max_outer_y / (Scan.NUM_RINGS - 1)
+                expected_blob_size = ring_size * 4  # expected blob size given our detected ring size (2 rings diameter)
+                ratio = blob_size / expected_blob_size
+                if ratio > Scan.MAX_BLOB_OVER_SIZE:
+                    # the openCV blob is too big, do it all again with our better estimate
+                    if self.logging:
+                        self._log('identify: initial blob too big ({:.2f}), re-doing with {:.2f}'
+                                  ' (ratio is {:.2f}, limit is {:.2f})'.
+                                  format(blob_size, expected_blob_size, ratio, Scan.MAX_BLOB_OVER_SIZE))
+                    blob_size = max(expected_blob_size / Scan.BLOB_RADIUS_STRETCH, Scan.MIN_BLOB_SIZE)
+                    continue
+                else:
+                    break
+            else:
+                # failed to find an edge
+                break
+
+        return max_x, max_y, stretch_factor, buckets, slices, extent
 
     def _constrain(self, half_pulses: List[List[Pulse]], edges) -> List[List[Pulse]]:
         """ remove half-pulses that are not within the given (inner and outer) edges,
@@ -3316,7 +3388,7 @@ class Scan:
 
         def error(actual, ideal):
             """ calculate an error between the actual pulse part ratios and the ideal,
-                we want a number that is in the range 1..N where 1 is no error and N
+                we want a number that is in the range 0..N where 0 is no error and N
                 is a huge error, and quantised such that changes in the error mean the
                 target has changed significantly
                 """
@@ -3327,14 +3399,13 @@ class Scan:
             if ideal > 0:
                 err = diff / ideal
             else:
-                # actual needs to be 0 too, anything else is a big error
+                # ideal is 0, actual needs to be 0 too, anything else is a big error
                 if actual > 0:
                     err = 1
                 else:
                     err = 0
-            # err is now in range 0..1
+            # err is now in range 0..1 (0==perfect, 1==utter crap)
             err *= Scan.RATIO_QUANTA  # 0..N
-            err = int(err+1)  # quantised to 1..N
             return err
 
         # get the most likely bits
@@ -3344,42 +3415,32 @@ class Scan:
             pulse.bits = []
             done = False
             for idx, ideal in enumerate(Scan.RATIOS):
-                # we try every 'nudge' possibility (+/- 1 on lead, head, tail sizes) and pick the best
-                # this mitigates against low resolution effects where true edges are between pixels or
-                # the (noisy/blurry) image is in the process of migrating from one pulse to another
                 options = []
-                for lead_delta in (0, -1, +1):
-                    for head_delta in (0, -1, +1):
-                        for tail_delta in (0, -1, +1):
-                            actual = pulse.ratio(lead_delta, head_delta, tail_delta)
-                            err = 0
-                            for part in range(len(ideal)):
-                                err += error(actual[part], ideal[part])
-                            err /= len(ideal)
-                            options.append((int(err), actual))
-                            if int(err) == 1:  # NB: 1 is our error offset, 1==no error
-                                # got an exact match, so no point looking any further
-                                done = True
-                                break
-                        if done:
-                            break
-                    if done:
-                        break
+                for lead_delta, head_delta, tail_delta in Scan.PULSE_NUDGES:
+                    actual = pulse.ratio(lead_delta, head_delta, tail_delta)
+                    if len(actual) != len(ideal):
+                        # not a valid nudge
+                        continue
+                    err = 0
+                    for part in range(len(ideal)):
+                        err += error(actual[part], ideal[part])
+                    err /= len(ideal)
+                    options.append((err, actual))
                 if len(options) > 1:
-                    options.sort(key=lambda o: o[0])  # put into least error order
+                    options.sort(key=lambda o: int(o[0]))  # put into least error order
                 pulse.bits.append(Scan.Bits(Scan.DIGITS[idx], options[0][0], actual=options[0][1], ideal=ideal))
                 if done:
                     break
-            pulse.bits.sort(key=lambda b: b.error())  # put into last error order
+            pulse.bits.sort(key=lambda b: b.error())  # put into least error order
             if pulse.bits[0].error() == Scan.NO_CHOICE_ERROR:
                 # got an exact match, so chuck the rest
                 pulse.bits = [pulse.bits[0]]
         if self.logging:
             self._log('extract: bits and their errors:')
             for x, pulse in enumerate(pulses):
-                if pulse is None:
+                if pulse is None or len(pulse.bits) == 0:
                     continue
-                elif len(pulse.bits) <= 1:
+                elif len(pulse.bits) == 1:
                     self._log('    {}: {}'.format(x, pulse.bits[0]))
                 else:
                     self._log('    {}: {} options:'.format(x, len(pulse.bits)))
@@ -3449,7 +3510,7 @@ class Scan:
                         if not in_l:
                             left_chosen.append(r)
                     # put back into least error order
-                    left_chosen.sort(key=lambda b: b.error())  # ToDo: is this necessary?
+                    left_chosen.sort(key=lambda b: b.error())
                     chosen[x] = left_chosen
                 resolutions += len(this_pulse.bits) - len(chosen[x])
             elif len(this_choices) > 0:
@@ -3512,16 +3573,16 @@ class Scan:
         for x, bits_list in enumerate(chosen):
             if bits_list is None:
                 pulse_bits = None  # this is the nothing here signal
-                pulse_error = 1  # error irrelevant when no bits but must not be 0
+                pulse_error = Scan.NO_CHOICE_ERROR  # error irrelevant when no bits
                 pulse_choices = None
             elif len(bits_list) > 1:
                 # got choices
                 pulse_bits = bits_list[0].bits
-                pulse_error = bits_list[0].error()
+                pulse_error = bits_list[0].errors
                 pulse_choices = bits_list[1:]  # this is the choices signal
             else:
                 pulse_bits = bits_list[0].bits
-                pulse_error = bits_list[0].error()
+                pulse_error = bits_list[0].errors
                 pulse_choices = None
             if len(segments) == 0:
                 # first one, start a sequence
@@ -3541,8 +3602,25 @@ class Scan:
                             segments[0].choices, segments[-1].choices,
                             segments[0].error(), segments[-1].error()):
                 # got a wrapping segment
-                segments[-1].extend(segments[0].samples, segments[0].error())
+                segments[-1].extend(segments[0].samples, segments[0].errors)
                 del segments[0]
+
+        # drop segment bits with big errors
+        if self.logging:
+            header = 'segments: dropping segment bits with excessive error:'
+        for x, segment in enumerate(segments):
+            if segment.error() > Scan.MAX_PULSE_ERROR:
+                # these as too ambiguous
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    dropping {}'.format(segment))
+                if segment.choices is None:
+                    segment.choices = []
+                segment.choices.insert(0, Scan.Bits(segment.bits, segment.errors, segment.samples))
+                segment.bits = None  # NB: cannot use replace() when replacing with None
+                segment.errors = Scan.NO_CHOICE_ERROR
 
         if self.logging:
             self._log('segments: {} segments (ideal segment length={}):'.format(len(segments), ideal_length))
@@ -3627,7 +3705,7 @@ class Scan:
             # pick the given bits choice
             for x, choice in enumerate(old_choices):
                 if choice.bits == bits:
-                    error = choice.error()  # ToDo: this is a distortion but do we care here?
+                    error = segment.errors + choice.errors
                     segment.replace(bits=bits, samples=samples, error=error)
                     del old_choices[x]
                     break
@@ -3783,43 +3861,43 @@ class Scan:
         if self.logging and updates > 0:
             log('combined matching choices')
 
-        # combine 000 abutting choices
-        if self.logging:
-            header = 'combine: combine 000 abutting choices:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if not can_merge(segment, right):
-                    continue
-                if segment.bits == Scan.DIGITS[0]:
-                    if segment.size() > right.size() and right.size() < Scan.MIN_SEGMENT_LENGTH:
-                        # merge small right segment into this segment
-                        merge(segment, right, Scan.DIGITS[0])
-                        segments[right_x] = None
-                        changes = True
-                        if self.logging:
-                            self._log('        dropping {}'.format(right))
-                elif right.bits == Scan.DIGITS[0]:
-                    if right.size() > segment.size() and segment.size() < Scan.MIN_SEGMENT_LENGTH:
-                        # merge small segment into the bigger right segment
-                        merge(right, segment, Scan.DIGITS[0], segment.samples)
-                        segments[x] = None
-                        changes = True
-                        if self.logging:
-                            self._log('        dropping {}'.format(segment))
-                if changes:
-                    updates += 1
-                    break
-        if self.logging:
-            log('combined 000 abutting choices')
+        # # combine 000 abutting choices
+        # if self.logging:
+        #     header = 'combine: combine 000 abutting choices:'
+        # updates = 0
+        # changes = True
+        # while changes:
+        #     changes = False
+        #     for x, segment in enumerate(segments):
+        #         if segment is None:
+        #             continue
+        #         right_x = neighbour(x, +1)
+        #         if right_x is None:
+        #             continue
+        #         right = segments[right_x]
+        #         if not can_merge(segment, right):
+        #             continue
+        #         if segment.bits == Scan.DIGITS[0]:
+        #             if segment.size() > right.size() and right.size() < Scan.MIN_SEGMENT_LENGTH:
+        #                 # merge small right segment into this segment
+        #                 merge(segment, right, Scan.DIGITS[0])
+        #                 segments[right_x] = None
+        #                 changes = True
+        #                 if self.logging:
+        #                     self._log('        dropping {}'.format(right))
+        #         elif right.bits == Scan.DIGITS[0]:
+        #             if right.size() > segment.size() and segment.size() < Scan.MIN_SEGMENT_LENGTH:
+        #                 # merge small segment into the bigger right segment
+        #                 merge(right, segment, Scan.DIGITS[0], segment.samples)
+        #                 segments[x] = None
+        #                 changes = True
+        #                 if self.logging:
+        #                     self._log('        dropping {}'.format(segment))
+        #         if changes:
+        #             updates += 1
+        #             break
+        # if self.logging:
+        #     log('combined 000 abutting choices')
 
         # remove our dropped segments
         for x in range(len(segments)-1, -1, -1):
@@ -4173,14 +4251,14 @@ class Scan:
             if len(choices) > 1 and choices[0][1] == choices[1][1]:
                 # more than one choice with the same count, so ambiguous
                 if self.logging:
-                    self._log('decode: ambiguous best choice: number={}, doubt={}, digits={}'.
+                    self._log('decode: ambiguous best choice: number={}, doubt={}, bits={}'.
                               format(best_number, best_doubt, best_digits))
                 best_number = 0 - best_number  # make -ve as a signal its ambiguous
             elif len(results) >= Scan.MAX_BIT_CHOICES:
                 # too many results, treat as ambiguous
                 if self.logging:
                     self._log('decode: too many results {} (limit is {}), '
-                              'ambiguous best choice: number={}, doubt={}, digits={}'.
+                              'ambiguous best choice: number={}, doubt={}, bits={}'.
                               format(len(results), Scan.MAX_BIT_CHOICES, best_number, best_doubt, best_digits))
                 best_number = 0 - best_number  # make -ve as a signal its ambiguous
 
@@ -4197,7 +4275,7 @@ class Scan:
                           format(show, best, Scan.MAX_BIT_CHOICES))
             for r in range(show):
                 result = results[r]
-                self._log('    number={}, doubt={}, digits={}'.format(result[0], result[1], result[2]))
+                self._log('    number={}, doubt={}, bits={}'.format(result[0], result[1], result[2]))
                 if r == best:
                     self._log('        best result bits:')
                     for x, bits in enumerate(result[3]):
@@ -4236,20 +4314,8 @@ class Scan:
                 self._log('***************************')
                 self._log('processing candidate target')
 
-            # do the polar to cartesian projection
-            limit_radius = self._radius(self.centre_x, self.centre_y, blob.size)
-            target, stretch_factor = self._project(self.centre_x, self.centre_y, limit_radius)
-            max_x, max_y = target.size()
-
-            # do the edge detection
-            buckets = self._threshold(target)
-            slices = self._slices(buckets)
-            edges = self._edges(slices, max_x, max_y)
-            extent = self._extent(edges, max_x, max_y)
-
-            if self.save_images:
-                plot = self._draw_edges(edges, extent, target)
-                self._unload(plot, '05-edges')
+            # find the extent of our target
+            max_x, max_y, stretch_factor, buckets, slices, extent = self._identify(blob.size)
 
             if extent[2] is not None or extent[3] is not None:
                 # failed - this means we did not find a suitable inner and/or outer edge
@@ -4259,7 +4325,7 @@ class Scan:
                         reason = extent[2]
                     else:
                         reason = extent[3]
-                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*2, reason))
+                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*4, reason))
                 continue
 
             # do the pulse detection
@@ -4295,7 +4361,7 @@ class Scan:
             # decode the bits for the best result
             result = self._decode_bits(bits, max_x, outer_y)
 
-            targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, target, result))
+            targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, result))
 
         if self.save_images:
             # label all the blobs we processed that were rejected
@@ -4342,7 +4408,6 @@ class Scan:
             self.centre_y = target.centre_y    # ..
             blob_size = target.blob_size
             target_size = target.target_size
-            image = target.image
             number, doubt, digits = target.result
 
             # add this result
@@ -5145,7 +5210,7 @@ class Test:
                             found[n] = True
                             found_num = num
                             code = self.codec.encode(num)
-                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
+                            expected = 'code={}, bits={}'.format(code, self.codec.bits(code))
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, bits])
                 # create dummy result for those not found
@@ -5158,7 +5223,7 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
+                            expected = 'code={}, bits={}'.format(code, self.codec.bits(code))
                         analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
@@ -5177,7 +5242,7 @@ class Test:
                                 # don't want these in this loop
                                 continue
                             # got what we are looking for
-                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {}{}'.
+                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}{}'.
                                       format(num, expected, centre_x, centre_y, size, doubt, bits))
                             continue
                         if expected is not None:
@@ -5207,8 +5272,8 @@ class Test:
                                 if actual_code is None:
                                     actual_code = 'not-valid'
                                 else:
-                                    actual_code = 'code={}, digits={}'. \
-                                                  format(actual_code, self.codec.digits(actual_code))
+                                    actual_code = 'code={}, bits={}'. \
+                                                  format(actual_code, self.codec.bits(actual_code))
                                 prefix = '**** AMBIGUOUS **** --> '
                             else:
                                 actual_code = self.codec.encode(num)
@@ -5216,10 +5281,10 @@ class Test:
                                     actual_code = 'not-valid'
                                     prefix = ''
                                 else:
-                                    actual_code = 'code={}, digits={}'.\
-                                                  format(actual_code, self.codec.digits(actual_code))
+                                    actual_code = 'code={}, bits={}'.\
+                                                  format(actual_code, self.codec.bits(actual_code))
                                     prefix = '**** UNEXPECTED **** ---> '
-                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {}{}'.
+                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}{}'.
                                       format(prefix, num, actual_code, centre_x, centre_y, size, doubt, bits))
                             continue
                 if len(results) == 0:
@@ -5335,7 +5400,7 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        test.scan_codes(test_codes_folder)
+        # test.scan_codes(test_codes_folder)
         test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
@@ -5343,7 +5408,7 @@ def verify():
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
 
     except:
         traceback.print_exc()
