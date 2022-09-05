@@ -3,12 +3,12 @@ import cv2
 import numpy as np
 
 # Read image
-orig = cv2.imread("_photo-365-oblique_756x401y-flat.png", cv2.IMREAD_GRAYSCALE)
+orig = cv2.imread("/home/dave/precious/fellsafe/fellsafe-image/media/photo-332-222-555-800-574-371-757-611-620-132-mid.jpg", cv2.IMREAD_GRAYSCALE)
 
 # Downsize it
 width, height = orig.shape
 aspect_ratio = width / height
-new_width = 1024
+new_width = 2048
 new_height = int(new_width * aspect_ratio)
 shrunk = cv2.resize(orig, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
@@ -25,16 +25,16 @@ params = cv2.SimpleBlobDetector_Params()
 # Change thresholds
 params.minThreshold = 0 + 32
 params.maxThreshold = 256 - 32
-params.thresholdStep = 2
+params.thresholdStep = 32
 
 # Filter by Area.
 params.filterByArea = True
-params.minArea = 100
-params.maxArea = 10000
+params.minArea = 10
+params.maxArea = 1000
 
 # Filter by Circularity
 params.filterByCircularity = False
-params.minCircularity = 0.8
+params.minCircularity = 0.7
 
 # Filter by Convexity
 params.filterByConvexity = False

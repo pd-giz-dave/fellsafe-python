@@ -3,8 +3,10 @@ import glob
 import pathlib
 import shutil
 
-import cv2
+import contours
 import numpy as np
+import cv2
+# import matplotlib.pyplot as plt
 import rand
 import math
 import traceback
@@ -68,15 +70,22 @@ OPAQUE = MAX_LUMINANCE
     """
 
 
+def nstr(number, fmt='.2f'):
+    """ given a number that may be None, return an appropriate string """
+    if number is None:
+        return 'None'
+    else:
+        fmt = '{:' + fmt + '}'
+        return fmt.format(number)
+
+
 def vstr(vector, fmt='.2f', open='[', close=']'):
     """ given a list of numbers return a string representing them """
+    if vector is None:
+        return 'None'
     result = ''
-    fmt = ',{:'+fmt+'}'
     for pt in vector:
-        if pt is None:
-            result += ',None'
-        else:
-            result += fmt.format(pt)
+        result += ',' + nstr(pt)
     return open + result[1:] + close
 
 
@@ -151,13 +160,13 @@ class Codec:
     BITS_3 = [0, 1, 2, 3, 4, 6, 7]
     # these are the ratios for the above (1:1 index correspondence), each digit's ratios must sum to SPAN
     # its defined here to be close to the encoding table but its only used externally
-    RATIOS_3 = [[5, 0, 0],  # digit 0
-                [3, 1, 1],  # digit 1
-                [2, 1, 2],  # digit 2
-                [2, 2, 1],  # digit 3
-                [1, 1, 3],  # digit 4
-                [1, 2, 2],  # digit 5
-                [1, 3, 1]]  # digit 6
+    RATIOS_3 = [[5, 0, 0],  # digit 0  bits 0
+                [3, 1, 1],  # digit 1  bits 1
+                [2, 1, 2],  # digit 2  bits 2
+                [2, 2, 1],  # digit 3  bits 3
+                [1, 1, 3],  # digit 4  bits 4
+                [1, 2, 2],  # digit 5  bits 6
+                [1, 3, 1]]  # digit 6  bits 7
     ENCODING = ENCODING_3
     RATIOS = RATIOS_3
     BITS = BITS_3
@@ -432,10 +441,11 @@ class Angle:
         and co-ordinates to angles for a circle, also for the arc length of an ellipsis
         """
 
-    def __init__(self, scale):
+    def __init__(self, scale, radius):
         """ build the lookup tables with the resolution required for a single octant, from this octant
             the entire circle can be calculated by rotation and reflection (see angle() and ratio()),
-            scale defines the accuracy required, the bigger the more accurate, it must be a +ve integer
+            scale defines the angle accuracy required, the bigger the more accurate, it must be a +ve integer,
+            radius defines the maximum radius that cartToPolar has to cater for
             """
         # NB: This code is only executed once so clarity over performance is preferred
 
@@ -453,7 +463,7 @@ class Angle:
         self.step_angle = 45 / self.ratio_scale  # the angle represented by each step in the lookup table
         for step in range(len(self.ratios)):
             # each octant here consists of scale steps,
-            # the index is an angle 0..45, the result is the x,y co-ordinates for circle of radius 1,
+            # the index is an angle 0..45, the result is the x,y co-ordinates for a circle of radius 1,
             # angle 0 is considered to be straight up and increase clockwise, the vertical axis is
             # considered to be -Y..0..+Y, and the horizontal -X..0..+X,
             # the lookup table contains 0..45 degrees, other octants are calculated by appropriate x,y
@@ -482,8 +492,13 @@ class Angle:
         # octant[4] is the sign of x
         # octant[5] is the sign of y
 
-        # generate ellipsis arc length lookup table
-        self.one_degree_as_radians = math.pi / 180
+        # generate radius look-up table (r = sqrt(x*x + y*y) for x,y in range 0..255)
+        self.max_radius = int(radius + 1.5)
+        self.radii = [[0 for _ in range(self.max_radius)] for _ in range(self.max_radius)]
+        for x in range(self.max_radius):
+            for y in range(self.max_radius):
+                self.radii[x][y] = math.sqrt(x * x + y * y)
+
 
     def polarToCart(self, a, r):
         """ get the x,y co-ordinates on the circumference of a circle of radius 'r' for angle 'a'
@@ -534,8 +549,12 @@ class Angle:
             return offset + (self.angles[int(round(ratio * self.ratio_scale))] * sign)
 
         def _xy2r(x, y):
-            """" convert x, y to a radius """
-            return math.sqrt(x * x + y * y)
+            """" convert x, y to a radius (by Pythagoras) """
+            if y < 0:
+                y = 0 - y
+            if x < 0:
+                x = 0 - x
+            return self.radii[int(round(x))][int(round(y))]
 
         # edge cases
         if x == 0:
@@ -657,8 +676,9 @@ class Ring:
         self.white_level = int(round(min(level_centre + level_range, MAX_LUMINANCE)))
 
         # setup our angles look-up table such that get 1 pixel resolution on outermost ring
-        scale = 2 * math.pi * width * Ring.NUM_RINGS
-        self.angle_xy = Angle(scale).polarToCart
+        radius = width * Ring.NUM_RINGS
+        scale = 2 * math.pi * radius
+        self.angle_xy = Angle(scale, radius).polarToCart
         self.edge = 360 / Ring.DIGITS  # the angle at which a bit edge occurs (NB: not an int)
 
     def _pixel(self, x, y, colour):
@@ -1059,7 +1079,7 @@ class Transform:
             # its already big enough
             return source
         target = source.instance()
-        target.set(cv2.resize(source.get(), (width, new_height), interpolation=cv2.INTER_CUBIC))
+        target.set(cv2.resize(source.get(), (width, new_height), interpolation=cv2.INTER_LINEAR))
         return target
 
     def downheight(self, source, new_height):
@@ -1190,7 +1210,6 @@ class Transform:
             if threshold[2] is not None:
                 params.thresholdStep = threshold[2]  # default is 10
         if circularity is not None:
-            params.filterByCircularity = True
             if circularity[0] is not None:
                 params.filterByCircularity = True
                 params.minCircularity = circularity[0]
@@ -1242,26 +1261,6 @@ class Transform:
                                      cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS))
         return target
 
-    def warpPolar(self, source, centre_x, centre_y, radius, width, height):
-        """ warp the disc defined by centre_x/y and radius in the source image
-            into a rectangular image of width (angle) x height (radius)
-            """
-        polar = (cv2.warpPolar(source.get(), (height, width),
-                               (centre_x, centre_y), radius,
-                               cv2.INTER_LINEAR + cv2.WARP_POLAR_LINEAR))
-
-        # cv2 produces an image of width=radius, height=angle,
-        # so we rotate it 90 degrees clockwise to get width=angle, height=radius
-        # ToDo: this could be optimised out by tweaking the rest of my algorithms to work radius x angle
-        #       the reason I work angle x radius is I only discovered warpPolar after I'd done it all DIY!
-        #       working the other way also means 'slice processing' is all in the same Y, so cache local and faster
-        rotated = cv2.transpose(polar)
-
-        target = source.instance()
-        target.set(rotated)
-
-        return target
-
     def canny(self, source, min_val, max_val, size=3):
         """ perform a 'canny' edge detection on given source,
             min-val and max-val are the hysteresis thresholding values (see openCV documentation),
@@ -1294,11 +1293,12 @@ class Transform:
         found, _ = cv2.findContours(source.get(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         return found
 
-    def threshold(self, source, thresh=None, size=None):
+    def threshold(self, source, thresh=None, size=None, offset=2):
         """ turn source image into a binary image,
             returns the binarised image,
             if thresh is not None an absolute threshold is applied,
             if size is not None an adaptive threshold with that block size is applied
+            when adaptive offset is the 'C' constant subtracted from the mean (see OpenCV)
             otherwise an automatic Otsu threshold is applied
             """
         target = source.instance()
@@ -1306,7 +1306,7 @@ class Transform:
             _, buffer = cv2.threshold(source.get(), thresh, MAX_LUMINANCE, cv2.THRESH_BINARY)
         elif size is not None:
             buffer = cv2.adaptiveThreshold(source.get(), MAX_LUMINANCE,
-                                           cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, size, 0.0)
+                                           cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, size, offset)
         else:
             _, buffer = cv2.threshold(source.get(), MIN_LUMINANCE, MAX_LUMINANCE,
                                       cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -1441,6 +1441,8 @@ class Scan:
     NUM_RINGS = Ring.NUM_RINGS  # total number of rings in the whole code (ring==cell in height)
     NUM_DATA_RINGS = Codec.RINGS  # how many data rings in our codes
     NUM_SEGMENTS = Codec.DIGITS  # total number of segments in a ring (segment==cell in length)
+    DIGITS_PER_NUM = Codec.DIGITS_PER_NUM  # how many digits per encoded number
+    COPIES = Codec.COPIES  # number of copies in a code-word
 
     # image 'segment' and 'ring' constraints,
     # a 'segment' is the angular division in a ring,
@@ -1448,45 +1450,49 @@ class Scan:
     # a 'cell' is the intersection of a segment and a ring
     # these constraints set minimums that override the cells() property given to Scan
     MIN_PIXELS_PER_CELL = 4  # min pixels making up a cell length
-    MIN_PIXELS_PER_RING = 6  # min pixels making up a ring width
+    MIN_PIXELS_PER_RING = 4  # min pixels making up a ring width
 
     # region Tuning constants...
-    MIN_BLOB_AREA_RADIUS = 2  # min blob radius we want (any smaller and get too many false targets)
-    MAX_BLOB_AREA_RADIUS = 80  # max blob radius we want (any bigger means they are too close to the camera!)
-    MIN_BLOB_SIZE = 5  # minimum blob size, in pixels, we want - NB: this is the 'diameter' of the detected blob
-    MIN_BLOB_SEPARATION = 5  # smallest blob within this distance (in pixels) of each other are dropped
-    BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything
-    MAX_BLOB_OVER_SIZE = 2  # limit to how oversize an initial blob detection is allowed to be before re-processing
-    THRESHOLD_START = 0  # where to start threshold calculation within image height
-    THRESHOLD_END = 5/8  # where to end threshold calculation within image height
-    THRESHOLD_END_MIN = 0.8  # minimum threshold end as fraction of min image height (used if above is too small)
-    THRESHOLD_RANGE = []  # x offsets to include when calculating the threshold at x
-    THRESHOLD_OFFSET = 1.08  # fiddle with threshold for heuristic reasons, >1==raise threshold, <1==lower, 1==same
-    MAX_NEIGHBOUR_ANGLE_TAN = 0.6  # ~=30 degrees, tan of the max acceptable angle when joining edge fragments
+    # ToDo: de-tune blob area and radius if new scheme cannot get valid detections from ...-distant.jpg
+    MIN_BLOB_AREA = 8  # min area of a blob we want (in pixels) (default 9)
+    MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.5)
+    MIN_BLOB_ROUNDNESS = 0.5  # min circularity of a blob we want (default 0.84)
+    BLOB_RADIUS_STRETCH = 1.1  # how much to stretch blob radius to ensure always cover everything when projecting
+    MIN_CONTRAST = 0.5  # minimum luminance variation of a valid blob projection relative to the mean luminance
+    THRESHOLD_SIZE = 2.5  # the fraction of the projected image size to use as the integration area when binarizing
+    THRESHOLD_BLACK = 2  # the % below the average luminance in a projected image that is considered to be black
+    THRESHOLD_WHITE = 3  # the % above the average luminance in a projected image that is considered to be white
+    MIN_EDGE_SAMPLES = 2  # minimum samples in an edge to be considered a valid edge
+    MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments
+    MAX_NEIGHBOUR_ANGLE_OUTER = 0.6  # ~=31 degrees, tan of the max acceptable angle when joining outer edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max y jump allowed when following an edge
     MAX_NEIGHBOUR_HEIGHT_GAP_SQUARED = MAX_NEIGHBOUR_HEIGHT_GAP * MAX_NEIGHBOUR_HEIGHT_GAP
-    MAX_NEIGHBOUR_LENGTH_JUMP = 6  # max x jump, in pixels, between edge fragments when joining
+    MAX_NEIGHBOUR_LENGTH_JUMP = 10  # max x jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
     MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
     MAX_EDGE_HEIGHT_JUMP = 2  # max jump in y, in pixels, along an edge before smoothing is triggered
-    INNER_OUTER_MARGIN = 1.7  # minimum margin between the inner edge and the outer edge
-    MAX_INNER_OVERLAP = 0.2  # max num of samples of outer edge fragment allowed to be inside the inner edge
     INNER_OFFSET = 0  # move inner edge by this many pixels (to reduce effect of very narrow black ring)
     OUTER_OFFSET = 0  # move outer edge by this many pixels (to reduce effect of very narrow black ring)
-    MIN_PULSE_LEAD = 2  # minimum pixels for a valid pulse lead (or tail) period, pulse ignored if less than this
-    MIN_PULSE_HEAD = 1  # minimum pixels for a valid pulse head period, pulse ignored if less than this
-    MIN_SEGMENT_LENGTH = 0.3  # min (relative) segment length, shorter segments are merged/dropped
-    MAX_SEGMENT_LENGTH = 1.3  # max (relative) segment length, longer segments are split
-    MIN_0_SEGMENT_LENGTH = 0.2  # 000's segments shorter than this are candidates for merging/dropping
-    MIN_SEGMENT_SAMPLES = 2  # minimum samples in a valid segment, segments of this or less are dropped
-    DOMINANT_SEGMENT_RATIO = 3  # a segment this much bigger than its neighbour dominates it so its properties prevail
-    RATIO_QUANTA = 99  # number of quanta in a ratio error, errors are in the range 0..RATIO_QUANTA
-    NO_CHOICE_ERROR = 0  # a choice error of this is no error, i.e. a dead cert
-    MAX_CHOICE_ERR_DIFF = int(0.05 * (RATIO_QUANTA + 1))  # 2nd choices ignored if err diff more than this
-    MAX_CHOICE_ERR_DIFF_SQUARED = MAX_CHOICE_ERR_DIFF * MAX_CHOICE_ERR_DIFF
-    MAX_PULSE_ERROR = int(1 * (RATIO_QUANTA + 1))  # max tolerable error to keep a pulse
-    MAX_BIT_CHOICES = 512  # max bit choices to allow/explore when decoding bits to the associated number
+    INNER_GUARD = 2  # minimum pixel width of inner black ring
+    OUTER_GUARD = 2  # minimum pixel width of outer black ring
+    MIN_PULSE_HEAD = 3  # minimum pixels for a valid pulse head period, pulse ignored if less than this
+    MIN_SEGMENT_EDGE_DIFFERENCE = 3  # min white pixel difference (in y) between slices for a segment edge
+    MIN_SEGMENT_SAMPLES = 3  # minimum samples (in x) in a valid segment, segments of this or less are dropped,
+                             # this must be >2 to ensure there is a lead area when first and last slice are dropped
+    MAX_SEGMENT_WIDTH = 3.0  # maximum samples in a digit relative to the nominal segment size
+    STRONG_ZERO_LIMIT = 0.8  # width of a strong zero digit relative to the width of the widest one
+    ZERO_WHITE_THRESHOLD = MIN_PULSE_HEAD - 1  # maximum white pixels tolerated in a 'zero'
+    ZERO_GREY_THRESHOLD = ZERO_WHITE_THRESHOLD  # maximum grey pixels tolerated in a 'zero'
+    LEAD_GRAY_TO_HEAD = 0.2  # what fraction of lead grey pixels to assign to the head (the rest is given to lead)
+    TAIL_GRAY_TO_HEAD = 0.3  # what fraction of tail grey pixels to assign to the head (the rest is given to tail)
+    MIN_ZERO_GAP = DIGITS_PER_NUM * MIN_SEGMENT_SAMPLES  # minimum samples between consecutive zeroes
+    MAX_ZERO_GAP = 1.7  # maximum samples between consecutive zeroes as a ratio of a copy width within the image
+    MIN_SEGMENT_WIDTH = 0.4  # minimum width of a digit segment as a ratio of the nominal width for the group
+    PULSE_ERROR_RANGE = 99  # pulse component error range 0..PULSE_ERROR_RANGE
+    MAX_CHOICE_ERROR_DIFF = 3  # if a bit choice error is more than this worse than the best, chuck the choice
+    MAX_BIT_CHOICES = 1024*8  # max bit choices to allow/explore when decoding bits to the associated number
+    CHOICE_DOUBT_DIFF_LIMIT = 1  # choices with a digit doubt difference of less than this are ambiguous
     # endregion
 
     # region Video modes image height...
@@ -1508,8 +1514,20 @@ class Scan:
     FALLING = 'falling'
     # endregion
 
+    # region Ring numbers of flattened image...
+    INNER_POINT = 0
+    INNER_WHITE = 1
+    INNER_BLACK = 2
+    DATA_RING_1 = 3
+    DATA_RING_2 = 4
+    DATA_RING_3 = 5
+    OUTER_BLACK = 6
+    OUTER_WHITE = 7
+    OUTER_LIMIT = 8  # end of target area
+    # endregion
+
     # region Pulse classifications...
-    # for the RATIOS table, the head length==1, the table entry is the corresponding lead/tail length
+    # the RATIOS table is the lead/head/tail relative lengths across a 'span' (inner to outer guard rings)
     # the order in the RATIOS table is the same as DIGITS which is used to look-up the bit sequence
     RATIOS = Codec.RATIOS
     DIGITS = Codec.ENCODING
@@ -1518,16 +1536,17 @@ class Scan:
 
     # region Pulse size/position 'nudges'...
     # when measuring pulses we try several 'nudge' possibility (+/- 1 on lead, head, tail sizes)
-    # and pick the best this mitigates against low resolution effects where true edges are between
+    # and pick the best, this mitigates against low resolution effects where true edges are between
     # pixels or the (noisy/blurry) image is in the process of migrating from one pulse to another
     # a 'nudge' is a lead+head+tail offset to apply when calculating pulse ratios
-    PULSE_NUDGES = [[0, 0, 0],    # leave as is
-                    [-1, 0, +1],  # move head 'up' 1 pixel
-                    [+1, 0, -1],  # move head 'down' 1 pixel
-                    [-1, +1, 0],  # make head fatter in up direction
-                    [0, +1, -1],  # make head fatter in down direction
-                    [0, -1, +1],  # make head thinner in up direction
-                    [+1, -1, 0]]  # make head thinner in down direction
+    # a nudge of [0,0,0] is auto included
+    # PULSE_NUDGES = [[-1, 0, +1],  # move head 'up' 1 pixel
+    #                 [+1, 0, -1],  # move head 'down' 1 pixel
+    #                 [-1, +1, 0],  # make head fatter in up direction
+    #                 [0, +1, -1],  # make head fatter in down direction
+    #                 [0, -1, +1],  # make head thinner in up direction
+    #                 [+1, -1, 0]]  # make head thinner in down direction
+    PULSE_NUDGES = [[+1, -1, 0]]  # make head thinner in down direction (assuming slow rising edges)
     # endregion
 
     # region Segment transition types...
@@ -1563,12 +1582,17 @@ class Scan:
     class Step:
         """ a Step is a description of a luminance change in a radius """
 
-        def __init__(self, where, type):
+        def __init__(self, where, type, pixel):
             self.where = where  # the y co-ord of the step
             self.type = type  # the step type, rising or falling
+            self.pixel = pixel  # the pixel level falling from or rising to
 
         def __str__(self):
-            return '({} at {})'.format(self.type, self.where)
+            if self.type == Scan.RISING:
+                direction = 'to'
+            else:
+                direction = 'from'
+            return '({} at {} {} {})'.format(self.type, self.where, direction, self.pixel)
 
     class Edge:
         """ an Edge is a sequence of joined steps """
@@ -1590,46 +1614,76 @@ class Scan:
                 y = self.samples[0]
             return '({} at {},{} for {}{})'.format(self.type, self.where, y, len(self.samples), samples)
 
+    class Extent:
+        """ an Extent is the inner/outer edge co-ordinates of a projected image """
+
+        def __init__(self, inner, outer, inner_fail=None, outer_fail=None):
+            self.inner = inner  # list of y co-ords for the inner edge
+            self.outer = outer  # list of y co-ords for the outer edge
+            self.inner_fail = inner_fail  # reason if failed to find inner edge or None if OK
+            self.outer_fail = outer_fail  # reason if failed to find outer edge or None if OK
+
     class Pulse:
         """ a Pulse describes the pixels in a radius """
 
-        def __init__(self, start, lead=0, head=0, tail=None):
+        def __init__(self, start=None, stop=None, lead=0, head=0, tail=None, begin=None, end=None):
             self.start = start  # y co-ord where the pulse starts in the radius
+            self.stop = stop  # y co-ord where the pulse ends in the radius
             self.lead = lead  # length of the lead '0' pixels (including the inner black)
             self.head = head  # length of the '1' pixels
             self.tail = tail  # length of the tail '0' pixels (including the outer black), None==a half-pulse
+            self.begin = begin  # x-coord of start of the pulse samples
+            self.end = end  # x-coord of end of the pulse samples
             self.bits = []  # list of bits and their error in least error order
+
+        def adjust(self, part, delta):
+            # apply deltas unless they make us too small
+            # the pulse parts are floats,
+            # for -ve deltas the floor is used,
+            # for +ve deltas the ceiling is used
+            # for a 0 delta the raw value is used
+            if delta > 0:
+                adjusted = math.ceil(part)
+            elif delta < 0:
+                adjusted = math.floor(part)
+            else:
+                adjusted = part
+            if adjusted < 1:
+                # can't go that small
+                return None
+            else:
+                return adjusted
 
         def ratio(self, lead_delta=0, head_delta=0, tail_delta=0):
             """ return the ratios that represent this pulse,
-                the ..._delta parameters are added to the relevant component first,
+                the ..._delta parameters are used to adjust the pulse parts in a particular direction,
                 this allows for the determination of a ratio with 'jitter' on the pulse edges
                 """
             # deal with special cases
             if self.tail is None:
                 # this is a half-pulse, ratios have no meaning
-                return []
+                return None
             if self.lead == 0:
                 # this should not be possible
-                return []
+                return None
             if self.head == 0 or self.tail == 0:
-                # this can only be 5:0:0
+                # this can only be 5:0:0 (i.e. zero)
                 return [Scan.SPAN, 0, 0]
             # apply deltas unless they make us too small
-            lead = self.lead + lead_delta
-            if lead < 1:
+            lead = self.adjust(self.lead, lead_delta)
+            if lead is None:
                 # can't go that small
-                return []
-            head = self.head + head_delta
-            if head < 1:
+                return None
+            head = self.adjust(self.head, head_delta)
+            if head is None:
                 # can't go that small
-                return []
-            tail = self.tail + tail_delta
-            if tail < 1:
+                return None
+            tail = self.adjust(self.tail, tail_delta)
+            if tail is None:
                 # can't go that small
-                return []
+                return None
             # calculate the ratios
-            span = lead + head + tail  # this represents the entire pulse span, it cannot be 0
+            span = self.lead + self.head + self.tail  # this represents the entire pulse span, it cannot be 0
             span /= Scan.SPAN  # scale so units of result are the same as Scan.RATIOS
             lead /= span
             head /= span
@@ -1643,8 +1697,10 @@ class Scan:
                     bits = '{}, {}'.format(bits, bit)
                 bits = ', bits={}'.format(bits[2:])
             ratio = vstr(self.ratio())
-            return '(start={}, lead={}, head={}, tail={}, ratios={}{})'.\
-                   format(self.start, self.lead, self.head, self.tail, ratio, bits)
+            return '(x={}..{}, y={}..{}, lead={}, head={}, tail={}, ratios={}{})'.\
+                   format(nstr(self.begin), nstr(self.end), nstr(self.start), nstr(self.stop),
+                          nstr(self.lead), nstr(self.head), nstr(self.tail),
+                          ratio, bits)
 
     class Bits:
         """ this encapsulates a bit sequence for a digit and its error """
@@ -1662,8 +1718,8 @@ class Scan:
             self.errors += error
 
         def error(self):
-            """ get the mean error for the bits """
-            return int(round(self.errors / self.samples))
+            """ get the geometric mean error for the bits """
+            return self.errors / self.samples
 
         def format(self, short=False):
             if short or self.actual is None:
@@ -1674,7 +1730,11 @@ class Scan:
                 ideal = ''
             else:
                 ideal = ', ideal:{}'.format(vstr(self.ideal))
-            return '({}*{}, {:.2f}{}{})'.format(self.bits, self.samples, self.error(), actual, ideal)
+            if self.samples > 1:
+                samples = '*{}'.format(self.samples)
+            else:
+                samples = ''
+            return '({}{}, {:.2f}{}{})'.format(self.bits, samples, self.error(), actual, ideal)
 
         def __str__(self):
             return self.format()
@@ -1716,8 +1776,8 @@ class Scan:
                 self.errors = error
 
         def error(self):
-            """ get the mean error for the segment """
-            return int(round(self.errors / self.samples))
+            """ get the geometric mean error for the segment """
+            return self.errors / self.samples
 
         def __str__(self):
             if self.choices is None:
@@ -1733,6 +1793,43 @@ class Scan:
                 size = ', size={:.2f}'.format(self.size())
             return '(at {} bits={}*{}, error={:.2f}{}{})'.\
                    format(self.start, self.bits, self.samples, self.error(), size, choices)
+
+    class Result:
+        """ a result is the result of a number decode and its associated error/confidence level """
+
+        def __init__(self, number, digit_doubt, digits, bit_doubt, bit_error, choice, count=1):
+            self.number = number  # the code found
+            self.digit_doubt = digit_doubt  # sum of error digits (i.e. where not all three copies agree)
+            self.digits = digits  # the digit pattern used for the result
+            self.bit_doubt = bit_doubt  # sum of choices across bit segments with more than one choice
+            self.bit_error = bit_error  # sum of errors across bit segments
+            self.choice = choice  # the segments choice this result was decoded from (diag only)
+            self.count = count  # how many results with the same number found
+            self.doubt_level = None  # (see self.doubt())
+            self.max_bit_error = None  # (see self.doubt())
+
+        def doubt(self, max_bit_error=None):
+            """ calculate the doubt for this number, more doubt means less confidence,
+                the doubt is an amalgamation of digit_doubt, bit_doubt and bit_error,
+                the bit_error is scaled by max_bit_error to give a relative ratio of 0..100,
+                if a max_bit_error is given it is used to (re-)calculate the doubt, otherwise
+                the previous doubt is returned, the max_bit_error must be >= any result bit_error
+                the doubt returned is a float consisting of 3 parts:
+                    integral part is digit_doubt (i.e. mis-match between the 3 copies)
+                    first two decimal places is the bit_doubt (i.e. choices in pulse interpretation)
+                    second two decimal places is the relative bit error (i.e. error of actual pulse to ideal one)
+                """
+            if max_bit_error is not None:
+                self.max_bit_error = max_bit_error
+                if self.max_bit_error == 0:
+                    # this means there are no errors
+                    bit_error_ratio = 0
+                else:
+                    bit_error_ratio = self.bit_error / self.max_bit_error  # in range 0..1 (0=good, 1=crap)
+                self.doubt_level = (min(self.digit_doubt, 99)) + \
+                                   (min(self.bit_doubt, 99) / 100) + \
+                                   (min(bit_error_ratio, 0.99) / 100)
+            return self.doubt_level
 
     class Target:
         """ structure to hold detected target information """
@@ -1791,8 +1888,9 @@ class Scan:
         self.original = frame
         self.decoder = code  # class to decode what we find
 
-        # set warped image width
-        self.angle_steps = Scan.NUM_SEGMENTS * max(self.cells[0], Scan.MIN_PIXELS_PER_CELL)
+        # set warped image width/height
+        self.angle_steps = int(round(Scan.NUM_SEGMENTS * max(self.cells[0], Scan.MIN_PIXELS_PER_CELL)))
+        self.radial_steps = int(round(Scan.NUM_RINGS * max(self.cells[1], Scan.MIN_PIXELS_PER_RING)))
 
         # opencv wrapper functions
         self.transform = transform
@@ -1808,13 +1906,24 @@ class Scan:
 
         self.logging = self.show_log or (self._log_folder is not None)
 
+        # prepare image
+        self.image = self.transform.downsize(self.original, self.video_mode)  # re-size to given video mode
+        self.binary = None     # binarized image put here by _blobs function (debug aid)
+
+        # needed by _project
+        max_x, max_y = self.image.size()
+        max_radius = min(max_x, max_y) / 2
+        max_circumference = min(2 * math.pi * max_radius, 3600)  # good enough for 0.1 degree resolution
+        angle = Angle(max_circumference, max_radius)
+        self.angle_xy = angle.polarToCart
+
     def __del__(self):
         """ close our log file """
         if self._log_file is not None:
             self._log_file.close()
             self._log_file = None
 
-    def _blobs(self):
+    def _blobs(self) -> List[tuple]:
         """ find the target blobs in our image,
             this must be the first function called to process our image,
             creates a blob list each of which is a 'keypoint' tuple of:
@@ -1824,111 +1933,37 @@ class Scan:
             returns a list of unique blobs found
             """
 
-        # prepare image
-        blurred = self.transform.blur(self.original)  # de-noise
-        self.image = self.transform.downsize(blurred, self.video_mode)  # re-size to given video mode
+        if self.show_log:
+            logger = contours.Logger('_blobs')
+        else:
+            logger = None
+        params = contours.Targets()
+        params.min_area = Scan.MIN_BLOB_AREA
+        params.min_radius = Scan.MIN_BLOB_RADIUS
+        #params.min_roundness = Scan.MIN_BLOB_ROUNDNESS
+        blobs, binary = contours.get_targets(self.image.buffer, params=params, logger=logger)
+        self.binary = self.image.instance()
+        self.binary.set(binary)
 
-        # set filter parameters
-        threshold = (MIN_LUMINANCE, MAX_LUMINANCE, 16)  # min, max luminance, luminance step
-        circularity = (0.5, None)  # min, max 'corners' in blob edge or None
-        convexity = (0.5, None)  # min, max 'gaps' in blob edge or None
-        inertia = (0.5, None)  # min, max 'squashed-ness' or None
-        min_area = 2 * math.pi * (Scan.MIN_BLOB_AREA_RADIUS * Scan.MIN_BLOB_AREA_RADIUS)
-        max_area = 2 * math.pi * (Scan.MAX_BLOB_AREA_RADIUS * Scan.MAX_BLOB_AREA_RADIUS)
-        area = (min_area, max_area)  # min, max area in pixels, or None
-        gaps = (None, None)  # how close blobs have to be to be merged and min number
-        colour = MAX_LUMINANCE  # we want bright blobs, use MIN_LUMINANCE for dark blobs
-
-        # find the blobs
-        # ToDo: Do a DIY blob detector? openCV somtimes gets the outer white ring not the inner
-        blobs = self.transform.blobs(self.image, threshold, circularity, convexity, inertia, area, gaps, colour)
-        blobs = list(blobs)
-
-        # filter out blobs that are too small (opencv min area does not translate to blob diameter)
-        small_blobs = []
-        dropped = True
-        while dropped:
-            dropped = False
-            for blob in range(len(blobs)):
-                if blobs[blob].size < Scan.MIN_BLOB_SIZE:
-                    # too small
-                    small_blobs.append(blobs.pop(blob))
-                    dropped = True
-                    break
-
-        # filter out blobs that are co-incident (opencv can get over enthusiastic!)
-        dup_blobs = []
-        dropped = True
-        min_separation = Scan.MIN_BLOB_SEPARATION * Scan.MIN_BLOB_SEPARATION   # square it so sign irrelevant
-        while dropped:
-            dropped = False
-            for blob1 in range(len(blobs)):
-                x1 = int(round(blobs[blob1].pt[0]))
-                y1 = int(round(blobs[blob1].pt[1]))
-                size1 = blobs[blob1].size
-                for blob2 in range(len(blobs)):
-                    if blob2 == blob1:
-                        # do not check self
-                        continue
-                    x2 = int(round(blobs[blob2].pt[0]))
-                    y2 = int(round(blobs[blob2].pt[1]))
-                    size2 = blobs[blob2].size
-                    gap = self._get_gap((x1, y1), (x2, y2))
-                    if gap < min_separation:
-                        # these are too close, drop the worst one
-                        if x1 == x2 and y1 == y2:
-                            # got same centre, this happens sometimes, keep the smallest
-                            if size1 < size2:
-                                # drop #2
-                                dup_blobs.append(blobs.pop(blob2))
-                            else:
-                                # drop #1
-                                dup_blobs.append(blobs.pop(blob1))
-                        else:
-                            # they are not co-centric, keep the biggest
-                            # we can tolerate blobs being slightly off-centre,
-                            # it just gives the flattened image wavy inner/outer edges which we can deal with
-                            if size1 < size2:
-                                # drop #1
-                                dup_blobs.append(blobs.pop(blob1))
-                            else:
-                                # drop #2
-                                dup_blobs.append(blobs.pop(blob2))
-                        dropped = True
-                        break
-                if dropped:
-                    break
-
-        blobs.sort(key=lambda e: e.pt[0])      # just so the processing order is deterministic (helps debugging)
+        blobs.sort(key=lambda e: e[0])      # just so the processing order is deterministic (helps debugging)
 
         if self.logging:
-            self._log('blob-detect: found {} blobs'.format(len(blobs) + len(dup_blobs)), 0, 0)
+            self._log('blob-detect: found {} blobs'.format(len(blobs)), 0, 0)
             for blob in blobs:
-                self._log('    centred at {}x{}y, size {:.2f}  (kept)'.
-                          format(int(round(blob.pt[0])), int(round(blob.pt[1])), blob.size))
-            for blob in small_blobs:
-                self._log('    centred at {}x{}y, size {:.2f}  (dropped as too small)'.
-                          format(int(round(blob.pt[0])), int(round(blob.pt[1])), blob.size))
-            for blob in dup_blobs:
-                self._log('    centred at {}x{}y, size {:.2f}  (dropped as a duplicate)'.
-                          format(int(round(blob.pt[0])), int(round(blob.pt[1])), blob.size))
+                self._log("    x:{:.2f}, y:{:.2f}, size:{:.2f}".format(blob[0], blob[1], blob[2]))
 
         if self.save_images:
-            grid = self.image
-            if len(blobs) > 0:
-                grid = self.transform.drawKeypoints(grid, blobs, Scan.GREEN)
-            if len(dup_blobs) > 0:
-                grid = self.transform.drawKeypoints(grid, dup_blobs, Scan.BLUE)
-            if len(small_blobs) > 0:
-                grid = self.transform.drawKeypoints(grid, small_blobs, Scan.RED)
-            self._unload(grid, 'blobs', 0, 0)
+            plot = self.binary
+            for blob in blobs:
+                plot = self.transform.label(plot, blob, Scan.GREEN)
+            self._unload(plot, 'contours', 0, 0)
 
         return blobs
 
-    def _radius(self, centre_x, centre_y, blob_size):
+    def _radius(self, centre_x, centre_y, blob_size) -> int:
         """ determine the image radius to extract around the given blob position and size
             blob_size is used as a guide to limit the radius projected,
-            we assume the blob-size is (roughly) the diameter of the inner two white rings
+            we assume the blob-size is (roughly) the radius of the inner two white rings
             but err on the side of going too big
             """
 
@@ -1937,52 +1972,129 @@ class Scan:
         edge_left = centre_x
         edge_bottom = max_y - centre_y
         edge_right = max_x - centre_x
-        ring_width = blob_size / 4
-        limit_radius = int(round(max(min(edge_top, edge_bottom, edge_left, edge_right), 1)))
-        blob_radius = int(ring_width * Scan.NUM_RINGS * Scan.BLOB_RADIUS_STRETCH)
+        ring_width = blob_size / 2
+        limit_radius = max(min(edge_top, edge_bottom, edge_left, edge_right), 1)
+        blob_radius = ring_width * Scan.NUM_RINGS * Scan.BLOB_RADIUS_STRETCH
         if blob_radius < limit_radius:
             # max possible size is less than the image edge, so use the blob size
             limit_radius = blob_radius
 
+        limit_radius = int(math.ceil(limit_radius))
+
         if self.logging:
             self._log('radius: limit radius {}'.format(limit_radius))
 
-        if self.save_images:
-            # draw cropped source image of just this blob
-            start_x = max(int(centre_x - limit_radius), 0)
-            end_x = min(int(centre_x + limit_radius), max_x)
-            start_y = max(int(centre_y - limit_radius), 0)
-            end_y = min(int(centre_y + limit_radius), max_y)
-            blob = self.transform.crop(self.image, start_x, start_y, end_x, end_y)
-            # mark the blob and its co-ords from the original image
-            # draw the detected blob in blue and its co-ords and size
-            k = (limit_radius, limit_radius, blob_size / 2)
-            blob = self.transform.label(blob, k, Scan.RED, '{:.1f} ({:.0f}x{:.0f}y)'.
-                                        format(blob_size, centre_x, centre_y))
-            self._unload(blob, '01-target', centre_x, centre_y)
-
         return limit_radius
 
-    def _project(self, centre_x, centre_y, limit_radius) -> Frame:
-        """ 'project' a potential target at centre_x/y from its circular shape to a rectangle
-            of radius (y) by angle (x), limit_radius is for the warp,
-            returns the projected image
+    def _project(self, centre_x, centre_y, blob_size) -> Frame:
+        """ 'project' a potential target from its circular shape to a rectangle of radius (y) by angle (x),
+            limit_radius is used to limit the radius projected
+            returns the projection or None if its not worth pursuing further
             """
+        def get_pixel(x: float, y: float) -> int:
+            """ get the interpolated pixel value at offset x,y from the centre,
+                x,y are fractional so the pixel value returned is a mixture of the 4 pixels around x,y
+                the mixture is based on the ratio of the neighbours to include, the ratio of all 4 is 1
+                code based on:
+                    void interpolateColorPixel(double x, double y) {
+                        int xL, yL;
+                        xL = (int) Math.floor(x);
+                        yL = (int) Math.floor(y);
+                        xLyL = ipInitial.getPixel(xL, yL, xLyL);
+                        xLyH = ipInitial.getPixel(xL, yL + 1, xLyH);
+                        xHyL = ipInitial.getPixel(xL + 1, yL, xHyL);
+                        xHyH = ipInitial.getPixel(xL + 1, yL + 1, xHyH);
+                        for (int rr = 0; rr < 3; rr++) {
+                            double newValue = (xL + 1 - x) * (yL + 1 - y) * xLyL[rr];
+                            newValue += (x - xL) * (yL + 1 - y) * xHyL[rr];
+                            newValue += (xL + 1 - x) * (y - yL) * xLyH[rr];
+                            newValue += (x - xL) * (y - yL) * xHyH[rr];
+                            rgbArray[rr] = (int) newValue;
+                        }
+                    }
+                from here: https://imagej.nih.gov/ij/plugins/download/Polar_Transformer.java
+                explanation:
+                x,y represent the top-left of a 1x1 pixel
+                if x or y are not whole numbers the 1x1 pixel area overlaps its neighbours
+                the returned pixel value is the sum of the overlap fractions of its neighbours
+                pixel squares, P is the fractional pixel address in its pixel, 1, 2 and 3 are
+                its neighbours, dotted area is contribution from neighbours:
+                    +-----+-----+
+                    |  P  |  1  |
+                    |   ..|..   |
+                    +-----+-----+
+                    |   ..|..   |
+                    |  3  |  2  |
+                    +-----+-----+
+                """
+            cX: float = centre_x + x
+            cY: float = centre_y + y
+            xL: int = int(cX)
+            yL: int = int(cY)
+            xH: int = xL + 1
+            yH: int = yL + 1
+            xLyL = self.image.getpixel(xL, yL)
+            xLyH = self.image.getpixel(xL, yH)
+            xHyL = self.image.getpixel(xH, yL)
+            xHyH = self.image.getpixel(xH, yH)
+            if xLyL is None:
+                xLyL = MIN_LUMINANCE
+            if xLyH is None:
+                xLyH = MIN_LUMINANCE
+            if xHyL is None:
+                xHyL = MIN_LUMINANCE
+            if xHyH is None:
+                xHyH = MIN_LUMINANCE
+            pixel: float = (xH - cX) * (yH - cY) * xLyL
+            pixel += (cX - xL) * (yH - cY) * xHyL
+            pixel += (xH - cX) * (cY - yL) * xLyH
+            pixel += (cX - xL) * (cY - yL) * xHyH
+            return int(round(pixel))
 
-        image_height = limit_radius  # one pixel per radius
-        image_width = self.angle_steps
+        limit_radius = self._radius(centre_x, centre_y, blob_size)
 
-        # do the projection
-        code = self.transform.warpPolar(self.image, centre_x, centre_y, limit_radius, image_width, image_height)
+        # for detecting luminance variation for filtering purposes
+        min_level = MAX_LUMINANCE
+        max_level = MIN_LUMINANCE
+        avg_level: float = 0
+        samples = 0
+        angle_delta = 360 / self.angle_steps
+        code = self.original.instance().new(self.angle_steps, limit_radius, MIN_LUMINANCE)
+        for radius in range(limit_radius):
+            for angle in range(self.angle_steps):
+                degrees = angle * angle_delta
+                x, y = self.angle_xy(degrees, radius)
+                if x is not None:
+                    c = get_pixel(x, y)
+                    if c > MIN_LUMINANCE:
+                        code.putpixel(angle, radius, c)
+                        avg_level += c
+                        samples += 1
+                        if c > max_level:
+                            max_level = c
+                        if c < min_level:
+                            min_level = c
+        avg_level /= samples
+
+        # chuck out targets that do not have enough black/white contrast
+        contrast = (max_level - min_level) / avg_level
+        if contrast < Scan.MIN_CONTRAST:
+            if self.logging:
+                self._log('project: dropping blob at {:.1f} {:.1f} - contrast {:.2f} below minimum ({:.2f})'.
+                          format(centre_x, centre_y, contrast, Scan.MIN_CONTRAST))
+            return None, None
 
         max_x, max_y = code.size()
-        min_y = int(round(Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS))
-        if max_y < min_y:
+        if max_y < self.radial_steps:
             # increase image height to meet our min pixel per ring requirement
-            # ToDo: do DIY by power of 2 and replicate (darkest) pixels rather than interpolate?
-            code = self.transform.upheight(code, min_y)
-            stretch_factor = min_y / max_y
+            code = self.transform.upheight(code, self.radial_steps)
+            stretch_factor = self.radial_steps / max_y  # NB: >1
+        elif max_y > self.radial_steps:
+            # decrease image height to meet our min pixel per ring requirement
+            code = self.transform.downheight(code, self.radial_steps)
+            stretch_factor = self.radial_steps / max_y  # NB: <1
         else:
+            # exact size - how likely is this?
             stretch_factor = 1
 
         if self.logging:
@@ -1990,88 +2102,99 @@ class Scan:
                       format(max_x, max_y, stretch_factor))
 
         if self.save_images:
-            # draw projected image
+            # draw cropped binary image of just this blob
+            max_x, max_y = self.image.size()
+            start_x = max(int(centre_x - limit_radius), 0)
+            end_x = min(int(centre_x + limit_radius), max_x)
+            start_y = max(int(centre_y - limit_radius), 0)
+            end_y = min(int(centre_y + limit_radius), max_y)
+            blob = self.transform.crop(self.image, start_x, start_y, end_x, end_y)
+            # draw the detected blob in red
+            k = (limit_radius, limit_radius, blob_size)
+            blob = self.transform.label(blob, k, Scan.RED)
+            self._unload(blob, '01-target', centre_x, centre_y)
+            # draw the corresponding projected image
             self._unload(code, '02-projected')
 
         return code, stretch_factor
 
-    def _threshold(self, target: Frame) -> Frame:
-        """ threshold the given image into binary """
+    def _binarize(self, target: Frame, s: float=2, black: float=-1, white: float=None, clean=True, suffix='') -> Frame:
+        """ binarize the given projected image,
+            s is the fraction of the image size to use as the integration area (square) in pixels,
+            t is the % below the average that is considered to be black,
+            also 'tidy' it by changing pixel sequences of BWB or WBW sequences to BBB or WWW
+            """
 
         max_x, max_y = target.size()
 
-        def make_binary(range_x, range_y):
-            """ make a binary image from a threshold constructed across the given ranges,
-                range_x is a series of offsets on the x being considered, the last must be 0,
-                range_y is the image portion, starting at the top, to include in the threshold
+        def make_binary(image: Frame, s: float=8, black: float=15, white: float=None) -> Frame:
+            """ given a greyscale image return a binary image using an adaptive threshold.
+                s is the fraction of the image size to use as the integration area (square) in pixels,
+                t is the % below the average that is considered to be black,
+                anything above this is considered to be white.
+                See the adaptive-threshold-algorithm.pdf paper for algorithm details.
                 """
 
-            # make an empty (i.e. black) image
-            buckets: Frame = target.instance()
-            buckets.new(max_x, max_y, MIN_LUMINANCE)
+            thresholded = contours.make_binary(image.buffer, s, black, white)
+            binary: Frame = image.instance()
+            binary.set(thresholded)
 
-            # build the binary image
-            for x in range(max_x):
-                # get the pixels
-                grey = 0
-                samples = 0
-                for dx in range_x:  # NB: the last element must be 0
-                    slice_pixels = [None for _ in range(max_y)]  # pixels of our slice
-                    for y in range(max_y):
-                        pixel = target.getpixel((x + dx) % max_x, y)
-                        slice_pixels[y] = pixel
-                    # set threshold as the harmonic mean of our pixel slice
-                    for y in range_y:
-                        grey += 1 / max(slice_pixels[y], 1)
-                        samples += 1
-                grey = samples / grey
-                grey *= Scan.THRESHOLD_OFFSET  # bias to consider more as black
-                # 2 levels: black, white
-                for y in range(max_y):
-                    if slice_pixels[y] > grey:
-                        pixel = MAX_LUMINANCE
-                    else:
-                        pixel = MIN_LUMINANCE
-                    buckets.putpixel(x, y, pixel)
+            if self.save_images:
+                self._unload(binary, '03-binary{}'.format(suffix))
 
-            return buckets
+            return binary
 
-        # ToDo: do threshold span on slice-by-slice basis and not simple y-span for all
-        start_y = int(max_y * Scan.THRESHOLD_START)
-        span_y = max_y * Scan.THRESHOLD_END
-        min_span = int(Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS * Scan.THRESHOLD_END_MIN)
-        if span_y < min_span:
-            span_y = min_span
-        span_y = min(int(round(span_y)), max_y - 1)
-        range_y = range(start_y, span_y + 1)
-        range_x = Scan.THRESHOLD_RANGE + [0]  # last element must be 0
-        buckets = make_binary(range_x, range_y)
+        buckets = make_binary(target, s, black, white)
 
-        # clean the pixels - BWB or WBW sequences are changed to BBB or WWW
-        for x in range(max_x):
-            for y in range(max_y):
-                left = buckets.getpixel((x - 1) % max_x, y)
-                this = buckets.getpixel(x, y)
-                right = buckets.getpixel((x + 1) % max_x, y)
-                if left == right and this != left:
-                    buckets.putpixel(x, y, left)
-
-        if self.logging:
-            self._log('threshold: y span is (0, {}) of (0, {})'.format(span_y, max_y))
-
+        if clean:
+            passes = 0
+            total_to_black_changes = 0
+            total_to_white_changes = 0
+            pass_changes = 1
+            while pass_changes > 0:
+                passes += 1
+                pass_changes = 0
+                # clean the pixels - BWB or WBW sequences are changed to BBB or WWW
+                # pixels wrap in the x direction but not in the y direction
+                for x in range(max_x):
+                    for y in range(1, max_y - 1):  # NB: ignoring first and last y - they do not matter
+                        above = buckets.getpixel(x, y - 1)
+                        left = buckets.getpixel((x - 1) % max_x, y)
+                        this = buckets.getpixel(x, y)
+                        right = buckets.getpixel((x + 1) % max_x, y)
+                        below = buckets.getpixel(x, y + 1)
+                        if left == right:
+                            if this != left:
+                                # got a horizontal loner
+                                buckets.putpixel(x, y, left)
+                                pass_changes += 1
+                                if this == MIN_LUMINANCE:
+                                    total_to_white_changes += 1
+                                else:
+                                    total_to_black_changes += 1
+                        elif above == below:
+                            # only look for vertical when there is no horizontal candidate, else it can oscillate
+                            if this != above:
+                                # got a vertical loner
+                                # this condition is lower priority than above
+                                buckets.putpixel(x, y, above)
+                                pass_changes += 1
+                                if this == MIN_LUMINANCE:
+                                    total_to_white_changes += 1
+                                else:
+                                    total_to_black_changes += 1
+            if self.logging:
+                self._log('binarize: cleaned lone pixels in {} passes, changing {} pixels to white and {} to black'.
+                          format(passes, total_to_white_changes, total_to_black_changes))
         if self.save_images:
-            threshold_lines = []
-            for x in range(max_x):
-                threshold_lines.append((x, start_y, x, span_y))
-            plot = self._draw_lines(target, threshold_lines, colour=Scan.GREEN, bleed=0.8)
-            self._unload(plot, '03-threshold')
-            self._unload(buckets, '04-buckets')
+            self._unload(buckets, '04-buckets{}'.format(suffix))
 
         return buckets
 
     def _slices(self, buckets: Frame) -> List[List[Step]]:
-        """ detect radial luminance steps in the given binary image,
-            returns the slice list for the image
+        """ detect radial luminance steps in the given binary/tertiary image,
+            returns the slice list for the image,
+            it is guaranteed that at least one step is created for every x co-ord in the image
             """
 
         max_x, max_y = buckets.size()
@@ -2080,15 +2203,46 @@ class Scan:
         slices = [[] for _ in range(max_x)]
         for x in range(max_x):
             last_pixel = buckets.getpixel(x, 0)
+            transitions = 0
             for y in range(1, max_y):
                 pixel = buckets.getpixel(x, y)
                 if pixel < last_pixel:
                     # falling step
-                    slices[x].append(Scan.Step(y, Scan.FALLING))
+                    slices[x].append(Scan.Step(y, Scan.FALLING, last_pixel))
+                    transitions += 1
                 elif pixel > last_pixel:
                     # rising step
-                    slices[x].append(Scan.Step(y, Scan.RISING))
+                    slices[x].append(Scan.Step(y, Scan.RISING, pixel))
+                    transitions += 1
                 last_pixel = pixel
+            if transitions == 0:
+                # this probably means a big pulse has merged with the inner and the outer edge,
+                # if the last_pixel is >0 treat as if got a single black pixel at the image edges
+                # otherwise create just a falling edge at 0
+                if last_pixel == MAX_LUMINANCE:
+                    # its all white - not possible?
+                    # create a rising step at 0 and a falling step at max_y
+                    slices[x].append(Scan.Step(0, Scan.RISING, MAX_LUMINANCE))
+                    slices[x].append(Scan.Step(max_y - 1, Scan.FALLING, MAX_LUMINANCE))
+                    if self.logging:
+                        self._log('slices: {}: all white and no transitions, creating {}, {}'.
+                                  format(x, slices[x][-2], slices[x][-1]))
+                elif last_pixel == MIN_LUMINANCE:
+                    # its all black - not possible?
+                    # create a falling step at 0 and a rising step at max_y
+                    slices[x].append(Scan.Step(0, Scan.FALLING, MAX_LUMINANCE))
+                    slices[x].append(Scan.Step(max_y - 1, Scan.RISING, MAX_LUMINANCE))
+                    if self.logging:
+                        self._log('slices: {}: all black and no transitions, creating {}, {}'.
+                                  format(x, slices[x][-2], slices[x][-1]))
+                else:
+                    # its all grey - this means all pixels are nearly the same in the integration area
+                    # create a rising step at 0 and a falling step at max_y
+                    slices[x].append(Scan.Step(0, Scan.RISING, MAX_LUMINANCE))
+                    slices[x].append(Scan.Step(max_y - 1, Scan.FALLING, MAX_LUMINANCE))
+                    if self.logging:
+                        self._log('slices: {}: all grey and no transitions, creating {}, {}'.
+                                  format(x, slices[x][-2], slices[x][-1]))
 
         if self.logging:
             self._log('slices: {}'.format(len(slices)))
@@ -2101,72 +2255,18 @@ class Scan:
 
         return slices
 
-    def _transitions(self, slices: List[List[Step]]) -> List[List[Pulse]]:
-        """ get list of transitions from the given slices,
-            a transition is a 'half-pulse', i.e. the lead and head parts only of a full-pulse
-            """
-
-        max_x = len(slices)
-
-        if self.logging:
-            header = 'transitions: building half-pulses:'
-        half_pulses = [None for _ in range(max_x)]
-        for x, slice in enumerate(slices):
-            if slice is None:
-                continue
-            # build half-pulse list for this slice
-            slice_pulses = []
-            pulse = None
-            for idx, step in enumerate(slice):
-                if step.type == Scan.RISING:
-                    if pulse is None:
-                        # ignore rising before first falling
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                            header = None
-                            self._log('    {} ignoring early rising step {} (not falling step yet)'.format(x, step))
-                    else:
-                        # end of 0 run, start of 1
-                        pulse.lead = step.where - pulse.start
-                else:  # step.type == Scan.FALLING
-                    if pulse is None:
-                        # start of initial lead, no previous end for this case
-                        pass
-                    else:
-                        # end of half-pulse
-                        pulse.head = step.where - pulse.start - pulse.lead
-                    # start a new half-pulse
-                    pulse = Scan.Pulse(step.where)
-                    slice_pulses.append(pulse)
-            if len(slice_pulses) == 0:
-                # nothing here at all
-                slice_pulses = None
-            else:
-                if slice_pulses[-1].lead == 0:
-                    # got a falling step with no rising step,
-                    # dump this pulse and remove the head of predecessor
-                    del slice_pulses[-1]
-                    if len(slice_pulses) > 0:
-                        # no predecessor so this is really the outer edge
-                        slice_pulses[-1].head = 0
-                if len(slice_pulses) == 0:
-                    # nothing left here
-                    slice_pulses = None
-            half_pulses[x] = slice_pulses
-
-        return half_pulses
-
-    def _edges(self, slices: List[List[Step]], max_x, max_y):
+    def _edges(self, slices: List[List[Step]], max_x, max_y) -> ([Edge], [Edge]):
         """ build a list of falling and rising edges of our target,
             returns the falling and rising edges list in length order,
-            an 'edge' here is a sequence of connected rising or falling Steps
+            an 'edge' here is a sequence of connected rising or falling Steps,
+            white to not-white is a falling edge,
+            not-white to white is a rising edge
             """
 
         used = [[False for _ in range(max_y)] for _ in range(max_x)]
 
         def make_candidate(start_x, start_y, edge_type):
-            """ make a candidate edge from transitions from start_x/y,
+            """ make a candidate edge from the step from start_x,
                 pixel pairs at x and x +/- 1 and x and x +/- 2 are considered,
                 the next y is the closest of those 2 pairs,
                 returns an instance of Edge or None
@@ -2186,6 +2286,9 @@ class Scan:
                 slice = slices[x]
                 if slice is not None:
                     for step in slice:
+                        if step.pixel != MAX_LUMINANCE:
+                            # this is a half-step, ignore those
+                            continue
                         if step.type != step_type:
                             continue
                         if used[x][step.where]:
@@ -2226,7 +2329,7 @@ class Scan:
                     used[x][y] = True  # note used this x,y (to stop it being considered again)
                     samples += 1
 
-            if samples > 0:
+            if samples >= Scan.MIN_EDGE_SAMPLES:
                 # find the edge (==between None to not None and not None to None)
                 start_x = None
                 end_x = None
@@ -2258,9 +2361,10 @@ class Scan:
         falling_edges = []
         rising_edges = []
         for x, slice in enumerate(slices):
-            if slice is None:
-                continue
             for step in slice:
+                if step.pixel != MAX_LUMINANCE:
+                    # this is a half-step, ignore those
+                    continue
                 candidate = make_candidate(x, step.where, step.type)
                 if candidate is not None:
                     if step.type == Scan.FALLING:
@@ -2278,14 +2382,17 @@ class Scan:
 
         return falling_edges, rising_edges
 
-    def _extent(self, edges, max_x, max_y):
+    def _extent(self, edges, max_x, max_y) -> Extent:
         """ determine the target inner and outer edges,
             there should be a consistent set of falling edges for the inner black ring
             and another set of rising edges for the outer white ring,
             edges that are within a few pixels of each other going right round is what we want,
-            returns the inner, outer edges and their fail reasons or None, None if not failed
+            returns the inner, outer edges and their fail reasons or None, None if not failed,
+            the inner edge is the y where y-1=white and y=black,
+            the outer edge is the y where y-1=black and y=white
             """
 
+        # region helpers...
         def make_full(edge):
             """ expand the given edge to fully encompass all x's """
             full_edge = [None for _ in range(max_x)]
@@ -2325,7 +2432,7 @@ class Scan:
                 return False
             return True
 
-        def angle_OK(this_xy, that_xy):
+        def angle_OK(this_xy, that_xy, max_angle):
             """ check the angle of the slope between this_xy and that_xy is acceptable,
                 an approximate tan of the angle is calculated as y'/x' with a few special cases,
                 the special cases are when y' is within Scan.MAX_NEIGHBOUR_HEIGHT_GAP,
@@ -2340,7 +2447,7 @@ class Scan:
                 # this is angle 0, which is OK
                 return True
             angle = xy_dash[1] / xy_dash[0]  # 1==45 degrees, 0.6==30, 1.2==50, 1.7==60, 2.7==70
-            if angle > Scan.MAX_NEIGHBOUR_ANGLE_TAN:
+            if angle > max_angle:
                 # too steep
                 return False
             return True
@@ -2379,10 +2486,11 @@ class Scan:
                 samples += 1
             return samples, overlaps
 
-        def can_merge(full_edge, edge, max_distance):
+        def can_merge(full_edge, edge, max_distance, max_angle):
             """ check if edge can be merged into full_edge,
                 full_edge is a list of y's or None's for every x, edge is the candidate to check,
                 max_distance is the distance beyond which a merge is not allowed,
+                max_angle is the maximum tolerated slope angle between two edge ends,
                 returns True if it can be merged,
                 to be allowed its x, y values must not to too far from what's there already,
                 the overlap condition is assumed to have already been checked (by trim_overlap)
@@ -2404,10 +2512,12 @@ class Scan:
 
             our_start_xy = (edge.where, edge.samples[0])
             our_end_xy = (edge_end, edge.samples[-1])
-            if angle_OK(nearest_back_xy, our_start_xy) and distance_OK(nearest_back_xy, our_start_xy, max_distance):
+            if angle_OK(nearest_back_xy, our_start_xy, max_angle) \
+                    and distance_OK(nearest_back_xy, our_start_xy, max_distance):
                 # angle and distance OK from our start to end of full
                 return True
-            if angle_OK(our_end_xy, nearest_next_xy) and distance_OK(our_end_xy, nearest_next_xy, max_distance):
+            if angle_OK(our_end_xy, nearest_next_xy, max_angle) \
+                    and distance_OK(our_end_xy, nearest_next_xy, max_distance):
                 # angle and distance OK from our end to start of full
                 return True
 
@@ -2484,7 +2594,7 @@ class Scan:
 
         def nipple(edge, x, y):
             """ check if there is a 'nipple' at x in the given edge,
-                a 'nipple' is a y value with both its neighbours having the same but different y value,
+                a 'nipple' is a y value with both its x neighbours having the same but different y value,
                 the x value given here is the centre and the y value is that of its left neighbour,
                 if the given x is a nipple the given y is returned, else the actual y at x is returned
                 """
@@ -2668,6 +2778,11 @@ class Scan:
 
             distance_span = range(2, Scan.MAX_NEIGHBOUR_LENGTH_JUMP + 1)
 
+            if direction == Scan.FALLING:
+                max_angle = Scan.MAX_NEIGHBOUR_ANGLE_INNER
+            else:
+                max_angle = Scan.MAX_NEIGHBOUR_ANGLE_OUTER
+
             full_edges = []
             for start_idx, start_edge in enumerate(edges):
                 full_edge = make_full(start_edge)
@@ -2689,7 +2804,7 @@ class Scan:
                             if trimmed is None:
                                 # fails overlap constraint
                                 continue
-                            if can_merge(trimmed[0], trimmed[1], distance):
+                            if can_merge(trimmed[0], trimmed[1], distance, max_angle):
                                 full_edge = merge(trimmed[0], trimmed[1])
                                 full_edge_fragments.append(edge_idx)
                                 merged = True
@@ -2741,6 +2856,7 @@ class Scan:
             residue = max_edge - (blocks * block_size)
             if residue > 0:
                 self._log('    {}: {}'.format(len(edge) - residue, edge[-residue:]))
+        # endregion
 
         falling_edges, rising_edges = edges
 
@@ -2751,30 +2867,30 @@ class Scan:
             log_edge(inner)
 
         # remove rising edges that come before or too close to the inner
-        if self.logging:
-            header = 'extent: remove outer candidates too close to inner:'
-        for e in range(len(rising_edges)-1, -1, -1):
-            edge = rising_edges[e]
-            inside_samples = 0
-            for dx, y in enumerate(edge.samples):
-                x = (edge.where + dx) % max_x
-                inner_y = inner[x]
-                if inner_y is None:
-                    continue
-                min_outer_y = int(round(inner_y * Scan.INNER_OUTER_MARGIN))
-                if y < min_outer_y:
-                    # this is too close, note it
-                    inside_samples += 1
-            if inside_samples / len(edge.samples) > Scan.MAX_INNER_OVERLAP:
-                # this is too close to the inner, chuck it
-                if self.logging:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    {} has {} samples of {} inside the inner edge, limit is {}'.
-                              format(edge, inside_samples, len(edge.samples),
-                                     int(len(edge.samples) * Scan.MAX_INNER_OVERLAP)))
-                del rising_edges[e]
+        # if self.logging:
+        #     header = 'extent: remove outer candidates too close to inner:'
+        # for e in range(len(rising_edges)-1, -1, -1):
+        #     edge = rising_edges[e]
+        #     inside_samples = 0
+        #     for dx, y in enumerate(edge.samples):
+        #         x = (edge.where + dx) % max_x
+        #         inner_y = inner[x]
+        #         if inner_y is None:
+        #             continue
+        #         min_outer_y = int(round(inner_y * Scan.INNER_OUTER_MARGIN))
+        #         if y < min_outer_y:
+        #             # this is too close, note it
+        #             inside_samples += 1
+        #     if inside_samples / len(edge.samples) > Scan.MAX_INNER_OVERLAP:
+        #         # this is too close to the inner, chuck it
+        #         if self.logging:
+        #             if header is not None:
+        #                 self._log(header)
+        #                 header = None
+        #             self._log('    {} has {} samples to close to the inner edge, limit is {:.2f}, margin is {:.2f}'.
+        #                       format(edge, inside_samples,
+        #                              len(edge.samples) * Scan.MAX_INNER_OVERLAP, Scan.INNER_OUTER_MARGIN))
+        #         del rising_edges[e]
 
         if len(rising_edges) == 0:
             # everything is too close!
@@ -2788,1392 +2904,810 @@ class Scan:
             self._log('extent: outer (offset={}) (fail={})'.format(Scan.OUTER_OFFSET, outer_fail))
             log_edge(outer)
 
-        return inner, outer, inner_fail, outer_fail
+        return Scan.Extent(inner, outer, inner_fail, outer_fail)
 
-    def _identify(self, blob_size):
-        """ identify the target in the current image with the given blob size (its diameter),
-            the process is done in two passes, pass one uses the blob_size as given,
-            the extent discovered from that is then used to determine a more accurate
-            blob_size and the process repeated,
-            this two pass process is an attempt to overcome the tendency of the openCV blob
-            detector finding a blob that is too big, this prejudices our pulse detection within
-            the inner and outer edges due to inaccurate threshold levels created by considering
-            too much of the image
+    def _find_segment_edges(self, buckets: Frame, extent: Extent) -> ([int], str):
+        """ find the segment edges from an analysis of the given buckets and extent,
+            returns an edge list and None if succeeded, or partial list and a reason if failed,
+            we look for zero sequences, we know there should be Scan.COPIES of these,
+            between the start and end of these zero areas we know there should be Scan.DIGITS_PER_NUM segments,
+            we scan between the zeroes looking for significant changes,
+            if we find too many edges, the pair with the smallest change are merged,
+            if we do not find enough edges, the largest span segment is split,
+            using zeroes as sync markers mitigates digit stretching in the x direction which happens due
+            to various distortions (perspective, bib crumpling, et al),
+            the buckets image is considered to consist of vertical radial slices, one per x,
+            a zero is defined as all black pixels between the inner and outer extent,
+            a significant change is when the number of black->white and white->black transitions across
+            three slices is above a threshold
             """
 
-        while True:
-            # do the polar to cartesian projection
-            limit_radius = self._radius(self.centre_x, self.centre_y, blob_size)
-            target, stretch_factor = self._project(self.centre_x, self.centre_y, limit_radius)
-            max_x, max_y = target.size()
-
-            # do the edge detection
-            buckets = self._threshold(target)
-            slices = self._slices(buckets)
-            edges = self._edges(slices, max_x, max_y)
-            extent = self._extent(edges, max_x, max_y)
-
-            if self.save_images:
-                plot = self._draw_edges(edges, extent, target)
-                self._unload(plot, '05-edges')
-
-            # see if we need to do it all over again
-            if extent[2] is None and extent[3] is None:
-                # we found both edges, so worth looking deeper
-                max_outer_y = max(filter(lambda y: y is not None, extent[1]))  # this represents all the target rings except the outer white
-                ring_size = max_outer_y / (Scan.NUM_RINGS - 1)
-                expected_blob_size = ring_size * 4  # expected blob size given our detected ring size (2 rings diameter)
-                ratio = blob_size / expected_blob_size
-                if ratio > Scan.MAX_BLOB_OVER_SIZE:
-                    # the openCV blob is too big, do it all again with our better estimate
-                    if self.logging:
-                        self._log('identify: initial blob too big ({:.2f}), re-doing with {:.2f}'
-                                  ' (ratio is {:.2f}, limit is {:.2f})'.
-                                  format(blob_size, expected_blob_size, ratio, Scan.MAX_BLOB_OVER_SIZE))
-                    blob_size = max(expected_blob_size / Scan.BLOB_RADIUS_STRETCH, Scan.MIN_BLOB_SIZE)
-                    continue
-                else:
-                    break
-            else:
-                # failed to find an edge
-                break
-
-        return max_x, max_y, stretch_factor, buckets, slices, extent
-
-    def _constrain(self, half_pulses: List[List[Pulse]], edges) -> List[List[Pulse]]:
-        """ remove half-pulses that are not within the given (inner and outer) edges,
-            in an ideal world all half-pulses will have their lead start on the inner edge,
-            or have their head start on the outer edge or between the two
-            """
-
-        inner = edges[0]
-        outer = edges[1]
-
-        def adjust(x, pulse):
-            """ adjust pulse if its parts are within the inner/outer offset """
-            inner_min = min(inner[x], inner[x] - Scan.INNER_OFFSET)
-            inner_max = max(inner[x], inner[x] - Scan.INNER_OFFSET)
-            if inner_min <= pulse.start <= inner_max:
-                # start is in the offset region, move to the inner and adjust the lead
-                change = pulse.start - inner[x]
-                pulse.start = inner[x]
-                pulse.lead += change
-            pulse_tail_start = pulse.start + pulse.lead + pulse.head
-            if inner_min <= pulse_tail_start <= inner_max:
-                # whole thing is inside inner
-                change = pulse_tail_start - inner[x]
-                if pulse.head > change:
-                    pulse.head -= change
-                elif pulse.lead > change:
-                    pulse.lead -= change
-                else:
-                    pulse.start -= change
-            pulse_head_start = pulse.start + pulse.lead
-            outer_min = min(outer[x], outer[x] - Scan.OUTER_OFFSET)
-            outer_max = max(outer[x], outer[x] - Scan.OUTER_OFFSET)
-            if outer_min <= pulse_head_start <= outer_max:
-                # head start is in the offset region, move to the outer and adjust the tail
-                change = pulse_head_start - outer[x]
-                pulse.lead -= change
-                if pulse.tail is not None and pulse.tail > 0:
-                    pulse.tail -= change
-            return pulse
-
-        # NB: we may have moved the inner/outer edges by an offset, anything that has only changed
-        #     by that is just silently snapped to the new inner/outer
-        if self.logging:
-            header = 'constrain: dropping/adjusting half-pulses outside/spanning inner/outer edges'
-        pulse_count = 0
-        for x, slice_pulses in enumerate(half_pulses):
-            if slice_pulses is None:
-                continue
-            good_pulses = []
-            for idx, pulse in enumerate(slice_pulses):
-                pulse = adjust(x, pulse)
-                if pulse.start < inner[x]:
-                    if (pulse.start + pulse.lead + pulse.head) <= inner[x]:
-                        # its wholly inside, drop it
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} wholly inside inner of {} (dropping)'.format(x, pulse, inner[x]))
-                        continue
-                    elif (pulse.start + pulse.lead) <= inner[x]:
-                        # head starts at inner, move it to +1
-                        old_start = pulse.start + pulse.lead
-                        new_start = inner[x] + 1
-                        new_head = pulse.head - (new_start - old_start)
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} lead finishes at {} inside inner of {}, '
-                                      'moving to {} (changing head from {} to {})'.
-                                      format(x, pulse, old_start, inner[x], new_start, pulse.head, new_head))
-                        pulse.start = inner[x]
-                        pulse.lead = 1
-                        pulse.head = new_head
-                    else:
-                        # runs past the inner, move to start at the inner
-                        new_lead = pulse.lead - (inner[x] - pulse.start)
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} spans inner of {} (moving to inner, new lead length is {})'.
-                                      format(x, pulse, inner[x], new_lead))
-                        pulse.lead = new_lead
-                        pulse.start = inner[x]
-                elif idx == 0 and pulse.start > inner[x]:
-                    # first half-pulse starts late
-                    # this is either just 'jitter' or the pulse has merged into the inner white,
-                    spare_space = pulse.start - inner[x]
-                    if spare_space > 1:
-                        # we've got room to insert another pulse, so assume we've merged with the inner white
-                        # we assume this happens when the black ring is very small,
-                        # so insert a pulse before with a lead length of 1 and a head length of the overshoot
-                        good_pulses.append(Scan.Pulse(inner[x], 1, spare_space - 1))
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} starts late, inserting {}'.format(x, pulse, good_pulses[-1]))
-                    else:
-                        # its just jitter, move start to inner and increase lead
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} starts late, moving to inner {} with lead {}'.
-                                      format(x, pulse, inner[x], pulse.lead + spare_space))
-                        pulse.start = inner[x]
-                        pulse.lead += spare_space
-                head_start = pulse.start + pulse.lead
-                if head_start == outer[x]:
-                    # this is really the final pulse, so add that as a final pulse and then stop
-                    pulse.head = 0
-                    good_pulses.append(pulse)
-                    break
-                if head_start > outer[x]:
-                    if pulse.start >= outer[x]:
-                        # its wholly outside, this means the head of the preceding pulse extends too far,
-                        # we assume this is due to a data pulse merging into the outer edge, so re-arrange
-                        # the preceding pulse to have a shorter head and this pulse to have a small lead
-                        # such that its lead ends at the outer and no head (it becomes the outer)
-                        if len(good_pulses) > 0:
-                            # action options:
-                            #  1. reduce head length of preceding pulse such that it ends at outer-1,
-                            #     set this pulse to start at outer-1 with a lead of 1 and a head of 0
-                            #  2. increase length of preceding pulse lead such that it ends at outer,
-                            #     drop this pulse
-                            # action 2 is done is action 1 is not possible (because the preceding pulse
-                            # start is too close to outer)
-                            prior_pulse = good_pulses[-1]
-                            prior_head_start = prior_pulse.start + prior_pulse.lead
-                            head_end = outer[x] - 1
-                            if prior_head_start < head_end:
-                                # we've got room to do action 1
-                                prior_pulse.head = head_end - prior_head_start
-                                pulse.start = head_end
-                                pulse.lead = outer[x] - head_end
-                                if self.logging:
-                                    if header is not None:
-                                        self._log(header)
-                                        header = None
-                                    self._log('    {}: {} wholly outside outer of {} (sharing with {})'.
-                                              format(x, pulse, outer[x], prior_pulse))
-                                good_pulses.append(pulse)  # keep this adjusted pulse
-                            else:
-                                # no room for action 1, do action 2 instead
-                                prior_pulse.lead = max(outer[x] - prior_pulse.start, 1)
-                                prior_pulse.head = 0
-                                if self.logging:
-                                    if header is not None:
-                                        self._log(header)
-                                        header = None
-                                    self._log('    {}: {} wholly outside outer of {} (merging in to {})'.
-                                              format(x, pulse, outer[x], prior_pulse))
-                        else:
-                            # there is no preceding pulse, this means nothing here, just drop it
-                            if self.logging:
-                                if header is not None:
-                                    self._log(header)
-                                    header = None
-                                self._log('    {}: {} wholly outside outer of {} (dropping)'.
-                                          format(x, pulse, outer[x]))
-                    else:
-                        # lead spans the outer, truncate lead at the outer
-                        head_start = pulse.start + pulse.lead
-                        new_lead = pulse.lead - (head_start - outer[x])
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} lead spans outer of {} (moving to outer, new lead length is {})'.
-                                      format(x, pulse, outer[x], new_lead))
-                        pulse.lead = new_lead
-                        pulse.head = 0
-                        good_pulses.append(pulse)  # keep this adjusted pulse
-                    break  # we don't want anything beyond the outer
-                if idx == (len(slice_pulses) - 1) and (pulse.start + pulse.lead) < outer[x]:
-                    # final half-pulse starts early (NB: head is 0 in the last half-pulse)
-                    # there are two cases: a data pulse has merged into the outer white or
-                    # edge smoothing has moved us inside the outer edge slightly, if we are
-                    # inside by enough to make a new pulse we assume the former, else the latter
-                    spare_space = outer[x] - (pulse.start + pulse.lead)
-                    if spare_space > 1:
-                        # got enough room for a new pulse
-                        # so split it such that pulse goes to outer edge and insert a new outer half-pulse after it
-                        head_space = int(spare_space / 2)  # will be at least 1
-                        lead_space = spare_space - head_space  # will also be at least 1
-                        pulse.head = head_space
-                        good_pulses.append(pulse)
-                        pulse = Scan.Pulse(outer[x] - lead_space, lead_space)
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} head starts early, splitting {}'.format(x, good_pulses[-1], pulse))
-                    else:
-                        # no room for a new pulse, just stretch the lead of the existing one
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: {} head starts early, stretching lead to reach outer {} by {}'.
-                                      format(x, pulse, outer[x], spare_space))
-                        pulse.lead += spare_space
-                # it survived, keep it
-                good_pulses.append(pulse)
-            if len(good_pulses) > 0:
-                half_pulses[x] = good_pulses
-                pulse_count += 1
-            else:
-                half_pulses[x] = None
+        max_x, max_y = buckets.size()
+        reason = None
 
         if self.logging:
-            self._log('constrain: {} qualifying half-pulses:'.format(pulse_count))
-            for x, slice_pulses in enumerate(half_pulses):
-                if slice_pulses is None:
-                    continue
-                pulses = ''
-                for pulse in slice_pulses:
-                    pulses += ', {}'.format(pulse)
-                pulses = pulses[2:]
-                self._log('    {}: {}'.format(x, pulses))
+            header = 'find_segment_edges:'
 
-        return half_pulses
+        # region helpers...
+        def show_edge(edge):
+            """ given an edge tuple return a string suitable for printing """
+            return '({}, {})'.format(edge[0], edge[1])
 
-    def _pulses(self, half_pulses: List[List[Pulse]]) -> List[Pulse]:
-        """ find the radial pulses in the given half_pulses,
-            returns a full pulse list
-            """
+        def show_edge_list(edges):
+            """ given a list of edge tuples return a string suitable for printing """
+            msg = ''
+            for edge in edges:
+                msg = '{}, {}'.format(msg, show_edge(edge))
+            msg = msg[2:]
+            return msg
 
-        def find_predecessor(idx, slice_pulses):
-            """ find the predecessor index of the given pulse index,
-                it iterates backwards looking for the first non-None pulse
+        def make_zero_edges(zeroes):
+            """ make a list of edges (for diagnostic purposes) from a list of zeroes """
+            edges = []
+            if self.logging:
+                for start_0, end_0 in zeroes:
+                    edges.append(start_0)
+                    edges.append(end_0)
+            return edges
+
+        def find_zeroes(start_x=0, end_x=max_x, ) -> [[int, int]]:
+            """ find zeroes between start_x and end_x, returns a list of zero start/end x co-ords,
+                a zero is either mostly black or partially grey between the inner and outer edges,
+                the guard areas are ignored
                 """
-            if idx > 0:
-                for p in range(idx - 1, -1, -1):
-                    if slice_pulses[p] is not None:
-                        return p
-            return None
+            zeroes = []
+            # find all the 0 runs
+            start_0 = None
+            for x in range(start_x, end_x):
+                blacks = 0
+                greys = 0
+                whites = 0
+                for y in range(extent.inner[x] + Scan.INNER_GUARD, extent.outer[x] - Scan.OUTER_GUARD):
+                    pixel = buckets.getpixel(x, y)
+                    if pixel == MAX_LUMINANCE:
+                        whites += 1
+                    elif pixel == MIN_LUMINANCE:
+                        blacks += 1
+                    else:
+                        greys += 1
+                if whites > Scan.ZERO_WHITE_THRESHOLD:
+                    is_zero = False
+                elif greys > Scan.ZERO_GREY_THRESHOLD:
+                    is_zero = False
+                else:
+                    is_zero = True
+                if is_zero:
+                    if start_0 is None:
+                        # this is the start of a 0 run
+                        start_0 = x
+                else:
+                    if start_0 is not None:
+                        # this is the end of a 0 run
+                        zeroes.append([start_0, x - 1])
+                        start_0 = None
+            # deal with a run that wraps
+            if start_0 is not None:
+                # we ended in a 0 run,
+                # if the first run starts at 0 then its a wrap,
+                # otherwise the run ends at the end
+                if len(zeroes) == 0:
+                    # this means all the slices are 0!
+                    pass
+                elif zeroes[0][0] == 0:
+                    # started on 0, so it really started on the last start
+                    zeroes[0][0] = start_0
+                else:
+                    # add a final one that ended here
+                    zeroes.append([start_0, max_x - 1])
+            return zeroes
 
-        max_x = len(half_pulses)
+        def find_edges(start_x, end_x):
+            """ between slices from start_x to end_x find the most likely segment edges,
+                start_x and end_x given here are the first and last non-zero slices,
+                NB: edges at start_x and end_x are assumed, we only look for edges between those,
+                an 'edge' is detected as the white pixel differences across three consecutive slices
+                """
 
-        # merge short half-pulses (this is filtering noise)
+            def get_difference(slice1, slice2, slice3):
+                """ measure the difference between the three given slices,
+                    the difference is the number of non-overlapping white pixels,
+                    also returns a bool to indicate if the middle slice was a 'zero'
+                    """
+
+                def add_whites(slice, pixels):
+                    """ accumulate white pixels from slice between the inner and outer extent """
+                    is_zero = True
+                    for y in range(extent.inner[slice], extent.outer[slice]):
+                        pixel = buckets.getpixel(slice, y)
+                        if pixel == MAX_LUMINANCE:
+                            pixels[y] += 1
+                            is_zero = False
+                    return pixels, is_zero
+
+                pixels = [0 for _ in range(max_y)]
+                pixels, zero_1 = add_whites(slice1, pixels)
+                pixels, zero_2 = add_whites(slice2, pixels)
+                pixels, zero_3 = add_whites(slice3, pixels)
+                difference = 0
+                for y in range(max_y):
+                    if pixels[y] == 3 or pixels[y] == 0:
+                        # this means all 3 are the same
+                        pass
+                    else:
+                        # there is a change across these 3,
+                        # it could be 100, 110, 001, or 011 (101 is not possible due to cleaning)
+                        difference += 1
+                return difference, zero_2
+
+            candidates = []
+            if end_x < start_x:
+                # we're wrapping
+                end_x += max_x
+            in_zero = None
+            for x in range(start_x, end_x - 1):  # NB: stopping short to ensure next_slice is not over the end
+                last_slice = (x - 1) % max_x
+                this_slice = x % max_x
+                next_slice = (x + 1) % max_x
+                # measure difference between last, this and the next slice
+                difference, is_zero = get_difference(last_slice, this_slice, next_slice)
+                if is_zero:
+                    if in_zero is None:
+                        # found the start of a zero run - the middle of such a thing is an edge not its ends
+                        in_zero = x
+                    continue  # continue to find the other end
+                else:
+                    if in_zero is not None:
+                        # got to the end of a zero run - set the middle as an edge candidate
+                        midpoint = int(round(in_zero + ((x - in_zero) / 2)))
+                        candidates.append((midpoint % max_x, max_y - 1))  # set as a semi-precious edge
+                        in_zero = None
+                        continue  # carry on to find the next edge
+                if difference >= Scan.MIN_SEGMENT_EDGE_DIFFERENCE:
+                    # got a big change - consider it to be an edge
+                    candidates.append((x % max_x, difference))
+            if in_zero:
+                # we ended in a zero run
+                # the end cannot be in a zero - so the end is also the end of a zero run
+                midpoint = int(round(in_zero + ((end_x - in_zero) / 2)))
+                candidates.append((midpoint % max_x, max_y - 1))  # set as a semi-precious edge
+
+            return candidates
+
+        def merge_smallest_segment(copy_edges, limit):
+            """ merge segments that are within limit of each other,
+                returns True if found one and copy_edges updated
+                """
+            nonlocal header
+            smallest = limit
+            smallest_at = None
+            start_digit, _ = copy_edges[0]
+            for x in range(1, len(copy_edges)):
+                end_digit, _ = copy_edges[x]
+                if end_digit < start_digit:
+                    # this one wraps
+                    width = end_digit + max_x - start_digit
+                else:
+                    width = end_digit - start_digit
+                if width < smallest:
+                    smallest = width
+                    smallest_at = x
+                start_digit = end_digit
+            if smallest_at is None:
+                # did not find one
+                return False
+            # smallest_at is the copy edge at the end of the smallest gap,
+            # so its predecessor is the start,
+            # we move the predecessor and delete smallest_at,
+            # however, precious edge are never deleted, a precious edge is one with a difference of max_y
+            # NB: copy_edges has >2 entries so first and last always have something in between
+            start_at, start_difference = copy_edges[smallest_at - 1]  # NB: smallest_at cannot be 0
+            end_at, end_difference = copy_edges[smallest_at]
+            if start_difference == max_y:
+                # start is precious, if end is precious too it means we found a zero near the start, tough
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('        removing edge at x:{}, gap of {} from precious start too small (limit is {:.2f})'.
+                              format(show_edge(copy_edges[smallest_at]), smallest, limit))
+                del copy_edges[smallest_at]
+            elif end_difference == max_y:
+                # end is precious, we know start
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('        removing edge at x:{}, gap of {} to precious end too small (limit is {:.2f})'.
+                              format(show_edge(copy_edges[smallest_at - 1]), smallest, limit))
+                del copy_edges[smallest_at - 1]
+            else:
+                # neither are precious, so merge them
+                if end_at < start_at:
+                    # it wraps
+                    end_at += max_x
+                span = end_at - start_at
+                total_difference = min(start_difference + end_difference, max_y - 1)  # don't let it become precious
+                offset = (end_difference / total_difference) * span
+                midpoint = int(round(start_at + offset)) % max_x
+                new_edge = (midpoint, total_difference)
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('        merging edge at x:{} and x:{} to x:{}, gap of {} too small (limit is {:.2f})'.
+                              format(show_edge((start_at, start_difference)),
+                                     show_edge((end_at, end_difference)),
+                                     show_edge(new_edge), smallest, limit))
+                copy_edges[smallest_at - 1] = new_edge
+                del copy_edges[smallest_at]
+            return True
+
+        def split_biggest_segment(copy_edges, limit):
+            """ split segments that are further apart than the given limit,
+                returns True if found one and copy_edges updated
+                """
+            # we split off the nominal segment width each time,
+            # the nominal segment width is last-edge minus first-edge (both of which we inserted above)
+            # divided by number of expected edges (number of digits)
+            nonlocal header
+            first_at = copy_edges[0][0]
+            last_at = copy_edges[-1][0]
+            if last_at < first_at:
+                # this copy wraps
+                last_at += max_x
+            nominal_width = (last_at - first_at) / Scan.DIGITS_PER_NUM
+            biggest = limit
+            biggest_at = None
+            start_digit, _ = copy_edges[0]
+            start_at = None
+            for x in range(1, len(copy_edges)):
+                end_digit, _ = copy_edges[x]
+                if end_digit < start_digit:
+                    # this one wraps
+                    width = end_digit + max_x - start_digit
+                else:
+                    width = end_digit - start_digit
+                if width >= biggest:
+                    biggest = width
+                    biggest_at = x
+                    start_at = start_digit
+                start_digit = end_digit
+            if start_at is None:
+                # did not find one
+                return False
+            new_edge = (int(round((start_at + nominal_width) % max_x)), 0)
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('        inserting edge at x:{}, gap of {} too big (limit is {:.2f})'.
+                          format(new_edge, biggest, limit))
+            copy_edges.insert(biggest_at, new_edge)
+            return True
+        # endregion
+
+        # region find enough zeroes...
+        zeroes = find_zeroes()
         if self.logging:
-            header = 'pulses: merge short half-pulses:'
-        for x, slice_pulses in enumerate(half_pulses):
-            if slice_pulses is None:
-                continue
-            for idx, pulse in enumerate(slice_pulses):
-                if pulse is None:
-                    continue
-                if pulse.head > 0:
-                    # NB: this means this is not the outer edge as they have a head len of zero
-                    # if there is a following pulse with a longer head, dump this one
-                    if idx < len(slice_pulses) - 1:
-                        successor = slice_pulses[idx + 1]
-                        if successor.head > pulse.head:
-                            # assume this one is noise, merge it into the lead of its successor
-                            slice_pulses[idx] = None
-                            successor.start = pulse.start
-                            successor.lead += (pulse.lead + pulse.head)
+            if header is not None:
+                self._log(header)
+                header = None
+            self._log('    zero candidates: {}'.format(zeroes))
+        # dump zeroes that are too narrow or too wide
+        max_actual_width = 0
+        max_digit_width = (max_x / Scan.NUM_SEGMENTS) * Scan.MAX_SEGMENT_WIDTH
+        for z in range(len(zeroes)-1, -1, -1):
+            start_0, end_0 = zeroes[z]
+            if end_0 < start_0:
+                width = (end_0 + max_x) - start_0
+            else:
+                width = end_0 - start_0
+            width += 1  # +1 'cos start/end is inclusive
+            if width < Scan.MIN_SEGMENT_SAMPLES:
+                # too narrow
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('        dropping narrow ({}) zero {} (limit {})'.
+                              format(width, zeroes[z], Scan.MIN_SEGMENT_SAMPLES))
+                del zeroes[z]
+            elif width > max_digit_width:
+                # too wide - this means we're looking at junk
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    zero {} too wide at {} (limit {})'.format(zeroes[z], width, max_digit_width))
+                edges = make_zero_edges(zeroes)
+                return edges, 'zero too wide'
+            else:
+                if width > max_actual_width:
+                    max_actual_width = width  # this is used to pick 'strong' zeroes
+        # if we do not find at least COPIES zeroes we're looking at junk
+        if len(zeroes) < Scan.COPIES:
+            # cannot be a valid target
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('        only found {} zeroes, need {}'.format(len(zeroes), Scan.COPIES))
+                self._log('    final zeroes={}'.format(zeroes))
+                edges = []
+                for start_0, end_0 in zeroes:
+                    edges.append(start_0)
+                    edges.append(end_0)
+            else:
+                edges = []
+            return edges, 'missing 0''s'
+        # if we find too many dump the 'worst' ones
+        # first find the 'strong' zeroes - these are those close to the max_actual_width
+        # strong zeroes are used as reference points for the weak ones
+        # we make sure there is always at least Scan.COPIES 'strong' zeroes
+        if len(zeroes) > Scan.COPIES:
+            strong_zeroes = []
+            strong_limit = max_actual_width * Scan.STRONG_ZERO_LIMIT
+            ignore_limit = max_x
+            while len(strong_zeroes) < Scan.COPIES:
+                for z, (start_0, end_0) in enumerate(zeroes):
+                    if end_0 < start_0:
+                        width = (end_0 + max_x) - start_0
+                    else:
+                        width = end_0 - start_0
+                    if width >= ignore_limit:
+                        # this is bypassing ones we found last time
+                        pass
+                    elif width >= strong_limit:
+                        strong_zeroes.append((start_0, end_0))
+                ignore_limit = strong_limit  # do not want to find these again
+                strong_limit -= 1  # bring limit down in case did not enough
+            # create ideals for all our strong zeroes
+            ideals = []
+            ideal_gap = max_x / Scan.COPIES
+            for start_0, end_0 in strong_zeroes:
+                for copy in range(Scan.COPIES):
+                    ideals.append(int(round(start_0 + (copy * ideal_gap))) % max_x)
+            if self.logging:
+                ideals.sort()  # sorting helps when looking at logs, not required by the code
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    strong zeroes: {}'.format(strong_zeroes))
+                self._log('    ideal strong zero edges: {}'.format(ideals))
+            while len(zeroes) > Scan.COPIES:
+                # got too many, dump the 'worst' one,
+                # the worst is that farthest from an ideal position of a 'strong' zero
+                # for each 0, calculate the smallest difference to an 'ideal' 0
+                # dump the 0 with the biggest difference
+                gaps = []
+                for z, (start_0, end_0) in enumerate(zeroes):
+                    smallest_gap = max_x
+                    smallest_at = None
+                    for ideal in ideals:
+                        if ideal == start_0:
+                            # this is self, ignore it
+                            continue
+                        # we need to allow for wrapping
+                        # a gap of > +/-ideal_gap is either junk or a wrap
+                        if start_0 < ideal:
+                            gap = ideal - start_0
+                            if gap > ideal_gap:
+                                # assume a wrap
+                                gap = start_0 + max_x - ideal
+                        else:
+                            gap = start_0 - ideal
+                            if gap > ideal_gap:
+                                # assume a wrap
+                                gap = ideal + max_x - start_0
+                        if gap < smallest_gap:
+                            smallest_gap = gap
+                            smallest_at = z
+                    gaps.append((smallest_gap, smallest_at))
+                biggest_gap = 0
+                biggest_at = None
+                ambiguous = None
+                for gap in gaps:
+                    if gap[0] > biggest_gap:
+                        biggest_gap = gap[0]
+                        biggest_at = gap[1]
+                        ambiguous = None
+                    elif gap[0] == biggest_gap:
+                        ambiguous = gap[1]
+                if ambiguous is not None and (len(zeroes) - 1) == Scan.COPIES:
+                    # ToDo: deal with ambiguity somehow
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('        got excess zeroes with ambiguity at x:{} and x:{}'.
+                                  format(zeroes[biggest_at][0], zeroes[ambiguous][0]))
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('        found {} zeroes, only want {}, dropping {} (gap to ideal is {})'.
+                              format(len(zeroes), Scan.COPIES, zeroes[biggest_at], biggest_gap))
+                # NB: This may delete a 'strong' zero and thereby invalidate its ideals.
+                #     If we removed the ideals it would just make subsequent gaps even bigger.
+                #     It could also invalidate already accepted zeroes.
+                #     What to do?
+                #     Nothing! If things are that iffy we're probably looking at junk anyway.
+                zeroes.pop(biggest_at)
+        # if gap between zeroes is too small or too big we're looking at junk
+        # too small is DIGITS_PER_NUM * MIN_SEGMENT_SAMPLES
+        # too big is relative to a 'copy width'
+        min_gap = Scan.MIN_ZERO_GAP
+        max_gap = (max_x / Scan.COPIES) * Scan.MAX_ZERO_GAP
+        if self.logging:
+            edges = make_zero_edges(zeroes)
+        else:
+            edges = []
+        for copy in range(Scan.COPIES):
+            _, start_x = zeroes[copy]
+            end_x, _ = zeroes[(copy + 1) % Scan.COPIES]
+            if end_x < start_x:
+                # we've wrapped
+                gap = end_x + max_x - start_x
+            else:
+                gap = end_x - start_x
+            if gap < min_gap:
+                # too small, so this is junk
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    gap ({}) between zeroes at x:{} to x:{} too small (limit is {})'.
+                              format(gap, start_x, end_x, min_gap))
+                return edges, '0 gap''s too small'
+            elif gap > max_gap:
+                # too big, so this is junk
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    gap ({}) between zeroes at x:{} to x:{} too big (limit is {})'.
+                              format(gap, start_x, end_x, max_gap))
+                return edges, '0 gap''s too big'
+
+        if self.logging:
+            if header is not None:
+                self._log(header)
+                header = None
+            self._log('    final zeroes={}'.format(zeroes))
+        # endregion
+
+        # find segment edges between the 0's
+        edges = []
+        candidates = []
+        for copy in range(Scan.COPIES):
+            _, start_x = zeroes[copy]
+            end_x, _ = zeroes[(copy + 1) % Scan.COPIES]
+            # find edge candidates
+            copy_edges = find_edges(start_x + 1, end_x - 2)  # keep away from the zero edges
+            copy_edges.insert(0, (start_x, max_y))      # include the initial (precious) edge (end of this 0)
+            copy_edges.append((end_x, max_y))           # ..and the final (precious) edge (start of next 0)
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    copy {}: edge candidates=[{}]'.format(copy, show_edge_list(copy_edges)))
+            # merge edges that are too narrow
+            # too narrow here is relative to the nominal segment width,
+            # nominal segment width is the span between the zeroes divided by number of digits in that span
+            if end_x < start_x:
+                # we've wrapped
+                span = (end_x + max_x) - start_x
+            else:
+                span = end_x - start_x
+            min_segment = int(round((span / Scan.DIGITS_PER_NUM) * Scan.MIN_SEGMENT_WIDTH))
+            while merge_smallest_segment(copy_edges, min_segment):
+                pass
+            while len(copy_edges) > (Scan.DIGITS_PER_NUM + 1):
+                # got too many, merge two with the smallest gap
+                merge_smallest_segment(copy_edges, max_x)
+            while len(copy_edges) < (Scan.DIGITS_PER_NUM + 1):
+                # haven't got enough, split the biggest
+                if not split_biggest_segment(copy_edges, 0):
+                    # this means we're looking at crap
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    found {} edges, need {}, cannot split, giving up'.
+                                  format(len(copy_edges), Scan.DIGITS_PER_NUM + 1))
+                    reason = 'no edges'
+                    break
+            # add the segment edges for this copy
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    copy {}: final edges=[{}]'.format(copy, show_edge_list(copy_edges)))
+            for edge in copy_edges:
+                edges.append(edge[0])
+
+        # we're done
+        if self.logging:
+            edges.sort()  # not necessary but helps when viewing the logs
+            if header is not None:
+                self._log(header)
+                header = None
+            self._log('    final edges={}'.format(edges))
+
+        return edges, reason
+
+    def _find_pulses(self, edges: [int], buckets: Frame, extent: Extent) -> ([Pulse], [int]):
+        """ extract the lead, head and tail lengths from each of the segments defined in edges,
+            buckets is the binarized image, the extent defines the inner and outer limits,
+            each x co-ord is considered as a 'slice' across y (the radius), each edge is
+            the x co-ord of a bit change, each slice is either a 'pulse' or empty (all black),
+            all slices empty (or nearly empty) in an edge is a 'zero' (lead>0, head=0, tail=0),
+            empty (or nearly empty) slices otherwise are ignored, (they are noise within a bit),
+            the position of the head and tail of each slice is determined and their average is
+            used to calculate pulse component lengths, any slice with a double head is ignored,
+            the first and last slice of an edge are also ignored (to make sure we get no overlaps),
+            a grey pixel in the lead is attributed half to the lead and half to the head,
+            a grey pixel in the tail is attributed half to the head and half to the tail,
+            returns a list of Scan.Pulse reflecting the lead, head and tail lengths found
+            """
+
+        # ToDo: a simple area is not good enough, think of a better way?
+        #       cell edge detection not good enough - think again...
+
+        if self.logging:
+            header = 'find_pulses:'
+
+        max_x, max_y = buckets.size()
+
+        pulses = [None for _ in range(len(edges))]
+        bad_slices = []  # diagnostic info
+
+        for edge in range(len(edges)):
+            lead_start = 0
+            head_start = 0
+            tail_start = 0
+            tail_stop = 0
+            start_x = edges[edge]
+            stop_x = edges[(edge + 1) % len(edges)]
+            if stop_x < start_x:
+                # this one wraps
+                stop_x += max_x
+            head_slices = 0
+            zero_slices = []
+            for dx in range(start_x + 1, stop_x):  # NB: ignoring first and last slice
+                x = dx % max_x
+                lead = 0
+                head = 0
+                tail = 0
+                lead_grey = 0
+                tail_grey = 0
+                ignore_slice = False
+                for y in range(extent.inner[x], extent.outer[x]):
+                    pixel = buckets.getpixel(x, y)
+                    if pixel == MID_LUMINANCE:
+                        # got a grey
+                        if head == 0:
+                            # we're in the lead area
+                            lead_grey += 1
+                        else:
+                            # we're in the head or tail area
+                            tail_grey += 1
+                    elif pixel == MIN_LUMINANCE:
+                        # got a black pixel
+                        if head == 0:
+                            # we're still in the lead area
+                            lead += 1
+                        elif tail == 0:
+                            # we're entering the tail area
+                            tail = 1
+                        else:
+                            # we're still on the tail area
+                            tail += 1
+                    else:
+                        # got a white pixel
+                        if head == 0:
+                            # we're entering the head area
+                            head = 1
+                        elif tail == 0:
+                            # we're still in the head area
+                            head += 1
+                        else:
+                            # got a second pulse, this is a segment overlap due to neighbour bleeding
+                            # ignore this slice
+                            ignore_slice = True
+                            bad_slices.append(x)
                             if self.logging:
                                 if header is not None:
                                     self._log(header)
                                     header = None
-                                self._log('    {}: merge {} into successor lead {}'.format(x, pulse, successor))
-                            continue
-                if 0 < pulse.head < Scan.MIN_PULSE_HEAD:
-                    # too small, merge it into the lead of its successor
-                    slice_pulses[idx] = None
-                    if (idx + 1) < len(slice_pulses):
-                        successor = slice_pulses[idx + 1]
-                        successor.start = pulse.start
-                        successor.lead += (pulse.lead + pulse.head)
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: merge {} into successor lead {}'.format(x, pulse, successor))
-                    else:
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: dropping {}, too small with no successor'.format(x, pulse))
+                                self._log('    ignoring slice with double pulse at x:{} y:{}'.format(x, y))
+                            break
+                if ignore_slice:
                     continue
-                if pulse.head > 0 and pulse.lead < Scan.MIN_PULSE_LEAD:
-                    # too small, merge it into the head of its predecessor
-                    slice_pulses[idx] = None
-                    pred = find_predecessor(idx, slice_pulses)
-                    if pred is None:
-                        # no predecessor, move self up instead
-                        pulse.start -= pulse.lead
-                        pulse.lead += pulse.lead
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: moving self to {} from {}'.format(x, pulse, slice_pulses[idx]))
-                        slice_pulses[idx] = pulse
-                    else:
-                        slice_pulses[pred].head += (pulse.lead + pulse.head)
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: merge {} into predecessor head {}'.format(x, pulse, slice_pulses[pred]))
-                    continue
-
-        # merge extra half-pulses
-        # due to the action of _constrain we know the first half-pulse starts at the inner edge
-        # and the last half-pulse head starts at the outer edge, we expect there to be no other
-        # half-pulses in between, if there are they are noise and the smallest is merged into
-        # one of its neighbours (extra lead in its predecessor or extra head in its successor).
-        if self.logging:
-            header = 'pulses: merge extra half-pulses:'
-        for x, slice_pulses in enumerate(half_pulses):
-            if slice_pulses is None:
-                continue
-            # drop None pulses
-            for idx in range(len(slice_pulses)-1, -1, -1):
-                if slice_pulses[idx] is None:
-                    del slice_pulses[idx]
-            if len(slice_pulses) == 0:
-                half_pulses[x] = None
-                continue
-            while len(slice_pulses) > 2:
-                for idx in range(1, len(slice_pulses)-1):
-                    pulse = slice_pulses[idx]
-                    if pulse is None:
-                        continue
-                    # merge this extra with the most appropriate neighbour
-                    pred = slice_pulses[idx - 1]
-                    if pred.head > pulse.head:
-                        # predecessor head is bigger - merge us into the lead of our successor
-                        succ = slice_pulses[idx + 1]
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: merge extra pulse {} into successor lead {}'
-                                      ' (predecessor {} has bigger head)'.
-                                      format(x, pulse, succ, pred))
-                        succ.start = pulse.start
-                        succ.lead += pulse.lead + pulse.head
-                        del slice_pulses[idx]
-                        break
-                    else:  # pred.head <= pulse.head:
-                        # we're bigger, merge predecessor into our lead
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: merge extra pulse {} into successor lead {}'
-                                      ' (successor {} has bigger or same head)'.
-                                      format(x, pred, pulse, pulse))
-                        pulse.start = pred.start
-                        pulse.lead += pred.lead + pred.head
-                        del slice_pulses[idx - 1]
-                        break
-
-        # combine two half-pulses into a full pulse
-        # when we get here there are either zero, one or two half-pulses per slice, never more
-        if self.logging:
-            header = 'pulses: combining two half-pulses into full-pulses:'
-        pulses = [None for _ in range(max_x)]
-        for x, slice_pulses in enumerate(half_pulses):
-            if slice_pulses is None:
-                continue
-            full_pulse = None
-            for idx, pulse in enumerate(slice_pulses):
-                if pulse is None:
-                    continue
-                # two half pulses make a full pulse,
-                # we have a lead and head in the first and a tail from the lead in the second
-                # we know each of these parts are of an acceptable length (from previous loop)
-                if full_pulse is None:
-                    # found the first one, we'll fill in the tail of this from the next half-pulse
-                    full_pulse = pulse
-                    full_pulse.tail = 0
-                elif full_pulse.tail > 0:
-                    # this means we've found an extra half-pulse, which implies the previous loop failed
-                    self._log('pulses: extra half-pulse at {} of {}'.format(x, pulse), fatal=True)
+                # make the grey adjustments
+                if head > 0:
+                    lead += lead_grey * (1 - Scan.LEAD_GRAY_TO_HEAD)
+                    head += lead_grey * Scan.LEAD_GRAY_TO_HEAD
+                    head += tail_grey * Scan.TAIL_GRAY_TO_HEAD
+                    tail += tail_grey * (1 - Scan.TAIL_GRAY_TO_HEAD)
+                # check what we got
+                if head < Scan.MIN_PULSE_HEAD:
+                    # got an empty (or nearly empty) slice - note it for possible ignore
+                    if self.logging and head > 0:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    treating slice with small head ({}) at x:{} as zero (limit is {}))'.
+                                  format(head, x, Scan.MIN_PULSE_HEAD))
+                    zero_slices.append(x)  # note for later
                 else:
-                    # found the second one, its lead is our full pulse tail
-                    full_pulse.tail = pulse.lead
-                prev_pulse = pulse
-            pulses[x] = full_pulse
+                    head_slices += 1
+                    # note pulse part positions
+                    lead_start_y = extent.inner[x]
+                    head_start_y = lead_start_y + lead
+                    tail_start_y = head_start_y + head
+                    tail_stop_y = tail_start_y + tail
+                    # update accumulators
+                    lead_start += lead_start_y
+                    head_start += head_start_y
+                    tail_start += tail_start_y
+                    tail_stop += tail_stop_y
+            if head_slices > 0:
+                # got a pulse for this edge
+                lead_start /= head_slices
+                head_start /= head_slices
+                tail_start /= head_slices
+                tail_stop /= head_slices
+                lead = head_start - lead_start
+                head = tail_start - head_start
+                tail = tail_stop - tail_start
+                pulses[edge] = Scan.Pulse(start=lead_start, stop=tail_stop,
+                                          lead=lead, head=head, tail=tail,
+                                          begin=start_x, end=stop_x % max_x)
+                bad_slices += zero_slices
+            elif len(zero_slices) > 0:
+                # got a zero for this edge
+                lead_start = 0
+                tail_stop = 0
+                for x in zero_slices:
+                    lead_start += extent.inner[x]
+                    tail_stop += extent.outer[x]
+                lead_start /= len(zero_slices)
+                tail_stop /= len(zero_slices)
+                lead = tail_stop - lead_start
+                pulses[edge] = Scan.Pulse(start=lead_start, stop=tail_stop,
+                                          lead=lead, head=0, tail=0,
+                                          begin=start_x, end=stop_x % max_x)
 
-        if self.logging:
-            qualifiers = 0
-            for pulse in pulses:
-                if pulse is not None:
-                    qualifiers += 1
-            self._log('pulses: {} qualifying full pulses:'.format(qualifiers))
-            for x, pulse in enumerate(pulses):
-                if pulse is None:
-                    continue
-                self._log('    {}: {}'.format(x, pulse))
-
-        return pulses
-
-    def _clean(self, pulses: List[Pulse], max_x, max_y) -> List[Pulse]:
-        """ clean the given full-pulse list of 'artifacts',
-            'cleaning' means removing nipples, slopes and corners,
-            artifacts are caused by luminance 'bleeding' in low resolution images
-            """
-
-        # ToDo: move these constants to Scan
-
-        EXACT = 'exact'
-        AT_LEAST = 'at-least'
-        INHERIT_LEFT = 'inherit-left'
-        INHERIT_RIGHT = 'inherit-right'
-        UP_NIPPLE = 'up-nipple'
-        DOWN_NIPPLE = 'down-nipple'
-        FALLING_SLOPE = 'falling-slope'
-        RISING_SLOPE = 'rising-slope'
-        TOP_RIGHT_CORNER = 'top-right-corner'
-        TOP_LEFT_CORNER = 'top-left-corner'
-        BOTTOM_LEFT_CORNER = 'bottom-left-corner'
-        BOTTOM_RIGHT_CORNER = 'bottom-right-corner'
-        APPLY_AT_START = 'apply-at-start'
-        APPLY_AT_END = 'apply-at-end'
-
-        # an artifact to remove is defined by left and right neighbour offsets, exact or at-least,
-        # inherit right or left and a context, offset is what must be added to self to meet the neighbour
-        ARTIFACTS =((-1, EXACT   , +2, AT_LEAST, INHERIT_LEFT , TOP_RIGHT_CORNER   ),
-                    (+2, AT_LEAST, -1, EXACT   , INHERIT_RIGHT, TOP_LEFT_CORNER    ),
-                    (-2, AT_LEAST, +1, EXACT   , INHERIT_RIGHT, BOTTOM_LEFT_CORNER ),
-                    (+1, EXACT   , -2, AT_LEAST, INHERIT_LEFT , BOTTOM_RIGHT_CORNER),
-                    (-1, EXACT   , -1, EXACT   , INHERIT_LEFT , DOWN_NIPPLE        ),
-                    (+1, EXACT   , +1, EXACT   , INHERIT_LEFT , UP_NIPPLE          ),
-                    (-1, EXACT   , +1, EXACT   , INHERIT_LEFT , FALLING_SLOPE      ),
-                    (+1, EXACT   , -1, EXACT   , INHERIT_LEFT , RISING_SLOPE       ))
-
-        def move_head_start(x, pulse, from_start, to_start, context):
-            """ move the head start of pulse as directed """
-            nonlocal header
-            change = from_start - to_start
             if self.logging:
                 if header is not None:
                     self._log(header)
                     header = None
-                self._log('    {}: ({}) moving head start from {} to {} in {} (change is {})'.
-                          format(x, context, from_start, to_start, pulse, change))
-            pulse.lead -= change
-            pulse.head += change
-            return pulse
+                self._log('    {}: pulse {} in {} heads and {} zeroes'.
+                          format(edge, pulses[edge], head_slices, len(zero_slices)))
 
-        def move_head_end(x, pulse, from_end, to_end, context):
-            """ move the head end of pulse as directed """
-            nonlocal header
-            change = from_end - to_end
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    {}: ({}) moving head end from {} to {} in {} (change is {})'.
-                          format(x, context, from_end, to_end, pulse, change))
-            pulse.head -= change
-            pulse.tail += change
-            return pulse
+        return pulses, bad_slices
 
-        def get_start_end(pulse):
-            """ get the head start/end for the given pulse """
-            if pulse.tail == 0 or pulse.head == 0:
-                head_start = pulse.start + pulse.lead
-                head_end = pulse.start
-            else:
-                head_start = pulse.start + pulse.lead
-                head_end = head_start + pulse.head
-            return head_start, head_end
-
-        def adjust_start_end(other_head_start, this_head_start, other_head_end, this_head_end):
-            """ adjust other start/end if they do not overlap """
-            if other_head_end < this_head_start:
-                other_start = max_y
-            else:
-                other_start = other_head_start
-            if other_head_start > this_head_end:
-                other_end = 0
-            else:
-                other_end = other_head_end
-            return other_start, other_end
-
-        def apply(x, pulse, artifact, apply_at, left_at, this_at, right_at):
-            """ apply the artifact rule """
-            left_offset, left_mode, right_offset, right_mode, inherit_side, context = artifact
-            if left_mode == EXACT:
-                left_match = left_at == (this_at + left_offset)
-            elif left_offset < 0:
-                left_match = left_at <= (this_at + left_offset)
-            else:
-                left_match = left_at >= (this_at + left_offset)
-            if right_mode == EXACT:
-                right_match = right_at == (this_at + right_offset)
-            elif right_offset < 0:
-                right_match = right_at <= (this_at + right_offset)
-            else:
-                right_match = right_at >= (this_at + right_offset)
-            if left_match and right_match:
-                if inherit_side == INHERIT_LEFT:
-                    inherit = left_at
-                else:
-                    inherit = right_at
-                if apply_at == APPLY_AT_START:
-                    pulse = move_head_start(x, pulse, this_at, inherit, context)
-                else:
-                    pulse = move_head_end(x, pulse, this_at, inherit, context)
-            return pulse
-
-        if self.logging:
-            header = 'clean: remove artifacts'
-        for x in range(len(pulses)):
-            this_pulse = pulses[x]
-            if this_pulse is None:
-                continue
-            left_x = (x - 1) % max_x
-            left_pulse = pulses[left_x]
-            if left_pulse is None:
-                continue
-            right_x = (x + 1) % max_x
-            right_pulse = pulses[right_x]
-            if right_pulse is None:
-                continue
-            left_head_start, left_head_end = get_start_end(left_pulse)
-            right_head_start, right_head_end = get_start_end(right_pulse)
-            for artifact in ARTIFACTS:
-                this_head_start, this_head_end = get_start_end(this_pulse)
-                left_start, left_end = adjust_start_end(left_head_start, this_head_start,
-                                                        left_head_end, this_head_end)
-                right_start, right_end = adjust_start_end(right_head_start, this_head_start,
-                                                          right_head_end, this_head_end)
-
-                this_pulse = apply(x, this_pulse, artifact, APPLY_AT_START,
-                                   left_start, this_head_start, right_start)
-
-                this_pulse = apply(x, this_pulse, artifact, APPLY_AT_END,
-                                   left_end, this_head_end, right_end)
-
-        return pulses
-
-    def _extract(self, pulses: List[Pulse]) -> List[Pulse]:
-        """ extract the bit sequences and their errors from the given full-pulse list """
+    def _find_bits(self, pulses: [Pulse]) -> [Pulse]:
+        """ extract the bit sequences and their errors from the given pulse list """
 
         def error(actual, ideal):
             """ calculate an error between the actual pulse part ratios and the ideal,
                 we want a number that is in the range 0..N where 0 is no error and N
-                is a huge error, and quantised such that changes in the error mean the
-                target has changed significantly
+                is a huge error
                 """
-            if ideal > actual:
-                diff = ideal - actual
-            else:
-                diff = actual - ideal
-            if ideal > 0:
-                err = diff / ideal
-            else:
-                # ideal is 0, actual needs to be 0 too, anything else is a big error
-                if actual > 0:
-                    err = 1
+            if ideal > 0 and actual > 0:
+                if ideal > actual:
+                    err = actual / ideal  # range 1..0 (perfect..crap)
                 else:
-                    err = 0
-            # err is now in range 0..1 (0==perfect, 1==utter crap)
-            err *= Scan.RATIO_QUANTA  # 0..N
+                    err = ideal /actual  # range 1..0 (perfect..crap)
+            elif ideal == 0 and actual == 0:
+                err = 1  # no error
+            else:
+                err = 0  # max poss error
+            err = 1 - err  # range now 0..1
+            err *= err  # range still 0..1
+            err *= Scan.PULSE_ERROR_RANGE  # err now 0..N
             return err
 
         # get the most likely bits
         for x, pulse in enumerate(pulses):
             if pulse is None:
                 continue
-            pulse.bits = []
-            done = False
-            for idx, ideal in enumerate(Scan.RATIOS):
-                options = []
-                for lead_delta, head_delta, tail_delta in Scan.PULSE_NUDGES:
-                    actual = pulse.ratio(lead_delta, head_delta, tail_delta)
-                    if len(actual) != len(ideal):
-                        # not a valid nudge
-                        continue
-                    err = 0
-                    for part in range(len(ideal)):
-                        err += error(actual[part], ideal[part])
-                    err /= len(ideal)
-                    options.append((err, actual))
-                if len(options) == 0:
-                    # did not find any legal pulses
-                    continue
-                if len(options) > 1:
-                    options.sort(key=lambda o: int(o[0]))  # put into least error order
-                pulse.bits.append(Scan.Bits(Scan.DIGITS[idx], options[0][0], actual=options[0][1], ideal=ideal))
-                if done:
-                    break
-            if len(pulse.bits) == 0:
-                # did not find any bits in this pulse
+            actual = pulse.ratio()
+            if actual is None:
+                # not a valid pulse
                 continue
+            for idx, ideal in enumerate(Scan.RATIOS):
+                lead_error = error(actual[0], ideal[0])
+                head_error = error(actual[1], ideal[1])
+                tail_error = error(actual[2], ideal[2])
+                err = (lead_error + head_error + tail_error) / 3
+                pulse.bits.append(Scan.Bits(Scan.DIGITS[idx], err, actual=actual, ideal=ideal))
             pulse.bits.sort(key=lambda b: b.error())  # put into least error order
-            if pulse.bits[0].error() == Scan.NO_CHOICE_ERROR:
-                # got an exact match, so chuck the rest
-                pulse.bits = [pulse.bits[0]]
+            if len(pulse.bits) > 0:
+                # chuck out options where the error is too high relative to the best
+                error_limit = pulse.bits[0].error() * Scan.MAX_CHOICE_ERROR_DIFF
+                # ToDo: when MAX_CHOICE_ERROR_DIFF is 4 I get less choices than when it is 3, why?
+                for bit in range(1, len(pulse.bits)):
+                    if pulse.bits[bit].error() > error_limit:
+                        # chuck this and the rest
+                        pulse.bits = pulse.bits[:bit]
+                        break
+            # keep at most 3
+            if len(pulse.bits) > 3:
+                pulse.bits = pulse.bits[:2]
 
         if self.logging:
-            self._log('extract: bits and their errors:')
+            self._log('find_bits: options:')
             for x, pulse in enumerate(pulses):
-                if pulse is None or len(pulse.bits) == 0:
+                if pulse is None:
+                    self._log('    {}: None'.format(x))
                     continue
-                elif len(pulse.bits) == 1:
-                    self._log('    {}: {}'.format(x, pulse.bits[0]))
-                else:
-                    self._log('    {}: {} options:'.format(x, len(pulse.bits)))
-                    for b, bits in enumerate(pulse.bits):
-                        self._log('        {}: {}'.format(b, bits))
+                msg = ''
+                for bits in pulse.bits:
+                    msg = '{}, {}'.format(msg, bits)
+                self._log('    {}: {}'.format(x, msg[2:]))
 
         return pulses
 
-    def _resolve(self, pulses: List[List[Pulse]], max_x) -> List[Bits]:
-        """ resolve full-pulses into a list of bit choices """
-
-        def choices(pulse):
-            """ get the choices for the given pulse based on the error differential """
-            if pulse is None:
-                return []
-            options = []
-            for choice in pulse.bits:
-                if len(options) == 0:
-                    # this is the first choice
-                    options.append(choice)
-                    if choice.error() == Scan.NO_CHOICE_ERROR:
-                        # this is a dead cert, so do not add other lesser choices (NB: this will always be first)
-                        break
-                else:
-                    diff = choice.error() - options[0].error()
-                    diff *= diff
-                    if diff > Scan.MAX_CHOICE_ERR_DIFF_SQUARED:
-                        # too big an error gap to consider as a choice
-                        break
-                    options.append(choice)
-            return options
-
-        def choose(my_choices, neighbour_choices):
-            """ return a list of choices that are in both sets """
-            chosen = []
-            for this_choice in my_choices:
-                for neighbour_choice in neighbour_choices:
-                    if this_choice.bits == neighbour_choice.bits:
-                        chosen.append(this_choice)
-                        break
-            return chosen
-
-        # resolve choices
-        chosen = [None for _ in range(max_x)]
-        resolutions = 0
-        for x, this_pulse in enumerate(pulses):
-            this_choices = choices(this_pulse)
-            if len(this_choices) > 1:
-                # we have choices, so make a choice based on our neighbours
-                # we choose the one that matches either neighbour,
-                # if it matches neither we make no choice and keep them all
-                left_choices = choices(pulses[(x - 1) % max_x])
-                left_chosen = choose(this_choices, left_choices)
-                right_choices = choices(pulses[(x + 1) % max_x])
-                right_chosen = choose(this_choices, right_choices)
-                if len(left_chosen) == 0 and len(right_chosen) == 0:
-                    # no match with either neighbour
-                    chosen[x] = this_choices
-                else:
-                    # get the union of left_chosen and right_chosen
-                    for r in right_chosen:
-                        in_l = False
-                        for l in left_chosen:
-                            if l == r:
-                                in_l = True
-                                break
-                        if not in_l:
-                            left_chosen.append(r)
-                    # put back into least error order
-                    left_chosen.sort(key=lambda b: b.error())
-                    chosen[x] = left_chosen
-                resolutions += len(this_pulse.bits) - len(chosen[x])
-            elif len(this_choices) > 0:
-                # only one choice
-                chosen[x] = this_choices
-            else:
-                # nothing here
-                continue
-
-        if self.logging:
-            qualifiers = 0
-            for choice in chosen:
-                if choice is not None:
-                    qualifiers += 1
-            self._log('resolve: {} resolutions, chosen {}:'.format(resolutions, qualifiers))
-            for x, choice in enumerate(chosen):
-                if choice is None:
-                    continue
-                else:
-                    msg = ''
-                    for bits in choice:
-                        msg = '{}, {}'.format(msg, bits.format(short=True))
-                    self._log('    {}: {}'.format(x, msg[2:]))
-
-        return chosen
-
-    def _segments(self, chosen: List[Bits], max_x) -> List[Segment]:
-        """ extract the segments from the given bit choice list """
-
-        def same_choices(this_bits, that_bits, this_choices, that_choices, this_error, that_error):
-            """ see if this and that bits and choices are the same,
-                to be the same the bits must match and also for no-error choices, the error,
-                the error check ensures we get a distinction between no-error and some-error,
-                no-error cases never have choices beyond themselves (enforced by _resolve)
-                """
-            if this_choices is None:
-                this_set = [this_bits]
-            else:
-                this_set = [this_choices[x].bits for x in range(len(this_choices))]
-                this_set.append(this_bits)
-            if that_choices is None:
-                that_set = [that_bits]
-            else:
-                that_set = [that_choices[x].bits for x in range(len(that_choices))]
-                that_set.append(that_bits)
-            if len(this_set) != len(that_set):
-                return False
-            for this_choice in this_set:
-                if this_choice not in that_set:
-                    return False
-            if this_error == Scan.NO_CHOICE_ERROR and that_error != Scan.NO_CHOICE_ERROR:
-                return False
-            if this_error != Scan.NO_CHOICE_ERROR and that_error == Scan.NO_CHOICE_ERROR:
-                return False
-            return True
-
-        # amalgamate like bits (chosen is now a list of bits not pulses)
-        ideal_length = int(round(max_x / Scan.NUM_SEGMENTS))
-        segments = []
-        for x, bits_list in enumerate(chosen):
-            if bits_list is None:
-                pulse_bits = None  # this is the nothing here signal
-                pulse_error = Scan.NO_CHOICE_ERROR  # error irrelevant when no bits
-                pulse_choices = None
-            elif len(bits_list) > 1:
-                # got choices
-                pulse_bits = bits_list[0].bits
-                pulse_error = bits_list[0].errors
-                pulse_choices = bits_list[1:]  # this is the choices signal
-            else:
-                pulse_bits = bits_list[0].bits
-                pulse_error = bits_list[0].errors
-                pulse_choices = None
-            if len(segments) == 0:
-                # first one, start a sequence
-                segments.append(Scan.Segment(x, pulse_bits,
-                                             error=pulse_error, choices=pulse_choices, ideal=ideal_length))
-            elif same_choices(pulse_bits, segments[-1].bits,
-                              pulse_choices, segments[-1].choices,
-                              pulse_error, segments[-1].error()):
-                # got another the same
-                segments[-1].extend(1, pulse_error)
-            else:
-                # start of a new sequence
-                segments.append(Scan.Segment(x, pulse_bits,
-                                             error=pulse_error, choices=pulse_choices, ideal=ideal_length))
-        if len(segments) > 1:
-            if same_choices(segments[0].bits, segments[-1].bits,
-                            segments[0].choices, segments[-1].choices,
-                            segments[0].error(), segments[-1].error()):
-                # got a wrapping segment
-                segments[-1].extend(segments[0].samples, segments[0].errors)
-                del segments[0]
-
-        # drop segment bits with big errors
-        if self.logging:
-            header = 'segments: dropping segment bits with excessive error:'
-        for x, segment in enumerate(segments):
-            if segment.error() > Scan.MAX_PULSE_ERROR:
-                # these as too ambiguous
-                if self.logging:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    dropping {}'.format(segment))
-                if segment.choices is None:
-                    segment.choices = []
-                segment.choices.insert(0, Scan.Bits(segment.bits, segment.errors, segment.samples))
-                segment.bits = None  # NB: cannot use replace() when replacing with None
-                segment.errors = Scan.NO_CHOICE_ERROR
-
-        if self.logging:
-            self._log('segments: {} segments (ideal segment length={}):'.format(len(segments), ideal_length))
-            for segment in segments:
-                self._log('    {}'.format(segment))
-
-        return segments
-
-    def _combine(self, segments: List[Segment], max_x) -> List[Segment]:
-        """ merge short segment pairs with matching choices that are below the max limit when combined,
-            also merge short segments abutting 000's
+    def _identify(self, blob_size):
+        """ identify the target in the current image with the given blob size (its radius),
             """
 
-        def neighbour(start_x, increment):
-            """ scan segments from start_x for the first non-None one in direction implied by increment """
-            x = start_x
-            for _ in range(len(segments)-1):
-                x = (x + increment) % len(segments)
-                if segments[x] is None:
-                    continue
-                return x
-            # everything is None if get here
+        # do the polar to cartesian projection
+        target, stretch_factor = self._project(self.centre_x, self.centre_y, blob_size)
+        if target is None:
+            # its been rejected
             return None
 
-        def merge(segment, mergee, bits, offset=0):
-            """ merge mergee into segment and set bits as bits,
-                if offset is 0 segment must immediately precede mergee,
-                if offset is >0 segment must immediately succeed mergee,
-                existing bits are added as a choice if different to bits,
-                choices are merged too
-                """
-            nonlocal header
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                first = min(segment.start, mergee.start)
-                last = max(segment.start, mergee.start)
-                header = '    merging at {} and {}'.format(first, last)
-            if bits != segment.bits:
-                # add a choice of what it used to be
-                choice = Scan.Bits(segment.bits, segment.error(), segment.samples)
-                if segment.choices is None:
-                    segment.choices = [choice]
-                else:
-                    segment.choices.append(choice)
-                    segment.choices.sort(key=lambda c: c.error())
-            segment.bits = bits
-            segment.start = (segment.start - offset) % max_x
-            merge_choices(segment, mergee, bits)
-            if self.logging:
-                self._log('{} into {}'.format(header, segment))
-                header = None
+        max_x, max_y = target.size()
 
-        def merge_choices(segment, mergee, bits):
-            """ merge the choices from mergee into segment and select the bits choice,
-                choices in mergee that are in segment are extended,
-                duplicates in segment are removed,
-                choices that are the same as the current selection are removed
-                """
+        # do the edge detection
+        buckets = self._binarize(target, s=Scan.THRESHOLD_SIZE,
+                                 black=Scan.THRESHOLD_BLACK, white=Scan.THRESHOLD_WHITE, clean=True)
+        slices = self._slices(buckets)
+        edges = self._edges(slices, max_x, max_y)
+        extent = self._extent(edges, max_x, max_y)
 
-            samples = segment.samples + mergee.samples  # final samples must span the entire space
-
-            if bits is None:
-                # this is a 'killing' action
-                segment.replace(bits=bits, samples=samples, error=Scan.NO_CHOICE_ERROR)
-                segment.choices = None
-                return
-
-            new_choices = extend_choices(mergee.choices,
-                                         Scan.Bits(mergee.bits, mergee.error(), mergee.samples))
-            old_choices = extend_choices(segment.choices,
-                                         Scan.Bits(segment.bits, segment.error(), segment.samples))
-            for new_choice in new_choices:
-                is_dup = False
-                for old_choice in old_choices:
-                    if new_choice.bits == old_choice.bits:
-                        old_choice.extend(new_choice.samples, new_choice.error())
-                        is_dup = True
-                        break
-                if is_dup:
-                    continue
-            # pick the given bits choice
-            for x, choice in enumerate(old_choices):
-                if choice.bits == bits:
-                    error = segment.errors + choice.errors
-                    segment.replace(bits=bits, samples=samples, error=error)
-                    del old_choices[x]
-                    break
-            if len(old_choices) == 0:
-                segment.choices = None
-            else:
-                segment.choices = old_choices
-                segment.choices.sort(key=lambda c: c.error())  # put the rest back into least error order
-
-        def extend_choices(choices, choice):
-            """ create a new choice set with that given extended by the given extra,
-                the returned choices will not have any duplicates
-                """
-            extended = [choice]
-            if choices is None:
-                return extended
-            for old_choice in choices:
-                is_dup = False
-                for new_choice in extended:
-                    if new_choice.bits == old_choice.bits:
-                        is_dup = True
-                        break
-                if is_dup:
-                    continue
-                extended.append(old_choice)
-            return extended
-
-        def merge_pair(this_x, that_x, join_bits):
-            """ merge the segment pair at this_x and that_x via join_bits,
-                this is done because there are common bits between the pair (the join_bits)
-                """
-            this_segment = segments[this_x]
-            that_segment = segments[that_x]
-            if this_segment.choices is None and that_segment.choices is None:
-                # neither have choices - so makes no difference
-                this = this_x
-                that = that_x
-                offset = 0
-            elif this_segment.choices is None:  # and that_segment.choices is not None:
-                this = that_x
-                that = this_x
-                offset = this_segment.samples
-            elif that_segment.choices is None:  # and this_segment.choices is not None:
-                this = this_x
-                that = that_x
-                offset = 0
-            elif len(this_segment.choices) < len(that_segment.choices):
-                # right has more choices, stick with that
-                this = that_x
-                that = this_x
-                offset = this_segment.samples
-            else:
-                # segment has more or same choices, extend that
-                this = this_x
-                that = that_x
-                offset = 0
-            merge(segments[this], segments[that], join_bits, offset)
-            segments[that] = None
-
-        def can_merge(this: Scan.Segment, that: Scan.Segment):
-            """ determine if the given segments are allowed to be merged,
-                to be allowed, both must be less than the ideal size,
-                or at least one must be less than the min size limit,
-                and None and non-None cannot merge,
-                in both cases the combination must not exceed the max size limit (except for None's)
-                """
-            if this.bits is None and that.bits is None:
-                # no restriction on merging these
-                return True
-            elif this.bits is None or that.bits is None:
-                # cannot merge a mix of None and non-None
-                return False
-            elif (segment.size() + right.size()) < Scan.MAX_SEGMENT_LENGTH:
-                return True
-            elif this.size() < Scan.MIN_SEGMENT_LENGTH and that.size() < Scan.MIN_SEGMENT_LENGTH:
-                return True
-            else:
-                return False
-
-        def log(header):
-            nonlocal updates
-            if updates == 0:
-                return
-            self._log('combine: {} {} ({} updates):'.format(count(segments), header, updates))
-            for segment in segments:
-                if segment is None:
-                    continue
-                self._log('    {}'.format(segment))
-
-        def count(segments):
-            """ count non-none segments """
-            count = 0
-            for segment in segments:
-                if segment is None:
-                    continue
-                count += 1
-            return count
-
-        # combine same bits
-        if self.logging:
-            header = 'combine: combine same bits:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                if segment.choices is not None:
-                    # leave these for later
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if right.choices is not None:
-                    # leave these for later
-                    continue
-                if segment.bits == right.bits:
-                    # same bits - merge them
-                    merge_pair(x, right_x, segment.bits)
-                    changes = True
-                    updates += 1
-                    break
-        if self.logging and updates > 0:
-            log('combined same bits')
-
-        # combine matching choices
-        if self.logging:
-            header = 'combine: combine matching choices:'
-        updates = 0
-        changes = True
-        while changes:
-            changes = False
-            for x, segment in enumerate(segments):
-                if segment is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                right = segments[right_x]
-                if not can_merge(segment, right):
-                    continue
-                join_bits = self._overlaps(segment, right, exact=True)
-                if join_bits is None:
-                    # always allow None's to merge
-                    if segment.bits is not None or right.bits is not None:
-                        continue
-                merge_pair(x, right_x, join_bits)
-                changes = True
-                updates += 1
-                break
-        if self.logging and updates > 0:
-            log('combined matching choices')
-
-        # # combine 000 abutting choices
-        # if self.logging:
-        #     header = 'combine: combine 000 abutting choices:'
-        # updates = 0
-        # changes = True
-        # while changes:
-        #     changes = False
-        #     for x, segment in enumerate(segments):
-        #         if segment is None:
-        #             continue
-        #         right_x = neighbour(x, +1)
-        #         if right_x is None:
-        #             continue
-        #         right = segments[right_x]
-        #         if not can_merge(segment, right):
-        #             continue
-        #         if segment.bits == Scan.DIGITS[0]:
-        #             if segment.size() > right.size() and right.size() < Scan.MIN_SEGMENT_LENGTH:
-        #                 # merge small right segment into this segment
-        #                 merge(segment, right, Scan.DIGITS[0])
-        #                 segments[right_x] = None
-        #                 changes = True
-        #                 if self.logging:
-        #                     self._log('        dropping {}'.format(right))
-        #         elif right.bits == Scan.DIGITS[0]:
-        #             if right.size() > segment.size() and segment.size() < Scan.MIN_SEGMENT_LENGTH:
-        #                 # merge small segment into the bigger right segment
-        #                 merge(right, segment, Scan.DIGITS[0], segment.samples)
-        #                 segments[x] = None
-        #                 changes = True
-        #                 if self.logging:
-        #                     self._log('        dropping {}'.format(segment))
-        #         if changes:
-        #             updates += 1
-        #             break
-        # if self.logging:
-        #     log('combined 000 abutting choices')
-
-        # remove our dropped segments
-        for x in range(len(segments)-1, -1, -1):
-            if segments[x] is None:
-                del segments[x]
-
-        return segments
-
-    def _separate(self, segments: List[Segment], max_x) -> List[Segment]:
-        """ remove overlaps:
-              an 'overlap' is e.g. (A)011->(B)111->(C)110, i.e. A&B<>0 and B&C<>0 and
-                                                                A(len)>B(len) and C(len)>B(len) and
-                                                                B(len)<some limit (the short limit)
-              share B len with A and C, shortest first, drop B,
-              overlaps occur due to pixel bleeding in low resolution images,
-            also remove very small segments (they are noise)
-            """
-
-        def neighbour(start_x, increment):
-            """ scan segments from start_x for the first non-None one in direction implied by increment """
-            x = start_x
-            for _ in range(len(segments) - 1):
-                x = (x + increment) % len(segments)
-                if segments[x] is None:
-                    continue
-                return x
-            # everything is None if get here
-            return None
-
-        if self.logging:
-            header = 'separate: removing overlaps:'
-        for x, segment in enumerate(segments):
-            if segment is None:
-                continue
-            if segment.size() < Scan.MIN_SEGMENT_LENGTH:
-                left_x = neighbour(x, -1)
-                if left_x is None:
-                    continue
-                right_x = neighbour(x, +1)
-                if right_x is None:
-                    continue
-                left = segments[left_x]
-                right = segments[right_x]
-                if left.samples < segment.samples:
-                    continue
-                if right.samples < segment.samples:
-                    continue
-                if self._overlaps(left, segment) is None:
-                    continue
-                if self._overlaps(right, segment) is None:
-                    continue
-                # got an overlap
-                if self.logging:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    dropping {}'.format(segment))
-                segments[x] = None
-
-        if self.logging:
-            header = 'separate: removing very small segments:'
-        for x, segment in enumerate(segments):
-            if segment is None:
-                continue
-            if segment.samples <= Scan.MIN_SEGMENT_SAMPLES:
-                if self.logging:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    dropping {}'.format(segment))
-                segments[x] = None
-
-        # remove our dropped segments
-        dropped = 0
-        for x in range(len(segments) - 1, -1, -1):
-            if segments[x] is None:
-                del segments[x]
-                dropped += 1
-
-        if self.logging and dropped > 0:
-            self._log('separate: {} separated segments ({} dropped):'.format(len(segments), dropped))
-            for segment in segments:
-                self._log('    {}'.format(segment))
-
-        return segments
-
-    def _analyse(self, segments: List[Segment], max_x, max_y):
-        """ analyse the segments to extract the bit sequences for each segment,
-            each segment's bits consists of one or more of the encoding BITS or None,
-            this is the function that is 'expected number of bits aware', all preceding
-            functions are (mostly) number of bits agnostic,
-            returns a list of bit choices for each segment
-            """
-
-        num_choices = 0
-        num_gaps = 0
-        for segment in segments:
-            if segment.bits is None:
-                num_gaps += 1
-                continue
-            if segment.choices is not None:
-                num_choices += 1
-                continue
-        orig_segments = len(segments)
-
-        reason = None
-
-        if self.logging:
-            header = 'analyse: too many segments: got {}, only want {}, dropping duplicates'.\
-                     format(len(segments), Scan.NUM_SEGMENTS)
-        while len(segments) > Scan.NUM_SEGMENTS:
-            # got too many - chuck duplicates with no choices
-            drop_x = None
-            for x in range(len(segments)):
-                segment = segments[x]
-                neighbour_x = (x + 1) % len(segments)
-                neighbour = segments[neighbour_x]
-                if segment.bits == neighbour.bits:
-                    # two in a row - drop the one with the least choices
-                    if segment.choices is None and neighbour.choices is not None:
-                        drop_x = x
-                    elif segment.choices is not None and neighbour.choices is None:
-                        drop_x = neighbour_x
-                    elif segment.choices is None and neighbour.choices is None:
-                        if segment.samples < neighbour.samples:
-                            drop_x = x
-                        else:
-                            drop_x = neighbour_x
-                    elif len(segment.choices) > len(neighbour.choices):
-                        drop_x = neighbour_x
-                    elif len(segment.choices) < len(neighbour.choices):
-                        drop_x = x
-                    elif segment.samples < neighbour.samples:
-                        drop_x = x
-                    else:
-                        drop_x = neighbour_x
-                    break
-            if drop_x is None:
-                break
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    dropping {}'.format(segments[drop_x]))
-            del segments[drop_x]
-
-        if self.logging:
-            header = 'analyse: too many segments: got {}, only want {}, dropping shortest'.format(len(segments), Scan.NUM_SEGMENTS)
-        while len(segments) > Scan.NUM_SEGMENTS:
-            # got too many - chuck shortest with biggest error
-            shortest = None
-            for x, segment in enumerate(segments):
-                # if segment.bits == Scan.DIGITS[0]:
-                #     # don't drop 000's
-                #     continue
-                if shortest is None:
-                    shortest = x
-                    continue
-                if segment.bits is None and segments[shortest].bits is not None:
-                    # drop None's in preference to non-None's
-                    shortest = x
-                    continue
-                if segment.bits is not None and segments[shortest].bits is None:
-                    # don't promote from None to non-None
-                    continue
-                if segment.samples < segments[shortest].samples:
-                    shortest = x
-                    continue
-                if segment.samples == segments[shortest].samples and segment.error() > segments[shortest].error():
-                    shortest = x
-                    continue
-            if shortest is None:
-                # this means everything is 000's
-                if self.logging:
-                    self._log('analyse: too many segments: got {}, need {}'.
-                              format(len(segments), Scan.NUM_SEGMENTS))
-                reason = 'got {}, need {} bits'.format(len(segments), Scan.NUM_SEGMENTS)
-                break
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    dropping {}'.format(segments[shortest]))
-            del segments[shortest]
-
-        if self.logging:
-            header = 'analyse: not enough segments: got {}, need {}'.format(len(segments), Scan.NUM_SEGMENTS)
-        while len(segments) < Scan.NUM_SEGMENTS:
-            # haven't got enough - split biggest with biggest error
-            biggest = None
-            for x, segment in enumerate(segments):
-                if segment.size() < (2 * Scan.MIN_SEGMENT_LENGTH):
-                    # not big enough to split
-                    continue
-                if biggest is None:
-                    biggest = x
-                    continue
-                if segment.bits is None and segments[biggest].bits is not None:
-                    # split None's in preference to non-None's
-                    biggest = x
-                    continue
-                if segment.bits is not None and segments[biggest].bits is None:
-                    # don't promote from None to non-None
-                    continue
-                if segment.samples > segments[biggest].samples:
-                    biggest = x
-                    continue
-                if segment.samples == segments[biggest] and segment.error() > segments[biggest].error():
-                    biggest = x
-                    continue
-            if biggest is None:
-                # this means nothing is splittable
-                if self.logging:
-                    self._log('analyse: not enough segments: got {}, need {}'.
-                              format(len(segments), Scan.NUM_SEGMENTS))
-                reason = 'got {}, need {} bits'.format(len(segments), Scan.NUM_SEGMENTS)
-                break
-            segment = segments[biggest]
-            split_samples = int(segment.ideal * Scan.MIN_SEGMENT_LENGTH)
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    splitting {} samples from {}'.format(split_samples, segment))
-            segment.samples -= split_samples
-            segments.insert(biggest, Scan.Segment(segment.start + split_samples,
-                                                  segment.bits, split_samples,
-                                                  segment.error(), ideal=segment.ideal))
-
-        # return the bit choices from the final segment mix
-        bits = [[] for _ in range(len(segments))]
-        for x, segment in enumerate(segments):
-            if segment.bits is None:
-                bits[x].append([None for _ in range(Scan.NUM_DATA_RINGS)])
-            elif segment.choices is None:
-                bits[x].append(segment.bits)
-            else:
-                bits[x].append(segment.bits)
-                for choice in segment.choices:
-                    bits[x].append(choice.bits)
-
-        if self.logging:
-            self._log('analyse: {} bits from {} segments, {} with choices and {} as gaps:'.
-                      format(len(bits), orig_segments, num_choices, num_gaps))
-            for x, bit_list in enumerate(bits):
-                msg = ''
-                for bit in bit_list:
-                    msg = '{}, {}'.format(msg, bit)
-                self._log('    {}: {}'.format(x, msg[2:]))
+        # ToDo: is this a good idea? its removing information
+        # make sure the inner and outer guard areas are not white
+        for x in range(max_x):
+            inner_at = extent.inner[x]
+            if inner_at is not None:
+                # inner_at is the start of the inner black ring
+                for dy in range(Scan.INNER_GUARD):
+                    pixel = buckets.getpixel(x, inner_at + dy)
+                    if pixel == MAX_LUMINANCE:
+                        buckets.putpixel(x, inner_at + dy, MID_LUMINANCE)
+            outer_at = extent.outer[x]
+            if outer_at is not None:
+                # outer_at is the start of the outer white ring
+                outer_at -= 1  # move to the end of the outer black ring
+                for dy in range(Scan.OUTER_GUARD):
+                    pixel = buckets.getpixel(x, outer_at - dy)
+                    if pixel == MAX_LUMINANCE:
+                        buckets.putpixel(x, outer_at - dy, MID_LUMINANCE)
 
         if self.save_images:
-            grid = self._draw_segments(segments, max_x, max_y)
-            self._unload(grid, '07-segments')
+            plot = self._draw_edges(edges, extent, target)
+            self._unload(plot, '05-edges')
 
-        return bits, reason
+        return max_x, max_y, stretch_factor, buckets, slices, extent
 
-    def _measure(self, pulses: List[List[Pulse]], stretch_factor):
-        """ get a measure of the target size by examining the slices,
+    def _measure(self, extent: Extent, stretch_factor):
+        """ get a measure of the target size by examining the extent,
             stretch_factor is how much the image height was stretched during projection,
             its used to re-scale the target size such that all are consistent wrt the original image
             """
 
+        max_x = len(extent.inner)
         target_size = 0  # set as the most average of the pulse ends
-        samples = 0
-        for pulse in pulses:
-            if pulse is not None:
-                target_size += pulse.start + pulse.lead + pulse.head + pulse.tail
-                samples += 1
-        target_size /= samples
+        for x in range(max_x):
+            inner_x = extent.inner[x]
+            outer_x = extent.outer[x]
+            target_size += (outer_x - inner_x)
+        target_size /= max_x
         target_size /= stretch_factor
 
         if self.logging:
@@ -4182,9 +3716,9 @@ class Scan:
 
         return target_size
 
-    def _decode_bits(self, bits, max_x, max_y):
-        """ decode the bits for the least doubt and return its corresponding number,
-            in bits we have a list of bit sequence choices across the data rings, i.e. bits x rings
+    def _decode_bits(self, pulses: [Pulse], max_x, max_y):
+        """ decode the pulse bits for the least doubt and return its corresponding number,
+            in pulse bits we have a list of bit sequence choices across the data rings, i.e. bits x rings
             we need to rotate that to rings x bits to present it to our decoder,
             we present each combination to the decoder and pick the result with the least doubt
             """
@@ -4193,113 +3727,128 @@ class Scan:
             """ build a list of all combinations of the bit choices (up to some limit),
                 each choice is a list of segments and the number of choices at that segment position
                 """
-            for x in range(start_x, Scan.NUM_SEGMENTS):
-                bit_list = bits[x]
-                if len(bit_list) > 1 and len(choices) < Scan.MAX_BIT_CHOICES:
+            if len(choices) >= Scan.MAX_BIT_CHOICES:
+                # got too many
+                return choices, True
+            for x in range(start_x, len(pulses)):
+                pulse = pulses[x]
+                if pulse is None:
+                    continue
+                bit_list = pulse.bits
+                if len(bit_list) == 0:
+                    continue
+                if len(bit_list) > 1:
                     # got choices - recurse for the others
                     for dx in range(1, len(bit_list)):
                         bit_choice = choice.copy()
                         bit_choice[x] = (bit_list[dx], len(bit_list))
-                        choices = build_choice(x+1, bit_choice, choices)
+                        choices, overflow = build_choice(x+1, bit_choice, choices)
+                        if overflow:
+                            return choices, overflow
                 choice[x] = (bit_list[0], len(bit_list))
             choices.append(choice)
-            return choices
+            return choices, False
 
         # build all the choices
-        choices = build_choice(0, [None for _ in range(Scan.NUM_SEGMENTS)], [])
+        choices, overflow = build_choice(0, [None for _ in range(len(pulses))], [])
 
         # try them all
         results = []
+        max_bit_error = 0
         for choice in choices:
             code = [[None for _ in range(Scan.NUM_SEGMENTS)] for _ in range(Scan.NUM_DATA_RINGS)]
             bit_doubt = 0
-            for bit in range(Scan.NUM_SEGMENTS):
-                rings = choice[bit][0]
-                if choice[bit][1] > 1:
-                    bit_doubt += choice[bit][1] - 1
+            bit_error = 0
+            for bit, (segment, options) in enumerate(choice):
+                if segment is None:
+                    # nothing recognized here
+                    rings = None
+                else:
+                    rings = segment.bits
+                    bit_error += segment.error()
+                    if options > 1:
+                        bit_doubt += options - 1
                 if rings is not None:
                     for ring in range(len(rings)):
                         sample = rings[ring]
                         code[ring][bit] = sample
+            if bit_error > max_bit_error:
+                max_bit_error = bit_error
+            bit_doubt = min(bit_doubt, 99)
             number, doubt, digits = self.decoder.unbuild(code)
-            results.append((number, doubt + (min(bit_doubt, 99) / 100), digits, choice))
+            results.append(Scan.Result(number, doubt, digits, bit_doubt, bit_error, choice))
+
+        # set the doubt for each result now we know the max bit error
+        for result in results:
+            result.doubt(max_bit_error)
 
         # put into least doubt order with numbers before None's
-        # doubt has two parts: integer part is digits doubt, fractional part is bits doubt
-        results.sort(key=lambda r: (r[0] is None, int(r[1]), r[0]))
+        results.sort(key=lambda r: (r.number is None, r.doubt(), r.count, r.number))  # NB: Relying on True > False
 
-        best = 0
-        best_number, best_doubt, best_digits, _ = results[best]
-        if best_number is not None:
-            # check for ambiguity,
-            # if we have more than one result with the same doubt and same count we cannot choose,
-            # so rather than give a potential 'false-positive' result we give nothing (which is number 000)
-            choices = []
-            for x in range(len(results)):
-                number, doubt, digits, _ = results[x]
-                if number is None:
-                    break
-                if int(doubt) != int(best_doubt):
-                    # only want same doubt choices
-                    break
-                found = False
-                for choice in choices:
-                    if choice[0] == number:
-                        # another result with the same number and doubt
-                        choice[1] += 1
-                        found = True
-                        break
-                if not found:
-                    # found another number with the same doubt
-                    choices.append([number, 1, x])
-            choices.sort(key=lambda c: c[1], reverse=True)
-            best = choices[0][2]
-            best_number, best_doubt, best_digits, _ = results[best]
-            if len(choices) > 1 and choices[0][1] == choices[1][1]:
-                # more than one choice with the same count, so ambiguous
-                if self.logging:
-                    self._log('decode: ambiguous best choice: number={}, doubt={}, bits={}'.
-                              format(best_number, best_doubt, best_digits))
-                best_number = 0 - best_number  # make -ve as a signal its ambiguous
-            elif len(results) >= Scan.MAX_BIT_CHOICES:
-                # too many results, treat as ambiguous
-                if self.logging:
-                    self._log('decode: too many results {} (limit is {}), '
-                              'ambiguous best choice: number={}, doubt={}, bits={}'.
-                              format(len(results), Scan.MAX_BIT_CHOICES, best_number, best_doubt, best_digits))
-                best_number = 0 - best_number  # make -ve as a signal its ambiguous
+        # build list of unique results and count duplicates
+        numbers = {}
+        for result in results:
+            if numbers.get(result.number) is None:
+                # this is the first result for this number and is the best for that number
+                numbers[result.number] = result
+            else:
+                numbers[result.number].count += 1  # increase the count for this number
+        # move from a dictionary to a list so we can re-sort it
+        results = [result for result in numbers.values()]
+        results.sort(key=lambda r: (r.number is None, r.doubt(), r.count, r.number))
+
+        # if we have multiple results with similar doubt we have ambiguity,
+        # ambiguity can result in a false detection, which is not safe
+        # we also have ambiguity if we overflowed building the choice list ('cos we don't know if
+        # a better choice has not been explored
+        ambiguous = None
+        if len(results) > 1:
+            # we have choices
+            doubt_diff = results[1].digit_doubt - results[0].digit_doubt  # >=0 'cos results in doubt order
+            if doubt_diff < Scan.CHOICE_DOUBT_DIFF_LIMIT:
+                # its ambiguous
+                ambiguous = doubt_diff
+
+        # get the best result
+        best = results[0]
+        if ambiguous is not None or overflow:
+            # mark result as ambiguous
+            if best.number is not None:
+                # make it negative as a signal that its ambiguous
+                best.number = 0 - best.number
 
         if self.logging:
-            show = len(results)
-            if show > 15:
-                show = 15
-                if best >= show:
-                    show = best + 1
-                self._log('decode: top {} results from {}, best is {} (result limit is {}):'.
-                          format(show, len(results), best, Scan.MAX_BIT_CHOICES))
+            if overflow:
+                msg = ' with overflow (limit is {})'.format(Scan.MAX_BIT_CHOICES)
+            elif ambiguous is not None:
+                msg = ' with ambiguity (top 2 doubt diff is {}, limit is {})'.\
+                      format(ambiguous, Scan.CHOICE_DOUBT_DIFF_LIMIT)
             else:
-                self._log('decode: all {} results, best is {} (result limit is {}):'.
-                          format(show, best, Scan.MAX_BIT_CHOICES))
-            for r in range(show):
+                msg = ''
+            self._log('decode: {} results from {} choices{}:'.format(len(results), len(choices), msg))
+            self._log('    best number={}, occurs={}, doubt={:.4f}, bits={}'.
+                      format(best.number, best.count, best.doubt(), best.digits))
+            self._log('        best result bits:')
+            for x, (bits, _) in enumerate(best.choice):
+                self._log('            {}: {}'.format(x, bits))
+            for r in range(1, len(results)):
                 result = results[r]
-                self._log('    number={}, doubt={}, bits={}'.format(result[0], result[1], result[2]))
-                if r == best:
-                    self._log('        best result bits:')
-                    for x, bits in enumerate(result[3]):
-                        self._log('            {}: {}'.format(x, bits))
+                self._log('    number={}, occurs={}, doubt={:.4f}, bits={}'.
+                          format(result.number, result.count, result.doubt(), result.digits))
 
         if self.save_images:
             segments = []
             size = int(max_x / Scan.NUM_SEGMENTS)
-            for x, bits in enumerate(results[best][3]):
-                segments.append(Scan.Segment(x * size, bits[0], size))
+            for x, (bits, _) in enumerate(best.choice):
+                if bits is not None:
+                    segments.append(Scan.Segment(x * size, bits.bits, size))
             grid = self._draw_segments(segments, max_x, max_y)
             self._unload(grid, '08-bits')
 
         # return best
-        return best_number, best_doubt, best_digits
+        return best.number, best.doubt(), best.digits
 
-    def _find_codes(self):
+    def _find_codes(self) -> ([Target], Frame):
         """ find the codes within each blob in our image,
             returns a list of potential targets
             """
@@ -4313,64 +3862,92 @@ class Scan:
         targets = []
         rejects = []
         for blob in blobs:
-            self.centre_x = int(round(blob.pt[0]))
-            self.centre_y = int(round(blob.pt[1]))
-            blob_size = blob.size / 2  # change diameter to radius
+            self.centre_x = blob[0]
+            self.centre_y = blob[1]
+            blob_size = blob[2]
 
             if self.logging:
                 self._log('***************************')
                 self._log('processing candidate target')
 
             # find the extent of our target
-            max_x, max_y, stretch_factor, buckets, slices, extent = self._identify(blob.size)
+            result = self._identify(blob_size)
+            if result is None:
+                # this means the blob has insufficient contrast (already logged)
+                # tag it as deleted
+                blob[2] = 0
+                continue
 
-            if extent[2] is not None or extent[3] is not None:
-                # failed - this means we did not find a suitable inner and/or outer edge
+            max_x, max_y, stretch_factor, buckets, slices, extent = result
+            if extent.inner_fail is not None or extent.outer_fail is not None:
+                # failed - this means we did not find its inner and/or outer edge
                 if self.save_images:
                     # add to reject list for labelling on the original image
-                    if extent[2] is not None:
-                        reason = extent[2]
+                    if extent.inner_fail is not None:
+                        reason = extent.inner_fail
                     else:
-                        reason = extent[3]
+                        reason = extent.outer_fail
                     rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*4, reason))
                 continue
 
-            # do the pulse detection
-            half_pulses = self._transitions(slices)
-            half_pulses = self._constrain(half_pulses, extent)
-            full_pulses = self._pulses(half_pulses)
-            pulses = self._clean(full_pulses, max_x, max_y)
-
-            if self.save_images:
-                plot = self._draw_pulses(pulses, extent, buckets)
-                self._unload(plot, '06-pulses')
-
-            # get target size relative to original image (for relative range judgement)
-            target_size = self._measure(pulses, stretch_factor)
-
-            # do the segment extraction
-            pulses = self._extract(pulses)
-            chosen = self._resolve(pulses, max_x)
-            segments = self._segments(chosen, max_x)
-            segments = self._combine(segments, max_x)
-            segments = self._separate(segments, max_x)
-
-            # analyse segments to get the most likely bit sequences
-            outer_y = Scan.MIN_PIXELS_PER_RING * Scan.NUM_RINGS  # y scale for drawing diagnostic images
-            bits, reason = self._analyse(segments, max_x, outer_y)
+            # ToDo: HACK try detecting the vertical segment edges directly
+            edges, reason = self._find_segment_edges(buckets, extent)
+            if self.save_images and edges is not None and len(edges) > 0:
+                plot = self._draw_extent(extent, buckets, bleed=0.8)
+                lines = []
+                for edge in edges:
+                    lines.append((edge, 0, edge, max_y - 1,))
+                if reason is not None:
+                    colour = Scan.RED
+                else:
+                    colour = Scan.GREEN
+                plot = self._draw_lines(plot, lines, colour=colour)
+                self._unload(plot, '06-cells')
             if reason is not None:
-                # failed - this means some constraint was not met (its already been logged)
+                # we failed to find segment edges
                 if self.save_images:
                     # add to reject list for labelling on the original image
-                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, target_size, reason))
+                    rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*4, reason))
                 continue
-
-            # decode the bits for the best result
-            result = self._decode_bits(bits, max_x, outer_y)
-
+            pulses, bad_slices = self._find_pulses(edges, buckets, extent)
+            if self.save_images:
+                if len(bad_slices) > 0:
+                    # show bad slices as blue on our cells image
+                    lines = []
+                    for slice in bad_slices:
+                        lines.append((slice, 0, slice, max_y - 1))
+                    plot = self._draw_lines(plot, lines, colour=Scan.BLUE)
+                # show pulse edges as green horizontal lines
+                lines = []
+                for pulse in pulses:
+                    if pulse is None:
+                        continue
+                    lead_start = pulse.start  # there is always a start
+                    if pulse.head is not None:
+                        head_start = lead_start + pulse.lead  # there is always a lead
+                        tail_start = head_start + pulse.head
+                        tail_end = tail_start + pulse.tail  # there is always a tail if there is a head
+                    else:
+                        head_start = None
+                        tail_start = None
+                        tail_end = lead_start + pulse.lead  # there is always a lead
+                    lines.append((pulse.begin, lead_start, pulse.end, lead_start))
+                    lines.append((pulse.begin, tail_end, pulse.end, tail_end))
+                    if head_start is not None:
+                        lines.append((pulse.begin, head_start, pulse.end, head_start))
+                        lines.append((pulse.begin, tail_start, pulse.end, tail_start))
+                plot = self._draw_lines(plot, lines, colour=Scan.GREEN, h_wrap=True)
+                self._unload(plot, '06-cells')  # overwrite the one we did earlier
+            pulses = self._find_bits(pulses)
+            outer_y = self.radial_steps  # y scale for drawing diagnostic images
+            result = self._decode_bits(pulses, max_x, outer_y)
+            target_size = self._measure(extent, stretch_factor)
             targets.append(Scan.Target(self.centre_x, self.centre_y, blob_size, target_size, result))
 
         if self.save_images:
+            # draw the accepted blobs
+            grid = self._draw_blobs(self.image, blobs)
+            self._unload(grid, 'blobs', 0, 0)
             # label all the blobs we processed that were rejected
             labels = self.transform.copy(self.image)
             for reject in rejects:
@@ -4409,6 +3986,8 @@ class Scan:
                     self._unload(self.image, 'targets', 0, 0)
             return []
 
+        if self.save_images:
+            detections = self.transform.copy(self.image)
         numbers = []
         for target in targets:
             self.centre_x = target.centre_x    # for logging and labelling
@@ -4424,111 +4003,29 @@ class Scan:
                 number = numbers[-1]
                 if number.number is None:
                     colour = Scan.PURPLE
-                    label = 'invalid ({})'.format(number.doubt)
+                    label = 'invalid ({:.4f})'.format(number.doubt)
                 elif number.number < 0:
                     colour = Scan.RED
-                    label = 'ambiguous {} ({})'.format(0-number.number, number.doubt)
+                    label = 'ambiguous {} ({:.4f})'.format(0-number.number, number.doubt)
                 else:
                     colour = Scan.GREEN
-                    label = 'code is {} ({})'.format(number.number, number.doubt)
-                if labels is not None:
-                    # draw the detected blob in blue
-                    k = (number.centre_x, number.centre_y, number.blob_size)
-                    labels = self.transform.label(labels, k, Scan.BLUE)
-                    # draw the result
-                    k = (number.centre_x, number.centre_y, number.target_size)
-                    labels = self.transform.label(labels, k, colour, '{:.0f}x{:.0f}y {}'.
-                                                  format(number.centre_x, number.centre_y, label))
+                    label = 'code is {} ({:.4f})'.format(number.number, number.doubt)
+                # draw the detected blob in blue
+                k = (number.centre_x, number.centre_y, number.blob_size)
+                detections = self.transform.label(detections, k, Scan.BLUE)
+                # draw the result
+                k = (number.centre_x, number.centre_y, number.target_size)
+                detections = self.transform.label(detections, k, colour, '{:.0f}x{:.0f}y {}'.
+                                              format(number.centre_x, number.centre_y, label))
 
         if self.save_images:
-            self._unload(labels, 'targets', 0, 0)
+            self._unload(detections, 'targets', 0, 0)
+            if labels is not None:
+                self._unload(labels, 'rejects', 0, 0)
 
         return numbers
 
     # region Helpers...
-    def _overlaps(self, this_segment, that_segment, exact=False):
-        """ see if this and that segments have overlapping 1 bits or have a common choice,
-            if exact is True want same bits in both, else just most common one bits,
-            returns the matching bit set from this_segment or None if no match
-            """
-        if this_segment.choices is None:
-            this_set = [this_segment.bits]
-        else:
-            this_set = [this_segment.choices[x].bits for x in range(len(this_segment.choices))]
-            this_set.append(this_segment.bits)
-        if that_segment.choices is None:
-            that_set = [that_segment.bits]
-        else:
-            that_set = [that_segment.choices[x].bits for x in range(len(that_segment.choices))]
-            that_set.append(that_segment.bits)
-        best_match = None
-        best_ones = 0
-        best_zeroes = 0
-        for this_choice in this_set:
-            if this_choice is None:
-                continue
-            for that_choice in that_set:
-                if that_choice is None:
-                    continue
-                one_count, zero_count, diff_count = self._common_bits(this_choice, that_choice)
-                if exact:
-                    if diff_count == 0:
-                        return this_choice
-                    else:
-                        continue
-                if one_count > 0:
-                    if one_count > best_ones:
-                        best_ones = one_count
-                        best_zeroes = zero_count
-                        best_match = this_choice
-                    elif one_count == best_ones:
-                        # when got an equal 1's choice pick the one with the most 0's
-                        if zero_count > best_zeroes:
-                            best_ones = one_count
-                            best_zeroes = zero_count
-                            best_match = this_choice
-
-        return best_match
-
-    def _common_bits(self, this_bits: List[int], that_bits: List[int]):
-        """ given two sets of bits return a count the common 1 bits and 0 zero bits and different bits,
-            e.g. 111 and 111 is 3, 011 and 111 is 2, 011 and 110 is 1, 100 and 010 is 0
-            """
-        if this_bits is None or that_bits is None:
-            return 0
-        one_count = 0
-        zero_count = 0
-        diff_count = 0
-        for bit in range(len(this_bits)):
-            if this_bits[bit] == that_bits[bit]:
-                if this_bits[bit] == 1:
-                    one_count += 1
-                else:
-                    zero_count += 1
-            else:
-                diff_count += 1
-
-        return one_count, zero_count, diff_count
-
-    def _get_gap(self, first, second, max_x=0):
-        """ compute distance between first and second pixel (by Pythagoras without the square root),
-            if wrapping possible first must be 'before' second but second may have wrapped in x at max_x,
-            NB: when wrapping first == second is considered as wrapped
-            """
-
-        if second[0] <= first[0]:
-            # its wrapped, adjust to compensate
-            second_x = second[0] + max_x
-        else:
-            second_x = second[0]
-
-        x_gap = (second_x - first[0])
-        x_gap *= x_gap
-        y_gap = (second[1] - first[1])
-        y_gap *= y_gap
-
-        return x_gap + y_gap
-
     def _remove_file(self, f, silent=False):
         try:
             os.remove(f)
@@ -4616,6 +4113,21 @@ class Scan:
         if self.logging:
             self._log('{}: image saved as: {}'.format(suffix, filename), centre_x, centre_y)
 
+    def _draw_blobs(self, source, blobs: List[tuple], colour=GREEN):
+        """ draw circular blobs in the given colour, each blob is a centre x,y and a size (radius),
+            blobs with no size are not drawn
+            returns a new colour image of the result
+            """
+        objects = []
+        for blob in blobs:
+            if blob[2] > 0:
+                objects.append({"colour": colour,
+                                "type": self.transform.CIRCLE,
+                                "centre": (int(round(blob[0])), int(round(blob[1]))),
+                                "radius": int(round(blob[2]))})
+        target = self.transform.copy(source)
+        return self.transform.annotate(target, objects)
+
     def _draw_plots(self, source, plots_x=None, plots_y=None, colour=RED, bleed=0.5):
         """ draw plots in the given colour, each plot is a set of points and a start x or y,
             returns a new colour image of the result
@@ -4638,23 +4150,34 @@ class Scan:
         target = self.transform.copy(source)
         return self.transform.annotate(target, objects)
 
-    def _draw_lines(self, source, lines, colour=RED, bleed=0.5):
+    def _draw_lines(self, source, lines, colour=RED, bleed=0.5, h_wrap=False, v_wrap=False):
         """ draw lines in given colour,
             lines param is an array of start-x,start-y,end-x,end-y tuples,
             for horizontal lines start-y and end-y are the same,
             for vertical lines start-x and end-x are the same,
-            for horizontal and vertical lines bleed defines how much background bleeds through
+            for horizontal and vertical lines bleed defines how much background bleeds through.
+            for horizontal lines h_wrap is True iff they wrap in the x-direction,
+            for vertical lines v_wrap is True iff they wrap in the y-direction,
             """
         dlines = []
         vlines = []
         hlines = []
+        max_x, max_y = source.size()
         for line in lines:
             if line[0] == line[2]:
                 # vertical line
-                vlines.append([line[1], [line[0] for _ in range(line[1], line[3]+1)]])
+                if v_wrap and line[3] < line[1]:
+                    vlines.append([line[1], [line[0] for _ in range(line[1], max_y)]])
+                    vlines.append([0, [line[0] for _ in range(0, line[3]+1)]])
+                else:
+                    vlines.append([line[1], [line[0] for _ in range(line[1], line[3]+1)]])
             elif line[1] == line[3]:
                 # horizontal line
-                hlines.append([line[0], [line[1] for _ in range(line[0], line[2]+1)]])
+                if h_wrap and line[2] < line[0]:
+                    hlines.append([line[0], [line[1] for _ in range(line[0], max_x)]])
+                    hlines.append([0, [line[1] for _ in range(0, line[2]+1)]])
+                else:
+                    hlines.append([line[0], [line[1] for _ in range(line[0], line[2]+1)]])
             else:
                 dlines.append({"colour": colour,
                                 "type": self.transform.LINE,
@@ -4738,20 +4261,20 @@ class Scan:
 
         return grid
 
-    def _draw_extent(self, extent, target, bleed):
-        """ make the area outside the inner and outer edges on the given target """
+    def _draw_extent(self, extent: Extent, target, bleed):
+        """ make the area outside the inner and outer edges on the given target visible """
 
         max_x, max_y = target.size()
-        inner = extent[0]
-        outer = extent[1]
+        inner = extent.inner
+        outer = extent.outer
 
         inner_lines = []
         outer_lines = []
         for x in range(max_x):
             if inner[x] is not None:
-                inner_lines.append((x, 0, x, inner[x]))
+                inner_lines.append((x, 0, x, inner[x] - 1))  # inner edge is on the first black, -1 to get to white
             if outer[x] is not None:
-                outer_lines.append((x, outer[x], x, max_y - 1))
+                outer_lines.append((x, outer[x], x, max_y - 1))  # outer edge is on first white
         target = self._draw_lines(target, inner_lines, colour=Scan.RED, bleed=bleed)
         target = self._draw_lines(target, outer_lines, colour=Scan.RED, bleed=bleed)
 
@@ -4772,12 +4295,12 @@ class Scan:
                 none_lines.append((x, 0, x, max_y - 1))
             else:
                 lead_lines.append((x, pulse.start, x, pulse.start + pulse.lead - 1))
-                head_lines.append((x, pulse.start + pulse.lead, x,
-                                   pulse.start + pulse.lead + pulse.head - 1))
+                head_lines.append((x, pulse.start + pulse.lead,
+                                   x, pulse.start + pulse.lead + pulse.head - 1))
                 if pulse.tail > 0:
                     # for half-pulses there is no tail
-                    tail_lines.append((x, pulse.start + pulse.lead + pulse.head, x,
-                                       pulse.start + pulse.lead + pulse.head + pulse.tail - 1))
+                    tail_lines.append((x, pulse.start + pulse.lead + pulse.head,
+                                       x, pulse.start + pulse.lead + pulse.head + pulse.tail - 1))
 
         # mark the extent
         plot = self._draw_extent(extent, buckets, bleed=0.6)
@@ -4790,7 +4313,7 @@ class Scan:
 
         return plot
 
-    def _draw_edges(self, edges, extent, target):
+    def _draw_edges(self, edges, extent: Extent, target: Frame):
         """ draw the edges and the inner and outer extent on the given target image """
 
         falling_edges = edges[0]
@@ -5049,9 +4572,9 @@ class Test:
         try:
             good = 0
             bad = 0
-            radius = 100
+            radius = 256
             scale = 360 * 10  # 0.1 degrees
-            angle = Angle(scale)
+            angle = Angle(scale, radius)
             for step in range(int(round(scale))):
                 a = (step / scale) * 360
                 cx, cy = angle.polarToCart(a, radius)
@@ -5077,11 +4600,11 @@ class Test:
                         break
                 rerr = math.fabs(cr - radius)
                 aerr = math.fabs(ca - a)
-                if rerr > 0.01 or aerr > 0.3 or rotation_err is not None:
+                if rerr > 0.7 or aerr > 0.3 or rotation_err is not None:
                     bad += 1
                     self._log(
-                        '{:.3f} degrees --> {:.3f}x, {:.3f}y --> {:.3f} degrees, {:.3f} radius: aerr={:.3f}, rerr={:.3f}, rotation={}'.
-                        format(a, cx, cy, ca, cr, aerr, rerr, rotation_err))
+                        '{:.3f} degrees, {:.3f} radius --> {:.3f}x, {:.3f}y --> {:.3f} degrees, {:.3f} radius: aerr={:.3f}, rerr={:.3f}, rotation={}'.
+                        format(a, radius, cx, cy, ca, cr, aerr, rerr, rotation_err))
                 else:
                     good += 1
             self._log('{} good, {} bad'.format(good, bad))
@@ -5249,7 +4772,7 @@ class Test:
                                 # don't want these in this loop
                                 continue
                             # got what we are looking for
-                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}{}'.
+                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.4f}{}'.
                                       format(num, expected, centre_x, centre_y, size, doubt, bits))
                             continue
                         if expected is not None:
@@ -5291,7 +4814,7 @@ class Test:
                                     actual_code = 'code={}, bits={}'.\
                                                   format(actual_code, self.codec.bits(actual_code))
                                     prefix = '**** UNEXPECTED **** ---> '
-                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}{}'.
+                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.4f}{}'.
                                       format(prefix, num, actual_code, centre_x, centre_y, size, doubt, bits))
                             continue
                 if len(results) == 0:
@@ -5377,14 +4900,14 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (8, 4)
+    test_scan_cells = (7, 5)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
     test_scan_video_mode = Scan.VIDEO_2K
 
-    test_debug_mode = Scan.DEBUG_IMAGE
-    #test_debug_mode = Scan.DEBUG_VERBOSE
+    # test_debug_mode = Scan.DEBUG_IMAGE
+    test_debug_mode = Scan.DEBUG_VERBOSE
 
     try:
         test = None
@@ -5411,11 +4934,23 @@ def verify():
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [444], 'test-code-444.png')
+        # test.scan(test_codes_folder, [332], 'test-code-332.png')
+        # test.scan(test_codes_folder, [222], 'test-code-222.png')
+        # test.scan(test_codes_folder, [555], 'test-code-555.png')
+        # test.scan(test_codes_folder, [800], 'test-code-800.png')
+        # test.scan(test_codes_folder, [574], 'test-code-574.png')
+        # test.scan(test_codes_folder, [371], 'test-code-371.png')
+        # test.scan(test_codes_folder, [757], 'test-code-757.png')
+        # test.scan(test_codes_folder, [611], 'test-code-611.png')
+        # test.scan(test_codes_folder, [620], 'test-code-620.png')
+        # test.scan(test_codes_folder, [132], 'test-code-132.png')
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
         test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-distant.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-near.jpg')
 
     except:
         traceback.print_exc()
