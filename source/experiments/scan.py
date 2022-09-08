@@ -100,7 +100,6 @@ class Scan:
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
     MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
     MAX_EDGE_HEIGHT_JUMP = 2  # max jump in y, in pixels, along an edge before smoothing is triggered
-    MAX_CORNER_DISTANCE = 2.83  # sqrt(8), vertical/horizontal edge ends further away than this are not connected
     INNER_GUARD = 2  # minimum pixel width of inner black ring
     OUTER_GUARD = 2  # minimum pixel width of outer black ring
     MIN_PULSE_HEAD = 3  # minimum pixels for a valid pulse head period, pulse ignored if less than this
@@ -139,16 +138,8 @@ class Scan:
     # region Step/Edge/Corner types...
     HORIZONTAL = 'horizontal'
     VERTICAL = 'vertical'
-    WAS_VERT = 'was-vert'    # used to mark edges that have been used in corner construction
-    WAS_HORIZ = 'was-horiz'  # ..
     RISING = 'rising'
     FALLING = 'falling'
-    EDGE_START = 'start'
-    EDGE_END = 'end'
-    TOP_LEFT = 'top-left'
-    TOP_RIGHT = 'top-right'
-    BOTTOM_LEFT = 'bottom-left'
-    BOTTOM_RIGHT = 'bottom-right'
     # endregion
 
     # region Pulse classifications...
@@ -229,8 +220,8 @@ class Scan:
             the horizontal and vertical edge fragments it was built from """
 
         def __init__(self, h_edges, v_edges, inner, inner_fail=None):
-            self.h_edges: [Scan.Edge] = h_edges  # the horizontal edge fragments of the image
-            self.v_edges: [Scan.Edge] = v_edges  # the vertical edge fragments of the image
+            self.h_edges: [Scan.Edge] = h_edges  # the horizontal edge fragments of the image or None
+            self.v_edges: [Scan.Edge] = v_edges  # the vertical edge fragments of the image or None
             self.inner: [int] = inner  # list of y co-ords for the inner edge
             self.inner_fail = inner_fail  # reason if failed to find inner edge or None if OK
 
@@ -858,7 +849,7 @@ class Scan:
 
     def _edges(self, slices: List[List[Step]], limit_x, limit_y, mode) -> ([Edge], [Edge]):
         """ build a list of falling and rising edges of our target,
-            mode is horizontal or vertical and just modified the edge type created,
+            mode is horizontal or vertical and just modifies the edge type created,
             this function is orientation agnostic, the use of the terms x and y are purely convenience,
             returns the falling and rising edges list in increasing co-ordinate order,
             an 'edge' here is a sequence of connected rising or falling Steps,
@@ -1517,11 +1508,12 @@ class Scan:
         slices = self._slices(buckets)
         h_edges = self._edges(slices, max_x, max_y, mode=Scan.HORIZONTAL)
         rings = self._rings(buckets)
-        v_edges = self._edges(rings, max_x, max_y, mode=Scan.VERTICAL)
+        v_edges = None  # self._edges(rings, max_x, max_y, mode=Scan.VERTICAL)
         extent = self._extent(h_edges, v_edges, max_x, max_y)
 
         if self.save_images:
-            plot = self._draw_edges(v_edges, target)
+            plot = target
+            # plot = self._draw_edges(v_edges, plot)
             plot = self._draw_edges(h_edges, plot, extent)
             self._unload(plot, '05-edges')
 
@@ -1549,168 +1541,87 @@ class Scan:
     def _find_segment_edges(self, buckets: frame.Frame, extent: Extent) -> ([int], str):
         """ find the segment edges from an analysis of the given buckets and extent,
             returns an edge list and None if succeeded, or partial list and a reason if failed,
-            the extent contains the horizontal and vertical edges in the image, there will be
-            a 'corner' beyond the inner edge for every segment boundary, a 'corner' is where a
-            horizontal edge starts or finishes 'near' a vertical edge start or finish, 'near'
-            is a tuning constant
+            the extent contains the horizontal edges in the image,
             """
-
-        max_x, max_y = buckets.size()
-        reason = None
-
-        max_distance = Scan.MAX_CORNER_DISTANCE * Scan.MAX_CORNER_DISTANCE  # distance limit for an edge to be connected
 
         if self.logging:
             header = 'find_segment_edges:'
 
-        def midpoint(edge, x1, y1):
-            """ return the x,y of the midpoint between the given x,y and the given edge """
-            x2, y2, _, _, _ = edge
-            dx = wrapped_gap(x1, x2, max_x)
-            dy = wrapped_gap(y1, y2, max_y)
-            return (x1 + int(round(dx/2))) % max_x, (y1 + int(round(dy/2))) % max_y
+        max_x, max_y = buckets.size()
+        reason = None
 
-        def distance(pt1, pt2):
-            """ calculate the square of the distance between x,y points 1 and 2 (i.e. hypotenuse by pythagoras) """
-            x = wrapped_gap(pt1[0], pt2[0], max_x)
-            x *= x
-            y = wrapped_gap(pt1[1], pt2[1], max_y)
-            y *= y
-            return x + y  # =0 if both points the same - fine
-
-        def find_match(edges, x, y, edge_dir, edge_end):
-            """ find the closest match to x,y in edge_joins for the given edge direction and end,
-                returns the index into edge_joins of the best match or None if no match
-                """
-            best = None
-            best_distance = 2 * max_distance
-            for edge in range(len(edges)):
-                if edges[edge] is None:
-                    # this one has been used
-                    continue
-                dx, dy, de_type, de_end, de_dir = edges[edge]
-                if de_dir == edge_dir and de_end == edge_end:
-                    # got a match, is it nearby
-                    this_distance = distance((x, y), (dx, dy))
-                    if this_distance > max_distance:
-                        # too far away to be connected
-                        continue
-                    else:
-                        # got a nearby matching corner, update best
-                        if this_distance < best_distance:
-                            # found a closer match
-                            best = edge
-                            best_distance = this_distance
-            return best
-
-        def make_corner(corners, edges, edge, spec):
-            """ find and make a corner for the given spec from the given edge """
-
-            def was(dir):
-                """ change dir to its 'was' variant """
-                if dir == Scan.VERTICAL:
-                    return Scan.WAS_VERT
-                elif dir == Scan.HORIZONTAL:
-                    return Scan.WAS_HORIZ
-                else:
-                    return None
-
-            from_dir, from_end, to_dir, to_end, corner_type = spec
-            x, y, e_type, e_end, e_dir = edges[edge]
-            if e_dir == from_dir and e_end == from_end:
-                # got one end, look for the other
-                best = find_match(edges, x, y, to_dir, to_end)
-                if best is not None:
-                    # found a corner match
-                    x2, y2 = midpoint(edges[best], x, y)
-                    corners.append([x2, y2, corner_type])  # note it
-                    # mark the edges we've 'consumed' so they do not get considered again
-                    # we do that by changing the direction to its 'was' variant, that stops it being matched again
-                    edges[edge][4] = was(from_dir)
-                    edges[best][4] = was(to_dir)
-                    return True  # done with this corner
-            return False
-
+        # ToDo: HACK
+        # generate a normalised black/white strip for each x for visual testing
         inner = extent.inner
-        h_edges = extent.h_edges
-        v_edges = extent.v_edges
-        edges = []
-        for edge in h_edges[0]:
-            if len(edge.samples) == max_x:
-                # ignore those that go right round
-                continue
-            edges.append([edge.where, edge.samples[0], edge.type, Scan.EDGE_START, Scan.HORIZONTAL])  # start
-            edges.append([(edge.where + len(edge.samples) - 1) % max_x, edge.samples[-1], edge.type, Scan.EDGE_END, Scan.HORIZONTAL])  # end
-        for edge in h_edges[1]:
-            if len(edge.samples) == max_x:
-                # ignore those that go right round
-                continue
-            edges.append([edge.where, edge.samples[0], edge.type, Scan.EDGE_START, Scan.HORIZONTAL])  # start
-            edges.append([(edge.where + len(edge.samples) - 1) % max_x, edge.samples[-1], edge.type, Scan.EDGE_END, Scan.HORIZONTAL])  # end
-        for edge in v_edges[0]:
-            if len(edge.samples) == max_y:
-                # ignore those that go right across
-                continue
-            edges.append([edge.samples[0], edge.where, edge.type, Scan.EDGE_START, Scan.VERTICAL])  # start
-            edges.append([edge.samples[-1], edge.where + len(edge.samples) - 1, edge.type, Scan.EDGE_END, Scan.VERTICAL])  # end
-        for edge in v_edges[1]:
-            if len(edge.samples) == max_y:
-                # ignore those that go right across
-                continue
-            edges.append([edge.samples[0], edge.where, edge.type, Scan.EDGE_START, Scan.VERTICAL])  # start
-            edges.append([edge.samples[-1], edge.where + len(edge.samples) - 1, edge.type, Scan.EDGE_END, Scan.VERTICAL])  # end
-        edges.sort(key=lambda c: (c[0], c[1]))
-        corner_specs = [[Scan.HORIZONTAL, Scan.EDGE_START, Scan.VERTICAL  , Scan.EDGE_START, Scan.TOP_LEFT    ],
-                        [Scan.HORIZONTAL, Scan.EDGE_START, Scan.VERTICAL  , Scan.EDGE_END  , Scan.BOTTOM_LEFT ],
-                        [Scan.HORIZONTAL, Scan.EDGE_END  , Scan.VERTICAL  , Scan.EDGE_START, Scan.TOP_RIGHT   ],
-                        [Scan.HORIZONTAL, Scan.EDGE_END  , Scan.VERTICAL  , Scan.EDGE_END  , Scan.BOTTOM_RIGHT],
-                        [Scan.VERTICAL  , Scan.EDGE_START, Scan.HORIZONTAL, Scan.EDGE_START, Scan.TOP_LEFT    ],
-                        [Scan.VERTICAL  , Scan.EDGE_START, Scan.HORIZONTAL, Scan.EDGE_END  , Scan.TOP_RIGHT   ],
-                        [Scan.VERTICAL  , Scan.EDGE_END  , Scan.HORIZONTAL, Scan.EDGE_START, Scan.BOTTOM_LEFT ],
-                        [Scan.VERTICAL  , Scan.EDGE_END  , Scan.HORIZONTAL, Scan.EDGE_END  , Scan.BOTTOM_RIGHT]]
-        corners = []
-        for edge in range(len(edges)):
-            for spec in corner_specs:
-                if make_corner(corners, edges, edge, spec):
+        falling_edges, rising_edges = extent.h_edges
+        strips = buckets.instance().new(max_x, max_y, MID_LUMINANCE)
+        digits = [[None, None] for _ in range(max_x)]
+        ring_width = int(round(max_y / Scan.NUM_RINGS))
+        strip_start_y = ring_width * 2
+        strip_end_y = max_y - ring_width
+        for x in range(max_x):
+            start_y = inner[x] + 1  # get past the white bullseye
+            lead_at = None
+            head_at = None
+            tail_at = None
+            for y in range(start_y, max_y):
+                pixel = buckets.getpixel(x, y)
+                if pixel == MID_LUMINANCE:
+                    # ignore grey areas
+                    # ToDo: do something better than just ignore it? another option with it?
+                    continue
+                if pixel == MAX_LUMINANCE and lead_at is None:
+                    # ignore until we see a black
+                    continue
+                if pixel == MAX_LUMINANCE and head_at is None:
+                    # start of head
+                    head_at = y
+                    continue
+                if pixel == MIN_LUMINANCE and lead_at is None:
+                    # start of lead
+                    lead_at = start_y  # use real start
+                    continue
+                if pixel == MIN_LUMINANCE and head_at is not None:
+                    # end of head
+                    tail_at = y
                     break
-
-        if self.logging:
-            if header is not None:
-                self._log(header)
-                header = None
-            orphans = 0
-            for (x, y, e_type, e_end, e_dir) in edges:
-                if e_dir == Scan.HORIZONTAL or e_dir == Scan.VERTICAL:
-                    orphans += 1
-            self._log('    {} orphans:'.format(orphans))
-            orphan = 0
-            for edge, (x, y, e_type, e_end, e_dir) in enumerate(edges):
-                if e_dir == Scan.HORIZONTAL or e_dir == Scan.VERTICAL:
-                    orphan += 1
-                    self._log('        {}: {}'.format(orphan, edges[edge]))
-            self._log('    {} corners:'.format(len(corners)))
-            for c, corner in enumerate(corners):
-                self._log('        {}: {}'.format(c, corner))
-        if self.save_images:
-            tl = []
-            tr = []
-            bl = []
-            br = []
-            for x, y, corner in corners:
-                if corner == Scan.TOP_LEFT:
-                    tl.append([x, [y]])
-                elif corner == Scan.TOP_RIGHT:
-                    tr.append([x, [y]])
-                elif corner == Scan.BOTTOM_RIGHT:
-                    br.append([x, [y]])
-                elif corner == Scan.BOTTOM_LEFT:
-                    bl.append([x, [y]])
-            plot = self._draw_plots(buckets, plots_x=tl, colour=Scan.RED)
-            plot = self._draw_plots(plot, plots_x=tr, colour=Scan.GREEN)
-            plot = self._draw_plots(plot, plots_x=br, colour=Scan.BLUE)
-            plot = self._draw_plots(plot, plots_x=bl, colour=Scan.YELLOW)
-            self._unload(plot, '05-corners')
-        return None, 'not implemented yet'
+            if lead_at is None:
+                # all white, do 1 black and the rest white
+                lead_at = start_y
+                head_at = lead_at + 1
+                tail_at = max_y
+            if head_at is None:
+                # all black, do a trailing white
+                lead_at = start_y
+                head_at = max_y - 1
+                tail_at = max_y
+            if tail_at is None:
+                # white to the end, do a trailing black
+                tail_at = max_y
+            for y in range(lead_at, head_at):
+                strips.putpixel(x, (y - start_y) + strip_start_y, MIN_LUMINANCE)
+            for y in range(head_at, tail_at):
+                strips.putpixel(x, (y - start_y) + strip_start_y, MAX_LUMINANCE)
+            for y in range(strip_start_y):
+                strips.putpixel(x, y, MAX_LUMINANCE)
+            for y in range(strip_end_y, max_y):
+                strips.putpixel(x, y, MIN_LUMINANCE)
+            lead_length = head_at - lead_at
+            head_length = tail_at - head_at
+            ratio = lead_length / head_length
+            digits[x][0] = ratio
+            digits[x][1] = self.decoder.classify(ratio)
+        self._unload(strips, '05-strips')
+        self._log(header)
+        for x, (ratio, digit) in enumerate(digits):
+            if ratio is None or digit is None:
+                continue
+            msg = ''
+            for option in digit:
+                msg = '{}, ({}, {:.2f})'.format(msg, option[0], option[1])
+            self._log('    {}: ratio={:.2f}, options={}'.format(x, ratio, msg[2:]))
+        return None, 'not yet'
+        # ToDo: HACKEND
 
         # region helpers...
         def show_edge(edge):

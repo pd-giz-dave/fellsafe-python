@@ -72,13 +72,13 @@ class Codec:
     # of the 10 possibilities the 7 with the biggest error differential have been chosen
     # NB: use None for trailing zeroes (so ratio calculator knows true 0's length)
     ENCODING = [
-                [1, 1,    1,    1   ],
-                [0, 0,    1,    1   ],
-                [0, 0,    0,    1   ],
-                [1, None, None, None],  # could be [1, None, None, None] or [0, 1, 1, None]
-                [0, 1,    None, None],
-                [0, 0,    1,    None],
-                [0, 0,    0,    0   ],
+                [1, 1,    1,    1   ],  # 0
+                [0, 0,    1,    1   ],  # 1
+                [0, 0,    0,    1   ],  # 2
+                [1, None, None, None],  # 3 - could be [1, None, None, None] or [0, 1, 1, None]
+                [0, 1,    None, None],  # 4
+                [0, 0,    1,    None],  # 5
+                [0, 0,    0,    0   ],  # 6
                ]
 
     # base 6 encoding yields over 400 usable codes, base 7 yields over 1000, base 5 yields over 100
