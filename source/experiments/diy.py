@@ -246,7 +246,7 @@ class Test:
         # so a one pixel error can be significant, we test ratios for every possibility
         # black/white lengths. The biggest length is cell-height * cells-in-radius
         try:
-            max_span = self.cells[1] * (codec.Codec.RINGS_PER_DIGIT + 1)  # ToDo: is this correct for 0000 case?
+            max_span = self.cells[1] * (codec.Codec.RINGS_PER_DIGIT + 1)
             min_length = 2
             max_length = max_span - min_length
             min_ratio = min_length / max_length
@@ -529,7 +529,7 @@ class Test:
                             found[n] = True
                             found_num = num
                             code = self.codec.encode(num)
-                            expected = 'code={}, bits={}'.format(code, self.codec.bits(code))
+                            expected = 'code={}'.format(code)
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, bits])
                 # create dummy result for those not found
@@ -542,7 +542,7 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = 'code={}, bits={}'.format(code, self.codec.bits(code))
+                            expected = 'code={}'.format(code)
                         analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
@@ -718,15 +718,15 @@ def verify():
         test.decoding()
         test.errors()
         test.circles()
-        test.code_words(test_num_set)
-        test.codes(test_codes_folder, test_num_set, test_ring_width)
-        test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
+        # test.code_words(test_num_set)
+        # test.codes(test_codes_folder, test_num_set, test_ring_width)
+        # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [332], 'test-code-332.png')
+        # test.scan(test_codes_folder, [101], 'test-code-101.png')
         # test.scan(test_codes_folder, [222], 'test-code-222.png')
         # test.scan(test_codes_folder, [555], 'test-code-555.png')
         # test.scan(test_codes_folder, [800], 'test-code-800.png')
@@ -739,7 +739,7 @@ def verify():
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
+        test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-distant.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-near.jpg')

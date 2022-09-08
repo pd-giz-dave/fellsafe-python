@@ -20,14 +20,15 @@ from typing import List
 dx = [1, 1, 0, -1, -1, -1,  0,  1]       # x-offset
 dy = [0, 1, 1,  1,  0, -1, -1, -1]       # .. y-offset
 
-# Reject codes for blobs being ignored
-REJECT_UNKNOWN     = 0                   # do not know why it was rejected
-REJECT_NONE        = 1                   # not rejected
+# Reject codes for blobs being ignored (must be sequential)
+REJECT_NONE        = 0                   # not rejected (must be zero)
+REJECT_UNKNOWN     = 1                   # do not know why it was rejected
 REJECT_TOO_SMALL   = 2                   # area below minimum
 REJECT_TOO_BIG     = 3                   # area above maximum
 REJECT_IRREGULAR   = 4                   # shape too irregular
 REJECT_RADIUS      = 5                   # radius too small
 REJECT_MARGIN      = 6                   # margin to image edge too small
+REJECT_CODE_LIMIT  = 7                   # +1 on last code
 
 BLACK: int = 0
 WHITE: int = 255
@@ -289,8 +290,13 @@ def make_binary(source, s: float=8, black: float=15, white: float=None):
         the s fraction applies to the minimum of the image width or height.
         See the adaptive-threshold-algorithm.pdf paper for algorithm details.
         """
+
+    # get the image metrics
     max_y = source.shape[0]
     max_x = source.shape[1]
+    s2 = int(min(max_x, max_y) / s)  # we want this to be odd so that there is a centre
+    s_plus = max(s2 >> 1, 2)  # offset for going forward
+    s_minus = s_plus - 1  # offset for going backward
 
     # make an empty buffer to accumulate our integral in
     integral = np.zeros((max_y, max_x), np.int32)
@@ -308,10 +314,7 @@ def make_binary(source, s: float=8, black: float=15, white: float=None):
                 integral[y][x] = acc + integral[y-1][x]
 
     # do the threshold on a new image buffer
-    binary = np.zeros((max_y, max_x), np.uint8)  # set everything to black at first
-    s2 = int(min(max_x, max_y) / s)  # we want this to be odd so that there is a centre
-    s_plus = max(s2 >> 1, 2)         # offset for going forward
-    s_minus = s_plus - 1             # offset for going backward
+    binary = np.zeros((max_y, max_x), np.uint8)
     black_limit = (100-black)/100    # convert % to a ratio
     if white is None:
         white_limit = black_limit
@@ -327,9 +330,11 @@ def make_binary(source, s: float=8, black: float=15, white: float=None):
             # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
             # where all but bottom right are *outside* the integration window
             acc = integral[y2][x2] + integral[y1][x1] - integral[y1][x2] - integral[y2][x1]
-            if (int(source[y, x]) * count) > (acc * white_limit):
+            if (int(source[y, x]) * count) >= (acc * white_limit):
                 binary[y, x] = WHITE
-            elif (int(source[y, x]) * count) > (acc * black_limit):
+            elif (int(source[y, x]) * count) <= (acc * black_limit):
+                binary[y, x] = BLACK
+            else:
                 binary[y, x] = GREY
 
     return binary
@@ -564,6 +569,7 @@ def _test(src):
 
     logger = Logger("_test")
 
+    logger.log("\nPreparing image:")
     source = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
     # Downsize it
     width, height = source.shape
@@ -571,18 +577,13 @@ def _test(src):
     new_width = 1152
     new_height = int(new_width * aspect_ratio)
     shrunk = cv2.resize(source, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    logger.log("\nDetecting blobs")
     params = Targets()
     image, blobs, buffer, labels, _ = find_targets(shrunk, params, logger=logger)
     draw = cv2.merge([image, image, image])
-    # for y in range(10, new_height, 10):
-    #     cv2.line(draw, (0, y), (new_width-1, y), (0, 255, 0), 1)
-    # for x in range(10, new_width, 10):
-    #     cv2.line(draw, (x, 0), (x, new_height-1), (0, 255, 0), 1)
-    # for y in range(100, new_height, 100):
-    #     cv2.line(draw, (0, y), (new_width-1, y), (0, 0, 255), 1)
-    # for x in range(100, new_width, 100):
-    #     cv2.line(draw, (x, 0), (x, new_height-1), (0, 0, 255), 1)
+    logger.log("\n")
     cv2.imwrite("contours_binary.png", draw)
+    logger.log("binary image shown in contours_binary.png")
     max_x = buffer.shape[1]
     max_y = buffer.shape[0]
     draw_bad = cv2.merge([shrunk, shrunk, shrunk])
@@ -603,16 +604,20 @@ def _test(src):
                 elif blob.rejected == REJECT_RADIUS:
                     draw_bad[y, x] = (0, 255, 255)  # yellow
                 elif blob.rejected == REJECT_MARGIN:
-                    draw_bad[y, x] = (64, 64, 255)  # pink
+                    draw_bad[y, x] = (64, 96, 255)  # orange
                 else:
                     draw_bad[y, x] = (0, 0, 255)    # red
 
     cv2.imwrite("contours_accepted.png", draw_good)
+    logger.log("accepted contours shown in contours_accepted.png")
     cv2.imwrite("contours_rejected.png", draw_bad)
+    logger.log("rejected contours shown in contours_rejected.png")
     draw = cv2.merge([shrunk, shrunk, shrunk])
     for target in params.targets:
         cv2.circle(draw, (int(round(target[0])), int(round(target[1]))), int(round(target[2])), (0, 255, 0), 1)
     cv2.imwrite("contours_blobs.png", draw)
+    logger.log("detected blobs shown in contours_blobs.png")
+    logger.log("\n")
 
     logger.log("\nAll accepted blobs:")
     for b, blob in enumerate(blobs):
@@ -630,7 +635,7 @@ def _test(src):
     logger.log("\nBlob colours:")
     logger.log("    green=good, red=unknown")
     logger.log("    magenta=shape too irregular, cyan=area too small, blue=area too big")
-    logger.log("    yellow=radius too small, pink=margin too small")
+    logger.log("    yellow=radius too small, orange=margin too small")
 
 
 if __name__ == "__main__":
@@ -641,7 +646,8 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-332.png"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101-102-182-247-301-424-448-500-537-565-v2.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101-102-182-247-301-424-448-500-537-565-v5.jpg"

@@ -14,9 +14,13 @@ class Ring:
         see description in Codec for the overall target structure
         """
 
-    NUM_RINGS = codec.Codec.RINGS_PER_DIGIT + 4  # total rings in our complete code
+    BULLSEYE_RINGS = 2
+    INNER_BLACK_RINGS = 1
+    OUTER_BLACK_RINGS = 1
+    MARKER_RINGS = BULLSEYE_RINGS + INNER_BLACK_RINGS + OUTER_BLACK_RINGS
+    NUM_RINGS = codec.Codec.RINGS_PER_DIGIT + MARKER_RINGS  # total rings in our complete code
     DIGITS = codec.Codec.DIGITS  # how many bits in each ring
-    BORDER_WIDTH = 0.5  # border width in units of rings
+    BORDER_WIDTH = 0.6  # border width in units of rings
 
     def __init__(self, centre_x, centre_y, width, frame, contrast, offset):
         # set constant parameters
@@ -173,7 +177,7 @@ class Ring:
         digits = [zero, one, two, three, four, five, six, seven, eight, nine]
         point_size = max(int((self.w / len(zero[0])) * 1.0), 1)
         digit_size = point_size * len(zero[0])
-        start_x = 0 - min(ring_num * self.w, self.x)
+        start_x = int(round(0 - min(ring_num * self.w, self.x)))
         start_y = start_x
         place = -1
         limits = [[None, None], [None, None]]  # min/max x/y used when drawing digits
@@ -218,9 +222,9 @@ class Ring:
             """
 
         # draw the bullseye and the inner white/black rings
-        self._draw_ring(0.0, -1, 2.0)
-        self._draw_ring(2.0, 0, 1.0)
-        draw_at = 3.0
+        self._draw_ring(0.0, -1, Ring.BULLSEYE_RINGS)
+        self._draw_ring(2.0, 0, Ring.INNER_BLACK_RINGS)
+        draw_at = Ring.BULLSEYE_RINGS + Ring.INNER_BLACK_RINGS
 
         # draw the data rings
         for ring in rings:
@@ -228,8 +232,8 @@ class Ring:
             draw_at += 1.0
 
         # draw the outer black
-        self._draw_ring(draw_at, 0, 1.0)
-        draw_at += 1.0
+        self._draw_ring(draw_at, 0, Ring.OUTER_BLACK_RINGS)
+        draw_at += Ring.OUTER_BLACK_RINGS
 
         if int(draw_at) != draw_at:
             raise Exception('number of target rings is not integral ({})'.format(draw_at))
@@ -241,6 +245,7 @@ class Ring:
 
         # draw a border
         self._border(draw_at)
+        draw_at += Ring.BORDER_WIDTH
 
         # draw a human readable label
         self._label(draw_at, number)

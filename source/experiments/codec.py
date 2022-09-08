@@ -72,16 +72,16 @@ class Codec:
     # of the 10 possibilities the 7 with the biggest error differential have been chosen
     # NB: use None for trailing zeroes (so ratio calculator knows true 0's length)
     ENCODING = [
-                [1, 1, 1,    1   ],
-                [0, 0, 1,    1   ],
-                [0, 0, 0,    1   ],
-                [0, 1, 1,    None],
-                [0, 1, None, None],
-                [0, 0, 1,    None],
-                [0, 0, 0,    0   ],
+                [1, 1,    1,    1   ],
+                [0, 0,    1,    1   ],
+                [0, 0,    0,    1   ],
+                [1, None, None, None],  # could be [1, None, None, None] or [0, 1, 1, None]
+                [0, 1,    None, None],
+                [0, 0,    1,    None],
+                [0, 0,    0,    0   ],
                ]
 
-    # base 6 encoding yields 452 usable codes, base 7 yields 1202, base 5 yields 132
+    # base 6 encoding yields over 400 usable codes, base 7 yields over 1000, base 5 yields over 100
     BASE_MAX = len(ENCODING)
     BASE_MIN = 2
     RINGS_PER_DIGIT = len(ENCODING[0])  # number of rings spanning the variable data portion of a code-word
@@ -363,14 +363,17 @@ class Codec:
         """ given a code word candidate return True if its allowable as the basis for a code-word,
             code-words are not allowed if they do not meet our property requirements around the rings,
             the requirement is that the most significant digit must be the biggest and no two adjacent
-            digits can be the same, and at least one digit must have 'black' element as the first data ring
+            digits may be the same and at least one segment in the first data ring must be black, these
+            three constraints ensure we can find all the digit edges around the ring and also find the
+            first digit of a number and not create a 'false' inner white ring (that could confuse the
+            bullseye detection),
             returns True iff its allowable
             """
 
         digits = self.digits(candidate)
         first_digit = digits[0]
         last_digit = first_digit
-        if Codec.ENCODING[first_digit][0] == 0:  # NB: first element in an encoding is never None
+        if Codec.ENCODING[first_digit][0] == 0:
             has_black = True
         else:
             has_black = False
@@ -380,12 +383,14 @@ class Codec:
                 # does not meet requirement that first digit is the biggest
                 return False
             if digit == last_digit:
-                # does not meet requirement that adjacent digits are different
+                # does no meet adjacent digits different requirement
                 return False
-            last_digit = digit
-            if Codec.ENCODING[digit][0] == 0:  # NB: first element in an encoding is never None
+            if Codec.ENCODING[digit][0] == 0:
                 has_black = True
+            last_digit = digit
+
         if not has_black:
+            # does not meet our inner data ring having a black segment requirement
             return False
 
         # all good
