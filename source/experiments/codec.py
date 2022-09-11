@@ -184,7 +184,10 @@ class Codec:
         """ get the number for the given code, if not valid returns None """
         if code is None or code < 0 or code >= len(self.nums):
             return None
-        return self.nums[code] + self.min_num
+        base = self.nums[code]
+        if base is None:
+            return None
+        return base + self.min_num
 
     def build(self, num):
         """ build the code block needed for the data rings
@@ -199,9 +202,10 @@ class Codec:
         return self._rings(code_block)
 
     def unbuild(self, digits):
-        """ given an array of N digits with random alignment return the encoded number or None,
-            N must be Codec.DIGITS
-            returns the number (or None) and the level of doubt
+        """ given an array of N digits with random alignment return the corresponding code or None,
+            in a sense its the opposite of digits(),
+            N must be Codec.DIGITS,
+            returns the code (or None) and the level of doubt
             """
 
         if len(digits) != Codec.DIGITS:
@@ -253,14 +257,8 @@ class Codec:
             code += digit
             doubt += digit_doubt
 
-        # step 5 - lookup number
-        number = self.decode(code)
-        if number is None:
-            if doubt == 0:
-                doubt = Codec.DIGITS
-
         # that's it
-        return number, doubt, code
+        return code, doubt
 
     def ratio(self, digit):
         """ given a digit return its black/white ratio, this represents the ideal ratio """

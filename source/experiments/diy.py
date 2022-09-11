@@ -4,7 +4,6 @@ import shutil
 
 import rand
 import codec
-import ring
 import angle as angles
 import ring as rings
 import frame
@@ -64,7 +63,7 @@ class Test:
         self.log_file = None
         self._log('')
         self._log('******************')
-        self._log('Rings: {}, Digits: {}'.format(ring.Ring.NUM_RINGS, codec.Codec.DIGITS_PER_WORD))
+        self._log('Rings: {}, Digits: {}'.format(rings.Ring.NUM_RINGS, codec.Codec.DIGITS_PER_WORD))
 
     def __del__(self):
         if self.log_file is not None:
@@ -210,22 +209,22 @@ class Test:
                                 digit_bits[ring] = 0
                         digits[bit] = self.codec.digit(digit_bits)
                         mask >>= 1  # move down a bit
-                    m, doubt, code = self.codec.unbuild(digits)
+                    m, doubt = self.codec.unbuild(digits)
                     if m is None:
                         # failed to decode
                         fail += 1
-                        self._log('****FAIL: {:03}-->{}, build={}, doubt={}, code={}, digits={}'.
-                                  format(n, m, rings, doubt, code, digits))
-                    elif m != n:
+                        self._log('****FAIL: {:03}-->None, build={}, doubt={}, code={}, digits={}'.
+                                  format(n, rings, doubt, m, digits))
+                    elif self.codec.decode(m) != n:
                         # incorrect decode
                         bad += 1
                         self._log('****BAD!: {:03}-->{} , build={}, doubt={}, code={}, digits={}'.
-                                  format(n, m, rings, doubt, code, digits))
+                                  format(n, self.codec.decode(m), rings, doubt, m, digits))
                     elif doubt > 0:
                         # got doubt
                         doubted += 1
                         self._log('****DOUBT!: {:03}-->{} , build={}, doubt={}, code={}, digits={}'.
-                                  format(n, m, rings, doubt, code, digits))
+                                  format(n, self.codec.decode(m), rings, doubt, m, digits))
                     else:
                         good += 1
             self._log('{} good, {} doubted, {} bad, {} fail'.format(good, doubted, bad, fail))
@@ -517,10 +516,11 @@ class Test:
                 for result in results:
                     centre_x = result.centre_x
                     centre_y = result.centre_y
-                    num = result.number
-                    doubt = result.doubt
+                    num = result.result.number
+                    doubt = result.result.doubt
+                    code = result.result.code
+                    digits = result.result.digits
                     size = result.target_size
-                    bits = result.digits
                     expected = None
                     found_num = None
                     for n in range(len(numbers)):
@@ -528,10 +528,9 @@ class Test:
                             # found another expected number
                             found[n] = True
                             found_num = num
-                            code = self.codec.encode(num)
-                            expected = 'code={}'.format(code)
+                            expected = 'code={}, digits={}'.format(code, self.show_list(digits))
                             break
-                    analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, bits])
+                    analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, digits])
                 # create dummy result for those not found
                 for n in range(len(numbers)):
                     if not found[n]:
@@ -542,27 +541,26 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = 'code={}'.format(code)
+                            expected = 'code={}, digits={}'.format(code, self.show_list(self.codec.digits(code)))
                         analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
                     for result in analysis:
-                        found = result[0]
+                        found_num = result[0]
                         centre_x = result[1]
                         centre_y = result[2]
                         num = result[3]
                         doubt = result[4]
                         size = result[5]
                         expected = result[6]
-                        bits = result[7]
-                        bits = ', bits {}'.format(bits)
-                        if found is not None:
+                        digits = result[7]
+                        if found_num is not None:
                             if loop != 0:
                                 # don't want these in this loop
                                 continue
                             # got what we are looking for
-                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.4f}{}'.
-                                      format(num, expected, centre_x, centre_y, size, doubt, bits))
+                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}'.
+                                      format(num, expected, centre_x, centre_y, size, doubt))
                             continue
                         if expected is not None:
                             if loop != 1:
@@ -585,26 +583,17 @@ class Test:
                             if num is None:
                                 actual_code = 'not-valid'
                                 prefix = ''
-                            elif num < 0:
-                                num = 0 - num
-                                actual_code = self.codec.encode(num)
-                                if actual_code is None:
-                                    actual_code = 'not-valid'
-                                else:
-                                    actual_code = 'code={}, bits={}'. \
-                                                  format(actual_code, self.codec.bits(actual_code))
-                                prefix = '**** AMBIGUOUS **** --> '
                             else:
                                 actual_code = self.codec.encode(num)
                                 if actual_code is None:
                                     actual_code = 'not-valid'
                                     prefix = ''
                                 else:
-                                    actual_code = 'code={}, bits={}'.\
-                                                  format(actual_code, self.codec.bits(actual_code))
+                                    actual_code = 'code={}'.format(actual_code)
                                     prefix = '**** UNEXPECTED **** ---> '
-                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.4f}{}'.
-                                      format(prefix, num, actual_code, centre_x, centre_y, size, doubt, bits))
+                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}, digits={}'.
+                                      format(prefix, num, actual_code, centre_x, centre_y, size, doubt,
+                                             self.show_list(digits)))
                             continue
                 if len(results) == 0:
                     self._log('**** FOUND NOTHING ****')
@@ -617,6 +606,13 @@ class Test:
         self._log('Scan image {} for codes {}'.format(image, numbers))
         self._log('******************')
         return exit_code
+
+    def show_list(self, this):
+        """ helper to display a list of classes where that class is assumed to have a __str__ function """
+        msg = ''
+        for item in this:
+            msg = '{}, {}'.format(msg, item)
+        return '[' + msg[2:] + ']'
 
     def _log(self, message):
         """ print a log message and maybe write it to a file too """
@@ -690,7 +686,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (7, 5)
+    test_scan_cells = (7, 6)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -723,11 +719,11 @@ def verify():
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
-        # test.scan_media(test_media_folder)
+        test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [101], 'test-code-101.png')
-        # test.scan(test_codes_folder, [222], 'test-code-222.png')
+        # test.scan(test_codes_folder, [120], 'test-code-120.png')
         # test.scan(test_codes_folder, [555], 'test-code-555.png')
         # test.scan(test_codes_folder, [800], 'test-code-800.png')
         # test.scan(test_codes_folder, [574], 'test-code-574.png')
@@ -739,7 +735,7 @@ def verify():
 
         # test.scan(test_media_folder, [301], 'photo-301.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
-        test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
+        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-distant.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-near.jpg')
