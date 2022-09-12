@@ -253,6 +253,7 @@ class Scan:
             self.centre_y = centre_y  # ..
             self.blob_size = blob_size  # the size of the blob as detected by opencv
             self.target_size = target_size  # the size of the target in the original image (used for relative distance)
+    # endregion
 
     def __init__(self, codec, frame, transform, cells=(8, 4), video_mode=VIDEO_FHD, debug=DEBUG_NONE, log=None):
         """ codec is the codec instance defining the code structure,
@@ -304,7 +305,7 @@ class Scan:
         # needed by _project
         max_x, max_y = self.image.size()
         max_radius = min(max_x, max_y) / 2
-        max_circumference = min(2 * math.pi * max_radius, 3600)  # good enough for at least 0.1 degree resolution
+        max_circumference = min(2 * math.pi * max_radius, 360)  # good enough for 1 degree resolution
         angles = angle.Angle(max_circumference, max_radius)
         self.angle_xy = angles.polarToCart
 
@@ -408,15 +409,15 @@ class Scan:
                 the returned pixel value is the sum of the overlap fractions of its neighbour
                 pixel squares, P is the fractional pixel address in its pixel, 1, 2 and 3 are
                 its neighbours, dotted area is contribution from neighbours:
-                    +------+-----+
+                    +------+------+
                     |  P   |   1  |
-                    |   ...|...   |
-                    |   .  |  .   |
-                    +------+------+
-                    |   .  |  .   |
-                    |   ...|...   |
+                    |  ....|....  |  Ax = 1 - (Px - int(Px) = 1 - Px + int(Px) = (int(Px) + 1) - Px
+                    |  . A | B .  |  Ay = 1 - (Py - int(Py) = 1 - Py + int(Py) = (int(Py) + 1) - Py
+                    +------+------+  et al for B, C, D
+                    |  . D | C .  |
+                    |  ....|....  |
                     |  3   |   2  |
-                    +------+------+
+                    +----- +------+
                 """
             cX: float = centre_x + x
             cY: float = centre_y + y
@@ -424,23 +425,28 @@ class Scan:
             yL: int = int(cY)
             xH: int = xL + 1
             yH: int = yL + 1
-            xLyL = self.image.getpixel(xL, yL)
-            xLyH = self.image.getpixel(xL, yH)
-            xHyL = self.image.getpixel(xH, yL)
-            xHyH = self.image.getpixel(xH, yH)
-            if xLyL is None:
-                xLyL = MIN_LUMINANCE
-            if xLyH is None:
-                xLyH = MIN_LUMINANCE
-            if xHyL is None:
-                xHyL = MIN_LUMINANCE
-            if xHyH is None:
-                xHyH = MIN_LUMINANCE
-            pixel: float = (xH - cX) * (yH - cY) * xLyL
-            pixel += (cX - xL) * (yH - cY) * xHyL
-            pixel += (xH - cX) * (cY - yL) * xLyH
-            pixel += (cX - xL) * (cY - yL) * xHyH
-            return int(round(pixel))
+            pixel_xLyL = self.image.getpixel(xL, yL)
+            pixel_xLyH = self.image.getpixel(xL, yH)
+            pixel_xHyL = self.image.getpixel(xH, yL)
+            pixel_xHyH = self.image.getpixel(xH, yH)
+            if pixel_xLyL is None:
+                pixel_xLyL = MIN_LUMINANCE
+            if pixel_xLyH is None:
+                pixel_xLyH = MIN_LUMINANCE
+            if pixel_xHyL is None:
+                pixel_xHyL = MIN_LUMINANCE
+            if pixel_xHyH is None:
+                pixel_xHyH = MIN_LUMINANCE
+            ratio_xLyL = (xH - cX) * (yH - cY)
+            ratio_xHyL = (cX - xL) * (yH - cY)
+            ratio_xLyH = (xH - cX) * (cY - yL)
+            ratio_xHyH = (cX - xL) * (cY - yL)
+            part_xLyL = pixel_xLyL * ratio_xLyL
+            part_xHyL = pixel_xHyL * ratio_xHyL
+            part_xLyH = pixel_xLyH * ratio_xLyH
+            part_xHyH = pixel_xHyH * ratio_xHyH
+            pixel = int(round(part_xLyL + part_xHyL + part_xLyH + part_xHyH))
+            return pixel
 
         limit_radius = self._radius(centre_x, centre_y, blob_size)
 
@@ -452,11 +458,18 @@ class Scan:
         # make a new black image to build the projection in
         angle_delta = 360 / self.angle_steps
         code = self.original.instance().new(self.angle_steps, limit_radius, MIN_LUMINANCE)
+        last_x = None
+        last_y = None
         for radius in range(limit_radius):
             for angle in range(self.angle_steps):
                 degrees = angle * angle_delta
                 x, y = self.angle_xy(degrees, radius)
                 if x is not None:
+                    if last_x == x and last_y == y:
+                        # been here before
+                        continue
+                    last_x = x
+                    last_y = y
                     c = get_pixel(x, y)  # centre_x/y applied in here
                     if c > MIN_LUMINANCE:
                         code.putpixel(angle, radius, c)
@@ -517,7 +530,7 @@ class Scan:
             black is the % below the average that is considered to be the black/grey boundary,
             white is the % above the average that is considered to be the grey/white boundary,
             white of None means same as black and will yield a binary image,
-            also, iff clean=True, 'tidy' it by changing pixel sequences of BWB or WBW sequences to BBB or WWW
+            also, iff clean=True, 'tidy' it by removing short pixel sequences (1 or 2 'alone')
             """
 
         max_x, max_y = target.size()
@@ -612,8 +625,8 @@ class Scan:
             if self.logging:
                 self._log('binarize: cleaned lone pixels in {} passes, changing {} pixels to white and {} to black'.
                           format(passes, total_to_white_changes, total_to_black_changes))
-        if self.save_images:
-            self._unload(buckets, '04-buckets{}'.format(suffix))
+            if self.save_images:
+                self._unload(buckets, '04-buckets{}'.format(suffix))
 
         return buckets
 
@@ -1383,7 +1396,7 @@ class Scan:
             """
 
         if self.logging:
-            header = 'find_segment_edges:'
+            header = 'find_digits:'
 
         max_x, max_y = buckets.size()
 
@@ -1478,8 +1491,8 @@ class Scan:
                         if header is not None:
                             self._log(header)
                             header = None
-                        self._log('    {}: (orphan) removed {} leaving {}'.
-                                  format(x, show_options(removed), show_options(this)))
+                        self._log('    pass {} at {}: (orphan) removed {} leaving {}'.
+                                  format(passes, x, show_options(removed), show_options(this)))
                 if passes > 1 and not changes:
                     # no orphans left
                     # adjust twins by making one of them into an orphan
@@ -1502,7 +1515,7 @@ class Scan:
                             else:
                                 # not or no longer a twin
                                 break
-                        if len(removed_this) > 0:
+                        if len(removed_this) > 0 or len(removed_that) > 0:
                             # we made a change
                             changes = True
                             twins += 1
@@ -1510,20 +1523,20 @@ class Scan:
                                 if header is not None:
                                     self._log(header)
                                     header = None
-                                self._log('    {}: (this twin) removed {} leaving {}'.
-                                          format(x, show_options(removed_this), show_options(this)))
-                                self._log('    {}: (that twin) removed {} leaving {}'.
-                                          format((x + 1) % max_x, show_options(removed_that), show_options(that)))
+                                self._log('    pass {} at {}: (this twin) removed {} leaving {}'.
+                                          format(passes, x, show_options(removed_this), show_options(this)))
+                                self._log('    pass {} at {}: (that twin) removed {} leaving {}'.
+                                          format(passes, (x + 1) % max_x, show_options(removed_that), show_options(that)))
                 if passes > 1 and not changes:
                     # no twins left
                     # adjust triplets by making one of them into an orphan
-                    pass  # ToDo:
+                    pass  # ToDo: too hacky?
 
         if self.logging:
             if header is not None:
                 self._log(header)
                 header = None
-            self._log('    {} passes, {} singletons adjusted, {} twins adjusted'.format(passes, orphans, twins))
+            self._log('    {} passes, {} orphans adjusted, {} twins adjusted'.format(passes, orphans, twins))
             self._log('    final slices:')
             for x, (ratio, digit) in enumerate(slices):
                 self._log('        {}: ratio={:.2f}, options={}'.format(x, ratio, show_options(digit)))
@@ -1618,8 +1631,11 @@ class Scan:
         code, doubt = self.decoder.unbuild(bits)
         number = self.decoder.decode(code)
         if self.logging:
-            self._log('decode_digits: num:{}, doubt:{}, code:{}, error:{:.2f} from {}'.
-                      format(number, doubt, code, error, digits))
+            msg = ''
+            for digit in digits:
+                msg = '{}, {}'.format(msg, digit)
+            self._log('decode_digits: num:{}, doubt:{}, code:{}, error:{:.2f} from: {}'.
+                      format(number, doubt, code, error, msg[2:]))
         return Scan.Result(number, doubt + error, code, digits)
 
     def _find_codes(self) -> ([Target], frame.Frame):

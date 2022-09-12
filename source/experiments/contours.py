@@ -646,7 +646,7 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101-102-182-247-301-424-448-500-537-565-v2.jpg"

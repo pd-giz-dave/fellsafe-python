@@ -56,8 +56,6 @@ class Test:
         self.transform = transform.Transform()     # our opencv wrapper
         self.angles = None
         self.video_mode = None
-        self.contrast = None
-        self.offset = None
         self.debug_mode = None
         self.log_folder = log
         self.log_file = None
@@ -88,22 +86,18 @@ class Test:
         self.frame = frame.Frame(read, write)
         self._log('Frame: media in: {}, media out: {}'.format(read, write))
 
-    def options(self, cells=None, mode=None, contrast=None, offset=None, debug=None, log=None):
+    def options(self, cells=None, mode=None, debug=None, log=None):
         """ set processing options, only given options are changed """
         if cells is not None:
             self.cells = cells
         if mode is not None:
             self.video_mode = mode
-        if contrast is not None:
-            self.contrast = contrast
-        if offset is not None:
-            self.offset = offset
         if debug is not None:
             self.debug_mode = debug
         if log is not None:
             self.log_folder = log
-        self._log('Options: cells {}, video mode {}, contrast {}, offset {}, debug {}, log {}'.
-                  format(self.cells, self.video_mode, self.contrast, self.offset, self.debug_mode, self.log_folder))
+        self._log('Options: cells {}, video mode {}, debug {}, log {}'.
+                  format(self.cells, self.video_mode, self.debug_mode, self.log_folder))
 
     def rand(self, limit=None):
         """ check the random number generator is deterministic """
@@ -338,8 +332,8 @@ class Test:
             also check polarToCart goes clockwise
             """
         self._log('')
-        self._log('******************************************')
-        self._log('Check co-ordinate conversions (radius 100)')
+        self._log('*******************************************************')
+        self._log('Check co-ordinate conversions (radius 256, 0.1 degrees)')
         # check clockwise direction by checking sign and relative size as we go round each octant
         #          angle, x-sign, y-sign, xy-sign
         octants = [[45, +1, -1, -1],
@@ -392,10 +386,11 @@ class Test:
                         format(a, radius, cx, cy, ca, cr, aerr, rerr, rotation_err))
                 else:
                     good += 1
+
             self._log('{} good, {} bad'.format(good, bad))
         except:
             traceback.print_exc()
-        self._log('******************************************')
+        self._log('*******************************************************')
 
     def rings(self, folder, width):
         """ draw pulse test rings in given folder (visual) """
@@ -405,7 +400,7 @@ class Test:
         self.folders(write=folder)
         try:
             x, y = self._make_image_buffer(width)
-            ring = rings.Ring(x >> 1, y >> 1, width, self.frame, self.contrast, self.offset)
+            ring = rings.Ring(x >> 1, y >> 1, width, self.frame)
             bits = codec.Codec.ENCODING
             block = [0 for _ in range(codec.Codec.RINGS_PER_DIGIT)]
             for slice in range(codec.Codec.DIGITS):
@@ -440,7 +435,7 @@ class Test:
                     self._log('{}: failed to generate the code rings'.format(n))
                 else:
                     x, y = self._make_image_buffer(width)
-                    ring = rings.Ring(x >> 1, y >> 1, width, self.frame, self.contrast, self.offset)
+                    ring = rings.Ring(x >> 1, y >> 1, width, self.frame)
                     ring.code(n, code_rings)
                     self.frame.unload('test-code-{}'.format(n))
         except:
@@ -528,7 +523,7 @@ class Test:
                             # found another expected number
                             found[n] = True
                             found_num = num
-                            expected = 'code={}, digits={}'.format(code, self.show_list(digits))
+                            expected = 'code={}'.format(code)
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, digits])
                 # create dummy result for those not found
@@ -541,8 +536,8 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = 'code={}, digits={}'.format(code, self.show_list(self.codec.digits(code)))
-                        analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
+                            expected = 'code={}'.format(code)
+                        analysis.append([None, 0, 0, numbers[n], 0, 0, expected, self.codec.digits(code)])
                 # print the results
                 for loop in range(3):
                     for result in analysis:
@@ -559,8 +554,8 @@ class Test:
                                 # don't want these in this loop
                                 continue
                             # got what we are looking for
-                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}'.
-                                      format(num, expected, centre_x, centre_y, size, doubt))
+                            self._log('Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.3f}, digits={}'.
+                                      format(num, expected, centre_x, centre_y, size, doubt, self._show_list(digits)))
                             continue
                         if expected is not None:
                             if loop != 1:
@@ -572,7 +567,8 @@ class Test:
                                 continue
                             else:
                                 prefix = '**** '
-                            self._log('{}Failed to find {} ({})'.format(prefix, num, expected))
+                            self._log('{}Failed to find {} ({}), digits={}'.
+                                      format(prefix, num, expected, self._show_list(digits)))
                             exit_code = self.EXIT_FAILED
                             continue
                         if True:
@@ -591,9 +587,9 @@ class Test:
                                 else:
                                     actual_code = 'code={}'.format(actual_code)
                                     prefix = '**** UNEXPECTED **** ---> '
-                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.2f}, digits={}'.
+                            self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.3f}, digits={}'.
                                       format(prefix, num, actual_code, centre_x, centre_y, size, doubt,
-                                             self.show_list(digits)))
+                                             self._show_list(digits)))
                             continue
                 if len(results) == 0:
                     self._log('**** FOUND NOTHING ****')
@@ -607,7 +603,7 @@ class Test:
         self._log('******************')
         return exit_code
 
-    def show_list(self, this):
+    def _show_list(self, this):
         """ helper to display a list of classes where that class is assumed to have a __str__ function """
         msg = ''
         for item in this:
@@ -675,8 +671,6 @@ def verify():
     min_num = 101  # min number we want
     max_num = 999  # max number we want (may not be achievable)
     code_base = 7
-    contrast = 1.0  # reduce dynamic luminance range when drawing to minimise 'bleed' effects
-    offset = 0.0  # offset luminance range from the mid-point, -ve=below, +ve=above
 
     test_codes_folder = 'codes'
     test_media_folder = 'media'
@@ -686,7 +680,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (7, 6)
+    test_scan_cells = (7, 7)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -702,8 +696,6 @@ def verify():
         test.encoder(min_num, max_num, code_base)
         test.options(cells=test_scan_cells,
                      mode=test_scan_video_mode,
-                     contrast=contrast,
-                     offset=offset,
                      debug=test_debug_mode)
 
         # build a test code set
@@ -719,10 +711,10 @@ def verify():
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
-        test.scan_media(test_media_folder)
+        # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [101], 'test-code-101.png')
+        test.scan(test_codes_folder, [101], 'test-code-101.png')
         # test.scan(test_codes_folder, [120], 'test-code-120.png')
         # test.scan(test_codes_folder, [555], 'test-code-555.png')
         # test.scan(test_codes_folder, [800], 'test-code-800.png')

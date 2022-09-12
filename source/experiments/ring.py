@@ -22,57 +22,36 @@ class Ring:
     DIGITS = codec.Codec.DIGITS  # how many bits in each ring
     BORDER_WIDTH = 0.6  # border width in units of rings
 
-    def __init__(self, centre_x, centre_y, width, frame, contrast, offset):
+    def __init__(self, centre_x, centre_y, width, frame):
         # set constant parameters
         self.w = width  # width of each ring in pixels
         self.f = frame  # where to draw it
         self.x = centre_x  # where the centre of the rings are
         self.y = centre_y  # ..
 
-        # setup black/white luminance levels for drawing pixels,
-        # contrast specifies the luminance range between black and white, 1=full luminance range, 0.5=half, etc
-        # offset specifies how much to bias away from the mid-point, -ve is below, +ve above, number is a
-        # fraction of the max range
-        # we subtract half the required range from the offset mid-point for black and add it for white
-        level_range = MAX_LUMINANCE * contrast / 2  # range relative to mid point
-        level_centre = MID_LUMINANCE + (MAX_LUMINANCE * offset)
-        self.black_level = int(round(max(level_centre - level_range, MIN_LUMINANCE)))
-        self.white_level = int(round(min(level_centre + level_range, MAX_LUMINANCE)))
-
-        # setup our angles look-up table such that get 1 pixel resolution on outermost ring
-        radius = width * Ring.NUM_RINGS
-        scale = 2 * math.pi * radius
-        self.angle_xy = angle.Angle(scale, radius).polarToCart
+        # setup our angles look-up table such that get at least 2 pixels per step on outermost ring
+        radius = width * (Ring.NUM_RINGS + 1)  # plus 1 for our border
+        self.scale = 2 * math.pi * radius * 2.1
+        self.angle_xy = angle.Angle(self.scale, radius).polarToCart
         self.edge = 360 / Ring.DIGITS  # the angle at which a bit edge occurs (NB: not an int)
 
-    def _pixel(self, x, y, colour):
-        """ draw a pixel at x,y from the image centre with the given luminance and opaque,
-            to mitigate pixel gaps in the circle algorithm we draw several pixels near x,y
-            """
-        x += self.x
-        y += self.y
-        self.f.putpixel(x, y, colour, True)
-        self.f.putpixel(x + 1, y, colour, True)
-        self.f.putpixel(x, y + 1, colour, True)
-
     def _point(self, x, y, bit):
-        """ draw a point at offset x,y from our centre with the given bit (0 or 1) colour (black or white)
-            bit can be 0 (draw 'black'), 1 (draw 'white'), -1 (draw max luminance), -2 (draw min luminance),
+        """ draw a point at offset x,y from our centre with the given bit (0 or 1) colour,
+            bit can be 0 (draw 'black'), 1 (draw 'white'),
             any other value (inc None) will draw 'grey' (mid luminance)
             """
         if bit is None:
             colour = MID_LUMINANCE
         elif bit == 0:
-            colour = self.black_level
-        elif bit == 1:
-            colour = self.white_level
-        elif bit == -1:  # lsb is 1
-            colour = MAX_LUMINANCE
-        elif bit == -2:  # lsb is 0
             colour = MIN_LUMINANCE
+        elif bit == 1:
+            colour = MAX_LUMINANCE
         else:
             colour = MID_LUMINANCE
-        self._pixel(x, y, colour)
+
+        dx = int(round(self.x + x))
+        dy = int(round(self.y + y))
+        self.f.putpixel(dx, dy, colour, True)
 
     def _draw(self, radius, bits):
         """ draw a ring at radius of bits, a 1-bit is white, 0 black,
@@ -87,12 +66,9 @@ class Ring:
                 self._point(0, 0, bits & 1)
         else:
             msb = 1 << (Ring.DIGITS - 1)
-            scale = 2 * math.pi * radius  # step the angle such that 1 pixel per increment
-            for step in range(int(round(scale))):
-                a = (step / scale) * 360
+            for step in range(int(round(self.scale))):
+                a = (step / self.scale) * 360
                 x, y = self.angle_xy(a, radius)
-                x = int(round(x))
-                y = int(round(y))
                 if a > 0:
                     segment = int(a / self.edge)
                 else:
@@ -194,7 +170,7 @@ class Ring:
                             for dy in range(point_size):
                                 tx = x + dx
                                 ty = y + dy
-                                self._point(tx, ty, -2)    # draw at min luminance (ie. true black)
+                                self._point(tx, ty, 0)    # draw at min luminance
                                 if limits[0][0] is None or limits[0][0] > tx:
                                     limits[0][0] = tx
                                 if limits[0][1] is None or limits[0][1] > ty:
@@ -213,7 +189,7 @@ class Ring:
         end_y = start_y + point_size
         for x in range(start_x, end_x + 1):
             for y in range(start_y, end_y + 1):
-                self._point(x, y, -2)    # draw at min luminance (ie. true black)
+                self._point(x, y, 0)    # draw at min luminance
 
     def code(self, number, rings):
         """ draw the complete code for the given number and code-words
