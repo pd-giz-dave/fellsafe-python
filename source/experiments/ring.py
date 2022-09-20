@@ -15,12 +15,15 @@ class Ring:
         """
 
     BULLSEYE_RINGS = 2
-    INNER_BLACK_RINGS = 1
-    OUTER_BLACK_RINGS = 1
-    MARKER_RINGS = BULLSEYE_RINGS + INNER_BLACK_RINGS + OUTER_BLACK_RINGS
+    INNER_BLACK_RINGS = codec.Codec.INNER_BLACK_RINGS
+    OUTER_BLACK_RINGS = codec.Codec.OUTER_BLACK_RINGS
+    OUTER_WHITE_RINGS = 1
+    EDGE_RINGS = INNER_BLACK_RINGS + OUTER_BLACK_RINGS  # rings used for inner/outer edge detection
+    MARKER_RINGS = BULLSEYE_RINGS + EDGE_RINGS + OUTER_WHITE_RINGS  # all the non-data rings
     NUM_RINGS = codec.Codec.RINGS_PER_DIGIT + MARKER_RINGS  # total rings in our complete code
     DIGITS = codec.Codec.DIGITS  # how many bits in each ring
-    BORDER_WIDTH = 0.6  # border width in units of rings
+    BORDER_WIDTH = 0.2  # border width in units of rings
+    OUTER_WHITE_WIDTH = 1 - BORDER_WIDTH  # outer white width only needs to be enough to ensure an edge is detected
 
     def __init__(self, centre_x, centre_y, width, frame):
         # set constant parameters
@@ -30,7 +33,7 @@ class Ring:
         self.y = centre_y  # ..
 
         # setup our angles look-up table such that get at least 2 pixels per step on outermost ring
-        radius = width * (Ring.NUM_RINGS + 1)  # plus 1 for our border
+        radius = width * Ring.NUM_RINGS
         self.scale = 2 * math.pi * radius * 2.1
         self.angle_xy = angle.Angle(self.scale, radius).polarToCart
         self.edge = 360 / Ring.DIGITS  # the angle at which a bit edge occurs (NB: not an int)
@@ -89,12 +92,12 @@ class Ring:
         for radius in range(start_ring, end_ring):
             self._draw(radius, data_bits)
 
-    def _border(self, ring_num):
+    def _border(self, ring_num, border_width):
         """ draw a border at the given ring_num,
             this is visual cue to stop people cutting into important parts of the code
             """
 
-        self._draw_ring(ring_num, -1, Ring.BORDER_WIDTH)
+        self._draw_ring(ring_num, None, border_width)
 
     def _label(self, ring_num, number):
         """ draw a 3 digit number at given ring position in a size compatible with the ring width
@@ -207,9 +210,15 @@ class Ring:
             self._draw_ring(draw_at, ring, 1.0)
             draw_at += 1.0
 
-        # draw the outer black
+        # draw the outer black and white
         self._draw_ring(draw_at, 0, Ring.OUTER_BLACK_RINGS)
         draw_at += Ring.OUTER_BLACK_RINGS
+        self._draw_ring(draw_at, -1, Ring.OUTER_WHITE_WIDTH)
+        draw_at += Ring.OUTER_WHITE_WIDTH
+
+        # draw a border
+        self._border(draw_at, Ring.BORDER_WIDTH)
+        draw_at += Ring.BORDER_WIDTH
 
         if int(draw_at) != draw_at:
             raise Exception('number of target rings is not integral ({})'.format(draw_at))
@@ -218,10 +227,6 @@ class Ring:
         # safety check
         if draw_at != Ring.NUM_RINGS:
             raise Exception('number of rings exported ({}) is not {}'.format(Ring.NUM_RINGS, draw_at))
-
-        # draw a border
-        self._border(draw_at)
-        draw_at += Ring.BORDER_WIDTH
 
         # draw a human readable label
         self._label(draw_at, number)

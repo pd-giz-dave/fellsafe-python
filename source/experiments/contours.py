@@ -265,7 +265,8 @@ class Targets:
     """ a holder for the parameters required by find_targets and its result """
     source = None                        # the source greyscale image
     binary = None                        # the binarized image
-    integration_width: int = 32
+    integration_width: int = 32          # width of integration area as fraction of image width
+    integration_height: int = None       # height of integration area as fraction of image height (None==same as width)
     black_threshold: float = 0.01        # make +ve to get more white, -ve to get more black, range +100%..-100%
                                          # NB: Make a small +ve number to ensure totally white stays white
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
@@ -281,9 +282,10 @@ class Targets:
     targets: List[tuple] = None          # the result
 
 
-def make_binary(source, s: float=8, black: float=15, white: float=None):
+def make_binary(source, width: float=8, height: float=None, black: float=15, white: float=None):
     """ create a binary (or tertiary) image of source using an adaptive threshold,
-        s is the fraction of the image size to use as the integration area (square) in pixels,
+        width is the fraction of the image width to use as the integration area,
+        width is the fraction of the image height to use as the integration area (None==same as width)
         black is the % below the average that is considered to be the black/grey boundary,
         white is the % above the average that is considered to be the grey/white boundary,
         white of None means same as black and will yield a binary image,
@@ -294,9 +296,14 @@ def make_binary(source, s: float=8, black: float=15, white: float=None):
     # get the image metrics
     max_y = source.shape[0]
     max_x = source.shape[1]
-    s2 = int(min(max_x, max_y) / s)  # we want this to be odd so that there is a centre
-    s_plus = max(s2 >> 1, 2)  # offset for going forward
-    s_minus = s_plus - 1  # offset for going backward
+    width_pixels = int(max_x / width)  # we want this to be odd so that there is a centre
+    width_plus = max(width_pixels >> 1, 2)  # offset for going forward
+    width_minus = width_plus - 1  # offset for going backward
+    if height is None:
+        height = width
+    height_pixels = int(max_y / height)  # we want this to be odd so that there is a centre
+    height_plus = max(height_pixels >> 1, 2)  # offset for going forward
+    height_minus = height_plus - 1  # offset for going backward
 
     # make an empty buffer to accumulate our integral in
     integral = np.zeros((max_y, max_x), np.int32)
@@ -321,11 +328,11 @@ def make_binary(source, s: float=8, black: float=15, white: float=None):
     else:
         white_limit = (100+white)/100  # convert % to a ratio
     for x in range(max_x):
-        x1 = int(max(x - s_minus, 0))
-        x2 = int(min(x + s_plus, max_x - 1))
+        x1 = int(max(x - width_minus, 0))
+        x2 = int(min(x + width_plus, max_x - 1))
         for y in range(max_y):
-            y1 = int(max(y - s_minus, 0))
-            y2 = int(min(y + s_plus, max_y - 1))
+            y1 = int(max(y - height_minus, 0))
+            y2 = int(min(y + height_plus, max_y - 1))
             count = int((x2 - x1) * (y2 - y1))  # how many samples in the integration area
             # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
             # where all but bottom right are *outside* the integration window
@@ -513,7 +520,11 @@ def find_targets(source, params: Targets, logger=None):
     if logger is not None:
         logger.push("find_targets")
     params.source = source
-    params.binary = make_binary(params.source, params.integration_width, params.black_threshold, params.white_threshold)
+    params.binary = make_binary(params.source,
+                                params.integration_width,
+                                params.integration_height,
+                                params.black_threshold,
+                                params.white_threshold)
     if logger is None:
         blobs = find_blobs(params.binary, params.direct_neighbours)
     else:

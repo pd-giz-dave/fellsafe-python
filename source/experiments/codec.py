@@ -50,45 +50,59 @@ class Codec:
     # region constants...
     DIGITS_PER_WORD = 5  # how many digits per encoded code-word
     COPIES_PER_BLOCK = 3  # number of copies in a code-word (DIGITS_PER_WORD * COPIES_PER_BLOCK must be odd)
+    INNER_BLACK_RINGS = 1  # number of inner black rings (defined here 'cos encoding relies on it)
+    OUTER_BLACK_RINGS = 1  # number of outer black rings (defined here 'cos encoding relies on it)
+    EDGE_RINGS = INNER_BLACK_RINGS + OUTER_BLACK_RINGS
 
     # encoding is a bit pattern across the four data rings for each digit (a 0 at either end is implied)
     # of the 16 combinations many are not allowed:
-    #   1 0000 - treated as 6:1 (ratio 6 and above, detected by running into the white border)
-    #   2 0001 - 4:1
-    #   3 0010 - 3:1
-    #   4 0011 - 3:2 (ratio 1.5)
-    #   5 0100 - 2:1
-    #     0101 - not allowed (double pulse)
-    #   6 0110 - 1:1
-    #   7 0111 - 2:3
-    #     1000 - not allowed (1:1 ambiguous with 0110)
-    #     1001 - not allowed (double pulse)
-    #     1010 - not allowed (double pulse)
-    #     1011 - not allowed (double pulse)
-    #   8 1100 - 1:2 (ratio 0.5)
-    #     1101 - not allowed (double pulse)
-    #   9 1110 - 1:3 (ration 0.33)
-    #  10 1111 - 1:4 (ratio 0.25 or below, or anything that runs into the border)
-    # of the 10 possibilities the 7 with the biggest error differential have been chosen
-    # NB: use None for trailing zeroes (so ratio calculator knows true 0's length)
+    #      0000 - *** not allowed (no pulse)
+    # *  1 0001 - 4:1 (4:1:1  4     1   )
+    #    2 0010 - 3:1 (3:1:2  3     2   )
+    # *  3 0011 - 3:2 (3:2:1  1.5   0.5 )
+    #    4 0100 - 2:1 (2:1:3  2     3   )
+    #      0101 - *** not allowed (double pulse)
+    # *  5 0110 - 1:1 (2:2:2  1     1   )
+    # *  6 0111 - 2:3 (2:3:1  0.66  0.33)
+    # *  7 1000 - 1:1 (1:1:4  1     0.25)
+    #      1001 - *** not allowed (double pulse)
+    #      1010 - *** not allowed (double pulse)
+    #      1011 - *** not allowed (double pulse)
+    # *  8 1100 - 1:2 (1:2:3  0.5   1.5 )
+    #      1101 - *** not allowed (double pulse)
+    # *  9 1110 - 1:3 (1:3:2  0.33  0.66)
+    #   10 1111 - 1:4 (1:4:1  0.25  0.25)
+    # of the 10 possibilities the 7 with the biggest error differentials have been chosen
+    # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     ENCODING = [
-                [1, 1,    1,    1   ],  # 0
-                [0, 0,    1,    1   ],  # 1
-                [0, 0,    0,    1   ],  # 2
-                [1, None, None, None],  # 3 - could be [1, None, None, None] or [0, 1, 1, None]
-                [0, 1,    None, None],  # 4
-                [0, 0,    1,    None],  # 5
-                [0, 0,    0,    0   ],  # 6
-               ]
+                [1, 1, 1, 0],  # 0
+                [0, 1, 1, 1],  # 1
+                [0, 0, 1, 1],  # 2
+                [0, 1, 1, 0],  # 3
+                [1, 1, 0, 0],  # 4
+                [0, 0, 0, 1],  # 5
+                [1, 0, 0, 0],  # 6
+    ]
 
     # base 6 encoding yields over 400 usable codes, base 7 yields over 1000, base 5 yields over 100
     BASE_MAX = len(ENCODING)
     BASE_MIN = 2
     RINGS_PER_DIGIT = len(ENCODING[0])  # number of rings spanning the variable data portion of a code-word
-    SPAN = RINGS_PER_DIGIT + 2  # total span of the code including its margin black rings
+    SPAN = RINGS_PER_DIGIT + EDGE_RINGS  # total span of the code including its margin black rings
     DIGITS = DIGITS_PER_WORD * COPIES_PER_BLOCK  # number of digits in a full code-block (must be odd)
     DOUBT_LIMIT = int(COPIES_PER_BLOCK / 2)  # we want the majority to agree, so doubt must not exceed half
     # endregion
+
+    class Ratio:
+        """ encapsulate the digit pulse element (lead, head, tail) ratios """
+
+        def __init__(self, lead: float, head: float, tail: float):
+            self.lead = lead
+            self.head = head
+            self.tail = tail
+
+        def __str__(self):
+            return '({:.2f}, {:.2f}, {:.2f})'.format(self.lead, self.head, self.tail)
 
     def __init__(self, min_num, max_num, base: int = BASE_MAX):
         """ create the valid code set for a number in the range min_num..max_num,
@@ -103,38 +117,57 @@ class Codec:
         self.min_num = max(min_num, 1)  # minimum number we want to be able to encode (0 not allowed)
         self.max_num = max(max_num, self.min_num)  # maximum number we want to be able to encode
 
-        # build ratios table
-        # ratios is the relative length, across a radial, of the black rings (including the inner black)
-        # and white rings following the blob, the number of trailing black rings is irrelevant but must
-        # be >0 (its just a 'filler')
-        # count the number of black and white elements for each code
-        counts = [[1, 0] for _ in range(len(Codec.ENCODING))]  # NB: inner black ring is implied
-        for digit, rings in enumerate(Codec.ENCODING):
-            for ring in rings:
-                if ring is None:
-                    # this is a don't care 0
-                    continue
-                if ring == 0:
-                    counts[digit][0] += 1  # one more black
-                else:
-                    counts[digit][1] += 1  # one more white
-        # calculate the black/white ratio
+        # region build ratios table...
+        # ratios are the relative lengths, across a radial, of the leading black rings (including the
+        # inner black), the central white rings and the trailing black rings (including the outer black
+        # following the blob, the lead ratio is the leading black over central white, the tail ratio is
+        # the trailing black over central white
         self.ratios = [None for _ in range(len(Codec.ENCODING))]
-        for digit, (blacks, whites) in enumerate(counts):
-            if whites == 0:
-                self.ratios[digit] = blacks + 1  # +1 for outer black
-            else:
-                self.ratios[digit] = blacks / whites
-        # calc the ratio limits (used for testing)
-        self.min_ratio = self.ratios[0]
-        self.max_ratio = self.ratios[0]
+        for digit, rings in enumerate(Codec.ENCODING):
+            # count the number of leading black, central white and trailing black elements
+            leading = 1  # inner black is assumed
+            central = 0
+            trailing = 1  # outer black is assumed
+            for ring in rings:
+                if ring == 0 and central == 0:
+                    # one more leading black
+                    leading += 1
+                elif ring == 0:  # and central > 0
+                    # one more trailing black
+                    trailing += 1
+                else:  # ring != 0 and central > 0
+                    # one more central white
+                    central += 1
+            # calculate the lead and tail ratios
+            if central == 0:
+                raise Exception('encoding for digit {} has no central white'.format(digit))
+            self.ratios[digit] = self.make_ratio(leading, central, trailing)
+        # calc the ratio limits and their span (used in the error function)
+        self.min_lead_ratio = 1
+        self.max_lead_ratio = 0
+        self.min_head_ratio = 1
+        self.max_head_ratio = 0
+        self.min_tail_ratio = 1
+        self.max_tail_ratio = 0
         for ratio in self.ratios:
-            if ratio < self.min_ratio:
-                self.min_ratio = ratio
-            if ratio > self.max_ratio:
-                self.max_ratio = ratio
+            if ratio.lead < self.min_lead_ratio:
+                self.min_lead_ratio = ratio.lead
+            if ratio.head < self.min_head_ratio:
+                self.min_head_ratio = ratio.head
+            if ratio.tail < self.min_tail_ratio:
+                self.min_tail_ratio = ratio.tail
+            if ratio.lead > self.max_lead_ratio:
+                self.max_lead_ratio = ratio.lead
+            if ratio.head > self.max_head_ratio:
+                self.max_head_ratio = ratio.head
+            if ratio.tail > self.max_tail_ratio:
+                self.max_tail_ratio = ratio.tail
+        self.lead_ratio_span = self.max_lead_ratio - self.min_lead_ratio
+        self.head_ratio_span = self.max_head_ratio - self.min_head_ratio
+        self.tail_ratio_span = self.max_tail_ratio - self.min_tail_ratio
+        # endregion
 
-        # build code tables
+        # region build code tables...
         # we first build a list of all allowable codes then allocate them pseudo randomly to numbers.
         # its expected that the first N codes are by convention reserved for special purposes
         # (start, check, retired, finish, cp's, etc)
@@ -164,6 +197,7 @@ class Codec:
         self.nums = [None for _ in range(self.code_range)]  # NB: This array is sparsely populated
         for num, code in enumerate(self.codes):
             self.nums[code] = num
+        # endregion
 
         if self.code_limit > 0:
             self.code_limit -= 1  # change from a range to a limit
@@ -260,12 +294,22 @@ class Codec:
         # that's it
         return code, doubt
 
-    def ratio(self, digit):
-        """ given a digit return its black/white ratio, this represents the ideal ratio """
+    def to_ratio(self, digit: int) -> Ratio:
+        """ given a digit return its ratios, these represent the ideal ratios """
         for candidate, ideal in enumerate(self.ratios):
             if candidate == digit:
                 return ideal
         return None
+
+    def make_ratio(self, lead: float, head: float, tail: float) -> Ratio:
+        """ given 3 lengths return the corresponding classification ratios,
+            the result given here can be fed into classify to get a list of likely digits
+            """
+        total = lead + head + tail
+        lead_ratio = lead / total
+        head_ratio = head / total
+        tail_ratio = tail / total
+        return Codec.Ratio(lead_ratio, head_ratio, tail_ratio)
 
     def classify(self, actual):
         """ given a ratio measurement, return a list of the most likely digits it represents with an error,
@@ -273,37 +317,56 @@ class Codec:
             all errors are in the range 0..1, with 0=perfect and 1=utter crap
             """
 
-        def error(actual, ideal):
+        def error(actual: Codec.Ratio, ideal: Codec.Ratio) -> float:
             """ calculate an error between the actual ratio and the ideal,
-                ideal is in range min-ratio to max_ratio,
-                actual could be anything, but we clamp it to the same limits,
-                we want a number that is in the range 0..1 where 0 is no error and 1 is a huge error
+                ideal elements are in the range min-ratio to max_ratio, actual could be anything,
+                we want a number that is in the range 0..1 where 0 is no error and 1 is a huge error,
                 """
-            if actual > self.max_ratio:
-                actual = self.max_ratio
-            elif actual < self.min_ratio:
-                actual = self.min_ratio
-            if ideal > actual:
-                err = actual / ideal
+
+            # actual figures could be anything, but we must constrain them to our min/max
+            # limits in order to end up with error differences within a known range
+            actual_lead = min(self.max_lead_ratio, max(self.min_lead_ratio, actual.lead))
+            actual_head = min(self.max_head_ratio, max(self.min_head_ratio, actual.head))
+            actual_tail = min(self.max_tail_ratio, max(self.min_tail_ratio, actual.tail))
+
+            if ideal.lead > actual_lead:
+                lead_err = ideal.lead - actual_lead
             else:
-                err = ideal / actual
-            err = 1 - err  # convert 1..0 to 0..1
-            err *= err  # go quadratic so big errors spread more (still 0..1)
+                lead_err = actual_lead - ideal.lead
+            lead_err /= self.lead_ratio_span  # range now 0..1
+
+            if ideal.head > actual_head:
+                head_err = ideal.head - actual_head
+            else:
+                head_err = actual_head - ideal.head
+            head_err /= self.head_ratio_span  # range now 0..1
+
+            if ideal.tail > actual_tail:
+                tail_err = ideal.tail - actual_tail
+            else:
+                tail_err = actual_tail - ideal.tail
+            tail_err /= self.tail_ratio_span  # range now 0..1
+
+            # return average error and its components
+            err = (lead_err + head_err + tail_err) / 3, lead_err, head_err, tail_err
+
             return err
 
         digits = [(None, 1) for _ in range(self.base)]
-        for digit in range(self.base):
-            ideal = self.ratios[digit]
-            digits[digit] = (digit, error(actual, ideal))
-        digits.sort(key=lambda d: d[1])
+        if actual is not None:
+            for digit in range(self.base):
+                ideal = self.ratios[digit]
+                digits[digit] = (digit, error(actual, ideal))
+            digits.sort(key=lambda d: d[1][0])  # put into least error order
         return digits
 
     def digits(self, code):
         """ given a code return the digits for that code """
         partial = [None for _ in range(Codec.DIGITS_PER_WORD)]
-        for digit in range(Codec.DIGITS_PER_WORD):
-            partial[digit] = code % self.base
-            code = int(code / self.base)
+        if code is not None:
+            for digit in range(Codec.DIGITS_PER_WORD):
+                partial[digit] = code % self.base
+                code = int(code / self.base)
         return partial
 
     def digit(self, rings):

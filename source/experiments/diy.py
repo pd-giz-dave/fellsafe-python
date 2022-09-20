@@ -42,6 +42,25 @@ MIN_LUMINANCE = 0
 MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
 
 
+def nstr(number, fmt='.2f'):
+    """ given a number that may be None, return an appropriate string """
+    if number is None:
+        return 'None'
+    else:
+        fmt = '{:' + fmt + '}'
+        return fmt.format(number)
+
+
+def vstr(vector, fmt='.2f', open='[', close=']'):
+    """ given a list of numbers return a string representing them """
+    if vector is None:
+        return 'None'
+    result = ''
+    for pt in vector:
+        result += ', ' + nstr(pt)
+    return open + result[2:] + close
+
+
 class Test:
     # exit codes from scan
     EXIT_OK = 0  # found what was expected
@@ -239,21 +258,19 @@ class Test:
         # so a one pixel error can be significant, we test ratios for every possibility
         # black/white lengths. The biggest length is cell-height * cells-in-radius
         try:
-            max_span = self.cells[1] * (codec.Codec.RINGS_PER_DIGIT + 1)
-            min_length = 2
-            max_length = max_span - min_length
-            min_ratio = min_length / max_length
-            max_ratio = max_length / min_length
-            ratios = {}
-            for black_length in range(min_length, max_length + 1):
-                for white_length in range(min_length, (max_span - black_length) + 1):
-                    ratio = black_length / white_length
-                    ratio = max(min(ratio, max_ratio), min_ratio)
-                    int_ratio = int(round(ratio * 20))
-                    if ratios.get(int_ratio) is None:
-                        ratios[int_ratio] = ratio
+            max_span = self.cells[1] * codec.Codec.SPAN * 2  # *2 so get effective 0.5 lengths (which scan can do)
+            min_length = 1
+            max_length = max_span - min_length + 1
+            # generate all possible ratios
+            ratios = []
+            for lead_length in range(min_length, max_length + 1):
+                for head_length in range(min_length, (max_span - lead_length) + 1):
+                    tail_length = max_length - (lead_length + head_length)
+                    if tail_length < min_length:
+                        continue
+                    ratios.append(self.codec.make_ratio(lead_length, head_length, tail_length))
             digits = {}
-            for ratio in ratios.values():
+            for ratio in ratios:
                 candidates = self.codec.classify(ratio)
                 digit = candidates[0][0]
                 if digits.get(digit) is None:
@@ -263,15 +280,78 @@ class Test:
                     digits[digit].append((ratio, candidates))
             errors = []
             for digit, options in digits.items():
-                options.sort(key=lambda k: k[0])  # put options into ratio order
-                errors.append((digit, options))
-            errors.sort(key=lambda e: e[0])
-            for (digit, options) in errors:
-                if len(options) == 0:
-                    self._log('Digit:{} has no options!'.format(digit))
-                    continue
-                self._log('Digit {} ideal={:.2f}: detection ratio span: {:.2f} .. {:.2f} in {} steps'.
-                          format(digit, self.codec.ratio(digit), options[0][0], options[-1][0], len(options)))
+                # find the ratio span limits for each option
+                min_lead = self.codec.Ratio(max_span * 2, -1, -1)
+                max_lead = self.codec.Ratio(-1, -1, -1)
+                min_head = self.codec.Ratio(-1, max_span * 2, -1)
+                max_head = self.codec.Ratio(-1, -1, -1)
+                min_tail = self.codec.Ratio(-1, -1, max_span * 2)
+                max_tail = self.codec.Ratio(-1, -1, -1)
+                min_lead_digit = None
+                max_lead_digit = None
+                min_head_digit = None
+                max_head_digit = None
+                min_tail_digit = None
+                max_tail_digit = None
+                min_lead_err = None
+                max_lead_err = None
+                min_head_err = None
+                max_head_err = None
+                min_tail_err = None
+                max_tail_err = None
+                for ratio, candidates in options:
+                    if ratio.lead < min_lead.lead:
+                        min_lead = ratio
+                        min_lead_digit = candidates[1][0]
+                        min_lead_err = candidates[1][1]
+                    if ratio.lead > max_lead.lead:
+                        max_lead = ratio
+                        max_lead_digit = candidates[1][0]
+                        max_lead_err = candidates[1][1]
+                    if ratio.head < min_head.head:
+                        min_head = ratio
+                        min_head_digit = candidates[1][0]
+                        min_head_err = candidates[1][1]
+                    if ratio.head > max_head.head:
+                        max_head = ratio
+                        max_head_digit = candidates[1][0]
+                        max_head_err = candidates[1][1]
+                    if ratio.tail < min_tail.tail:
+                        min_tail = ratio
+                        min_tail_digit = candidates[1][0]
+                        min_tail_err = candidates[1][1]
+                    if ratio.tail > max_tail.tail:
+                        max_tail = ratio
+                        max_tail_digit = candidates[1][0]
+                        max_tail_err = candidates[1][1]
+                # set stats for this digit
+                errors.append((digit, len(options),
+                               ((min_lead, min_lead_digit, min_lead_err),
+                                (max_lead, max_lead_digit, max_lead_err),
+                                (min_head, min_head_digit, min_head_err),
+                                (max_head, max_head_digit, max_head_err),
+                                (min_tail, min_tail_digit, min_tail_err),
+                                (max_tail, max_tail_digit, max_tail_err))))
+            errors.sort(key=lambda e: e[0])  # put into digit order
+            # show digit stats
+            ideal_ratios_per_digit = len(ratios) / self.codec.base
+            self._log('Ratio spans: lead={:.2f}..{:.2f}, head={:.2f}..{:.2f}, tail={:.2f}..{:.2f}, '
+                      'max steps={}, ideal per digit={:.0f} ({:.2f}%)'.
+                      format(self.codec.min_lead_ratio, self.codec.max_lead_ratio,
+                             self.codec.min_head_ratio, self.codec.max_head_ratio,
+                             self.codec.min_tail_ratio, self.codec.max_tail_ratio,
+                             len(ratios), ideal_ratios_per_digit, (ideal_ratios_per_digit / len(ratios)) * 100))
+            for (digit, steps, stats) in errors:
+                ideal = self.codec.to_ratio(digit)
+                min_lead, max_lead, min_head, max_head, min_tail, max_tail = stats
+                self._log('Digit {} ideal={}: steps={} ({:.2f}%):'.format(digit, ideal, steps,
+                                                                          (steps/len(ratios))*100))
+                self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], vstr(min_lead[2])))
+                self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], vstr(max_lead[2])))
+                self._log('    min head:{}, digit={}, err={}'.format(min_head[0], min_head[1], vstr(min_head[2])))
+                self._log('    max head:{}, digit={}, err={}'.format(max_head[0], max_head[1], vstr(max_head[2])))
+                self._log('    min tail:{}, digit={}, err={}'.format(min_tail[0], min_tail[1], vstr(min_tail[2])))
+                self._log('    max tail:{}, digit={}, err={}'.format(max_tail[0], max_tail[1], vstr(max_tail[2])))
         except:
             traceback.print_exc()
         self._log('******************')
@@ -461,13 +541,15 @@ class Test:
 
     def scan_media(self, folder):
         """ find all the media in the given folder and scan them,
-            these are photos of codes in various states of distortion,
+            these are video frames of codes in various states of distortion,
             each file name is assumed to include the code number in the image,
             code numbers must be 3 digits, if an image contains more than one code include
             all numbers separated by a non-digit
             """
 
-        filelist = glob.glob('{}/*.jpg'.format(folder))
+        filelist1 = glob.glob('{}/*.jpg'.format(folder))
+        filelist2 = glob.glob('{}/*.png'.format(folder))
+        filelist = filelist1 + filelist2
         filelist.sort()
         for f in filelist:
             f = os.path.basename(f)
@@ -523,7 +605,7 @@ class Test:
                             # found another expected number
                             found[n] = True
                             found_num = num
-                            expected = 'code={}'.format(code)
+                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
                             break
                     analysis.append([found_num, centre_x, centre_y, num, doubt, size, expected, digits])
                 # create dummy result for those not found
@@ -536,8 +618,8 @@ class Test:
                             # not a legal code
                             expected = 'not-valid'
                         else:
-                            expected = 'code={}'.format(code)
-                        analysis.append([None, 0, 0, numbers[n], 0, 0, expected, self.codec.digits(code)])
+                            expected = 'code={}, digits={}'.format(code, self.codec.digits(code))
+                        analysis.append([None, 0, 0, numbers[n], 0, 0, expected, None])
                 # print the results
                 for loop in range(3):
                     for result in analysis:
@@ -567,8 +649,7 @@ class Test:
                                 continue
                             else:
                                 prefix = '**** '
-                            self._log('{}Failed to find {} ({}), digits={}'.
-                                      format(prefix, num, expected, self._show_list(digits)))
+                            self._log('{}Failed to find {} ({})'.format(prefix, num, expected))
                             exit_code = self.EXIT_FAILED
                             continue
                         if True:
@@ -585,7 +666,8 @@ class Test:
                                     actual_code = 'not-valid'
                                     prefix = ''
                                 else:
-                                    actual_code = 'code={}'.format(actual_code)
+                                    actual_code = 'code={}, digits={}'\
+                                                  .format(actual_code, self.codec.digits(actual_code))
                                     prefix = '**** UNEXPECTED **** ---> '
                             self._log('{}Found {} ({}) at {:.0f}x, {:.0f}y size {:.2f}, doubt {:.3f}, digits={}'.
                                       format(prefix, num, actual_code, centre_x, centre_y, size, doubt,
@@ -605,6 +687,8 @@ class Test:
 
     def _show_list(self, this):
         """ helper to display a list of classes where that class is assumed to have a __str__ function """
+        if this is None:
+            return 'None'
         msg = ''
         for item in this:
             msg = '{}, {}'.format(msg, item)
@@ -626,7 +710,7 @@ class Test:
             returns the buffer x, y size
             """
 
-        image_width = width * (rings.Ring.NUM_RINGS + 1) * 2  # rings +1 for the border
+        image_width = int(round(width * rings.Ring.NUM_RINGS * 2))
         self.frame.new(image_width, image_width, MID_LUMINANCE)
         x, y = self.frame.size()
 
@@ -680,7 +764,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (7, 7)
+    test_scan_cells = (7, 6)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -714,18 +798,9 @@ def verify():
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        test.scan(test_codes_folder, [101], 'test-code-101.png')
-        # test.scan(test_codes_folder, [120], 'test-code-120.png')
-        # test.scan(test_codes_folder, [555], 'test-code-555.png')
-        # test.scan(test_codes_folder, [800], 'test-code-800.png')
-        # test.scan(test_codes_folder, [574], 'test-code-574.png')
-        # test.scan(test_codes_folder, [371], 'test-code-371.png')
-        # test.scan(test_codes_folder, [757], 'test-code-757.png')
-        # test.scan(test_codes_folder, [611], 'test-code-611.png')
-        # test.scan(test_codes_folder, [620], 'test-code-620.png')
-        # test.scan(test_codes_folder, [132], 'test-code-132.png')
+        # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
-        # test.scan(test_media_folder, [301], 'photo-301.jpg')
+        test.scan(test_media_folder, [000,101,107,111,146,153,215,222,302,327,333,396,444,555,600,681,696,774,852,855,999], 'far-000-101-107-111-146-153-215-222-302-327-333-396-444-555-600-681-696-774-852-855-999.jpg')
         # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
         # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-distant.jpg')
