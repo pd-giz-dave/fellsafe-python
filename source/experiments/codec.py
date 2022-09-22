@@ -48,49 +48,32 @@ class Codec:
         """
 
     # region constants...
-    DIGITS_PER_WORD = 5  # how many digits per encoded code-word
+    DIGITS_PER_WORD = 6  # how many digits per encoded code-word
     COPIES_PER_BLOCK = 3  # number of copies in a code-word (DIGITS_PER_WORD * COPIES_PER_BLOCK must be odd)
     INNER_BLACK_RINGS = 1  # number of inner black rings (defined here 'cos encoding relies on it)
     OUTER_BLACK_RINGS = 1  # number of outer black rings (defined here 'cos encoding relies on it)
     EDGE_RINGS = INNER_BLACK_RINGS + OUTER_BLACK_RINGS
 
-    # encoding is a bit pattern across the four data rings for each digit (a 0 at either end is implied)
-    # of the 16 combinations many are not allowed:
-    #      0000 - *** not allowed (no pulse)
-    # *  1 0001 - 4:1 (4:1:1  4     1   )
-    #    2 0010 - 3:1 (3:1:2  3     2   )
-    # *  3 0011 - 3:2 (3:2:1  1.5   0.5 )
-    #    4 0100 - 2:1 (2:1:3  2     3   )
-    #      0101 - *** not allowed (double pulse)
-    # *  5 0110 - 1:1 (2:2:2  1     1   )
-    # *  6 0111 - 2:3 (2:3:1  0.66  0.33)
-    # *  7 1000 - 1:1 (1:1:4  1     0.25)
-    #      1001 - *** not allowed (double pulse)
-    #      1010 - *** not allowed (double pulse)
-    #      1011 - *** not allowed (double pulse)
-    # *  8 1100 - 1:2 (1:2:3  0.5   1.5 )
-    #      1101 - *** not allowed (double pulse)
-    # *  9 1110 - 1:3 (1:3:2  0.33  0.66)
-    #   10 1111 - 1:4 (1:4:1  0.25  0.25)
-    # of the 10 possibilities the 7 with the biggest error differentials have been chosen
+    # encoding is a bit pattern across the data rings for each digit (a 0 at either end is implied)
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     ENCODING = [
-                [1, 1, 1, 0],  # 0
-                [0, 1, 1, 1],  # 1
-                [0, 0, 1, 1],  # 2
-                [0, 1, 1, 0],  # 3
-                [1, 1, 0, 0],  # 4
-                [0, 0, 0, 1],  # 5
-                [1, 0, 0, 0],  # 6
+                [0, 0, 0],  # 0  must be first
+                [0, 0, 1],  # 1
+                [0, 1, 0],  # 2
+                [0, 1, 1],  # 3
+                [1, 0, 0],  # 4
+                [1, 1, 0],  # 5
+                [1, 1, 1],  # 6
     ]
 
-    # base 6 encoding yields over 400 usable codes, base 7 yields over 1000, base 5 yields over 100
+    ZERO_DIGIT = ENCODING[0]
     BASE_MAX = len(ENCODING)
     BASE_MIN = 2
     RINGS_PER_DIGIT = len(ENCODING[0])  # number of rings spanning the variable data portion of a code-word
     SPAN = RINGS_PER_DIGIT + EDGE_RINGS  # total span of the code including its margin black rings
     DIGITS = DIGITS_PER_WORD * COPIES_PER_BLOCK  # number of digits in a full code-block (must be odd)
     DOUBT_LIMIT = int(COPIES_PER_BLOCK / 2)  # we want the majority to agree, so doubt must not exceed half
+    DOUBLE_HEAD_GAP_LIMIT = 0.1  # (see make_ratio) head gap ratio required to consider it as 2 distinct heads
     # endregion
 
     class Ratio:
@@ -103,6 +86,19 @@ class Codec:
 
         def __str__(self):
             return '({:.2f}, {:.2f}, {:.2f})'.format(self.lead, self.head, self.tail)
+
+    class Error:
+        """ encapsulate the digit pulse element (lead, head, tail) errors """
+
+        def __init__(self, lead_error: float, head_error: float, tail_error: float):
+            self.lead_error = lead_error
+            self.head_error = head_error
+            self.tail_error = tail_error
+            self.error = (self.lead_error + self.head_error + self.tail_error) / 3  # overall average
+
+        def __str__(self):
+            return '[{:.2f}, {:.2f}, {:.2f}, {:.2f}]'.\
+                   format(self.error, self.lead_error, self.head_error, self.tail_error)
 
     def __init__(self, min_num, max_num, base: int = BASE_MAX):
         """ create the valid code set for a number in the range min_num..max_num,
@@ -138,9 +134,7 @@ class Codec:
                 else:  # ring != 0 and central > 0
                     # one more central white
                     central += 1
-            # calculate the lead and tail ratios
-            if central == 0:
-                raise Exception('encoding for digit {} has no central white'.format(digit))
+            # calculate the lead, head and tail ratios
             self.ratios[digit] = self.make_ratio(leading, central, trailing)
         # calc the ratio limits and their span (used in the error function)
         self.min_lead_ratio = 1
@@ -301,11 +295,51 @@ class Codec:
                 return ideal
         return None
 
-    def make_ratio(self, lead: float, head: float, tail: float) -> Ratio:
-        """ given 3 lengths return the corresponding classification ratios,
+    def make_ratio(self, lead: float, head1: float, tail: float, head2: float = None, total: float = None) -> Ratio:
+        """ given several lengths return the corresponding classification ratios,
+            this function is aware of the expected pulse shapes/positions,
+            total is the total measured length of the data area (including the marker black rings),
+            lead is the length of the leading black area (including the inner black ring),
+            head1 is the length of the white area as measured going down from the inner (may be 0),
+            head2 is the length of the white area as measured going up from the outer (may be),
+            tail is the length of the trailing black area (including rhe outer black ring),
+            if head1 and head2 are distinct we've got a double pulse (which is not expected),
             the result given here can be fed into classify to get a list of likely digits
             """
-        total = lead + head + tail
+        if head2 is None:
+            head2 = head1
+        if total is None:
+            total = lead + head1 + tail
+        if head1 == 0 or head2 == 0 or tail == 0:
+            # special case for a '0'
+            return Codec.Ratio(1, 0, 0)
+        # have we got a double pulse?
+        # if we have lead + head1 + head2 + tail will be less than total (by the pulse gap)
+        gap = total - (lead + head1 + head2 + tail)
+        if gap > 0:
+            # a small gap is treated like noise and the true head is head1 + head2 + gap
+            # a bigger gap is an overlap, we then use the greater of head1 and head2
+            gap_ratio = gap / total
+            if gap_ratio > Codec.DOUBLE_HEAD_GAP_LIMIT:
+                # we've got two heads, use the biggest and add the other to the lead or tail
+                if head1 > head2:
+                    # use head1 and add head2 and the gap to the tail
+                    head = head1
+                    tail += (head2 + gap)
+                else:
+                    # use head2 and add head1 and the gap to the lead
+                    head = head2
+                    lead += (head1 + gap)
+            else:
+                # its a noise gap
+                head = head1 + head2 + gap
+        else:
+            # not a double pulse, consider head to be the average of head1 and head2
+            # and spread the difference between lead and tail
+            head = (head1 + head2) / 2
+            extra = (head - head1) / 2
+            lead -= extra
+            tail += extra
         lead_ratio = lead / total
         head_ratio = head / total
         tail_ratio = tail / total
@@ -348,7 +382,7 @@ class Codec:
             tail_err /= self.tail_ratio_span  # range now 0..1
 
             # return average error and its components
-            err = (lead_err + head_err + tail_err) / 3, lead_err, head_err, tail_err
+            err = Codec.Error(lead_err, head_err, tail_err)
 
             return err
 
@@ -357,7 +391,7 @@ class Codec:
             for digit in range(self.base):
                 ideal = self.ratios[digit]
                 digits[digit] = (digit, error(actual, ideal))
-            digits.sort(key=lambda d: d[1][0])  # put into least error order
+            digits.sort(key=lambda d: d[1].error)  # put into least error order
         return digits
 
     def digits(self, code):
@@ -423,17 +457,16 @@ class Codec:
     def _allowable(self, candidate):
         """ given a code word candidate return True if its allowable as the basis for a code-word,
             code-words are not allowed if they do not meet our property requirements around the rings,
-            the requirement is that the most significant digit must be the biggest and no two adjacent
-            digits may be the same and at least one segment in the first data ring must be black, these
-            three constraints ensure we can find all the digit edges around the ring and also find the
-            first digit of a number and not create a 'false' inner white ring (that could confuse the
-            bullseye detection),
             returns True iff its allowable
             """
 
         digits = self.digits(candidate)
         first_digit = digits[0]
         last_digit = first_digit
+        if first_digit == 0:
+            zeroes = 1
+        else:
+            zeroes = 0
         if Codec.ENCODING[first_digit][0] == 0:
             has_black = True
         else:
@@ -441,15 +474,20 @@ class Codec:
         for idx in range(1, len(digits)):
             digit = digits[idx]
             if digit >= first_digit:
-                # does not meet requirement that first digit is the biggest
+                # does not meet first digit is the biggest requirement
                 return False
             if digit == last_digit:
-                # does no meet adjacent digits different requirement
+                # does not meet adjacent digits different requirement
                 return False
+            if digit == 0:
+                zeroes += 1
             if Codec.ENCODING[digit][0] == 0:
                 has_black = True
             last_digit = digit
 
+        if zeroes != 1:
+            # does not meet our one and only one digit must be 0 requirement
+            return False
         if not has_black:
             # does not meet our inner data ring having a black segment requirement
             return False

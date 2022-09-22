@@ -277,7 +277,7 @@ class Targets:
     max_aspect_ratio: float = 0.6
     min_roundness: float = 0.84
     max_roundness: float = 1.3           # NB: max poss roundness is 1.273 (4/pi)
-    min_radius: float = 2.5
+    min_radius: float = 2.0
     min_margin: float = 4.0              # min margin to image edge of target in units of target radius
     targets: List[tuple] = None          # the result
 
@@ -657,7 +657,8 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/distant-000-101-111-222-323-333-348-424-425-444-478-522-555-568-623-691-759-760-871-898-920.jpg'
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101-102-182-247-301-424-448-500-537-565-v2.jpg"

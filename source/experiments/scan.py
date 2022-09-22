@@ -84,9 +84,8 @@ class Scan:
     MIN_PIXELS_PER_RING = 4  # min pixels making up a ring width
 
     # region Tuning constants...
-    # ToDo: de-tune blob area and radius if new scheme cannot get valid detections from ...-distant.jpg
-    MIN_BLOB_AREA = 8  # min area of a blob we want (in pixels) (default 9)
-    MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.5)
+    MIN_BLOB_AREA = 10  # min area of a blob we want (in pixels) (default 9)
+    MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
     BLOB_RADIUS_STRETCH = 1.1  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.5  # minimum luminance variation of a valid blob projection relative to the mean luminance
     THRESHOLD_WIDTH = 5  # the fraction of the projected image width to use as the integration area when binarizing
@@ -185,7 +184,7 @@ class Scan:
             the horizontal and vertical edge fragments it was built from """
 
         def __init__(self, inner=None, outer=None, inner_fail=None, outer_fail=None,
-                     buckets=None, rising_edges=None, falling_edges=None):
+                     buckets=None, rising_edges=None, falling_edges=None, slices=None):
             self.inner: [int] = inner  # list of y co-ords for the inner edge
             self.inner_fail = inner_fail  # reason if failed to find inner edge or None if OK
             self.outer: [int] = outer  # list of y co-ords for the outer edge
@@ -193,17 +192,19 @@ class Scan:
             self.rising_edges: [Scan.Edge] = rising_edges  # rising edge list used to create this extent
             self.falling_edges: [Scan.Edge] = falling_edges  # falling edge list used to create this extent
             self.buckets = buckets  # the binarized image the extent was created from
+            self.slices = slices  # the slices extracted from the extent (by _find_all_digits)
 
     class Digit:
         """ a digit is a decode of a sequence of slice samples into the most likely digit """
 
-        def __init__(self, digit, error, samples):
+        def __init__(self, digit, error, start, samples):
             self.digit = digit  # the most likely digit
             self.error = error  # the average error across its samples
+            self.start = start  # start x co-ord of this digit
             self.samples = samples  # the number of samples in this digit
 
         def __str__(self):
-            return '({}, {:.2f}, {})'.format(self.digit, self.error, self.samples)
+            return '({}, {:.2f}, at {} for {})'.format(self.digit, self.error, self.start, self.samples)
 
     class Result:
         """ a result is the result of a number decode and its associated error/confidence level """
@@ -1293,7 +1294,7 @@ class Scan:
                 return composed, reason
 
             # remove y 'steps'
-            smoothed = composed  # ToDo: HACK-->smooth(composed, direction)
+            smoothed = smooth(composed, direction)
 
             return smoothed, None
 
@@ -1512,11 +1513,11 @@ class Scan:
         # do the initial edge detection
         extent = make_extent(target, context='-warped')
 
-        if extent.inner_fail is None and extent.outer_fail is None:
-            flat, flat_stretch = self._flatten(target, extent)
-            extent = make_extent(flat, clean=True, context='-flat')
-            max_x, max_y = flat.size()
-            return max_x, max_y, stretch_factor * flat_stretch, extent
+        # if extent.inner_fail is None and extent.outer_fail is None:
+        #     flat, flat_stretch = self._flatten(target, extent)
+        #     extent = make_extent(flat, clean=True, context='-flat')
+        #     max_x, max_y = flat.size()
+        #     return max_x, max_y, stretch_factor * flat_stretch, extent
 
         max_x, max_y = target.size()
         return max_x, max_y, stretch_factor, extent
@@ -1544,13 +1545,39 @@ class Scan:
 
         return inner_size, outer_size
 
-    def _find_digits(self, extent: Extent) -> ([Digit], str):
-        """ find the digits from an analysis of the given extent,
-            returns a digit list and None if succeeded, or partial list and a reason if failed,
+    def _make_slice(self, digit, extent):
+        """ given a digit return the equivalent slice that fits in the given extent,
+            this is a diagnostic helper for drawing digits
+            """
+        ideal = self.decoder.to_ratio(digit)
+        if ideal is None:
+            return None
+        inner_average, outer_average = self._measure(extent, log=False)
+        start_y = int(round(inner_average + 1))
+        end_y = int(round(outer_average))
+        span = end_y - start_y + 1
+        lead_length = span * ideal.lead
+        head_length = span * ideal.head
+        tail_length = span * ideal.tail
+        total = lead_length + head_length + tail_length  # this covers span and is in range 0..?
+        scale = span / total  # so scale by this to get 0..span
+        lead_length *= scale
+        head_length *= scale
+        tail_length *= scale
+        lead_start = start_y
+        head_start = int(round(start_y + lead_length))
+        tail_start = int(round(head_start + head_length))
+        tail_end = end_y
+        return lead_start, head_start, tail_start, tail_end
+
+    def _find_all_digits(self, extent: Extent) -> [Digit]:
+        """ find all the digits from an analysis of the given extent,
+            returns a digit list,
+            the extent is also updated with the slices involved
             """
 
         if self.logging:
-            header = 'find_digits:'
+            header = 'find_all_digits:'
 
         buckets = extent.buckets
         max_x, max_y = buckets.size()
@@ -1559,7 +1586,7 @@ class Scan:
             """ produce a formatted string to describe the given digit options """
             msg = ''
             for option in options:
-                msg = '{}, ({}, {})'.format(msg, option[0], vstr(option[1]))
+                msg = '{}, ({}, {})'.format(msg, option[0], option[1])
             return msg[2:]
 
         # region generate likely digit choices for each x...
@@ -1570,106 +1597,119 @@ class Scan:
             start_y = inner[x] + 1  # get past the white bullseye, so start at first black
             end_y   = outer[x]      # this is the first white after the inner black
             # scan down for lead/head/tail edges
-            down_lead_at = None
-            down_head_at = None
-            down_tail_at = None
+            down_lead_start_at = None
+            down_head_start_at = None
+            down_tail_start_at = None
             for y in range(start_y, end_y):
-                pixel = buckets.getpixel(x, y)
-                if pixel == MID_LUMINANCE:
-                    # treat like white everywhere
-                    pixel = MIN_LUMINANCE  # ToDo: HACK-->MAX_LUMINANCE
-                if pixel == MAX_LUMINANCE and down_lead_at is None:
-                    # ignore until we see a black
-                    continue
-                if pixel == MAX_LUMINANCE and down_head_at is None:
-                    # start of head
-                    down_head_at = y
-                    continue
-                if pixel == MIN_LUMINANCE and down_lead_at is None:
-                    # start of lead
-                    down_lead_at = start_y  # use real start
-                    continue
-                if pixel == MIN_LUMINANCE and down_head_at is not None:
-                    # end of head
-                    down_tail_at = y
-                    break
-            if down_lead_at is None:
-                # all white
-                down_lead_at = start_y - 1
-                down_head_at = start_y
-                down_tail_at = end_y
-            elif down_head_at is None:
-                # all black
-                down_head_at = end_y - 1
-                down_tail_at = end_y
-            elif down_tail_at is None:
-                # white to the end
-                down_tail_at = end_y
-            # scan up for tail/head/lead edges
-            up_head_at = None
-            up_tail_at = None
-            up_end_at = None
-            for y in range(end_y - 1, start_y, -1):
-                pixel = buckets.getpixel(x, y)
+                if y == start_y:
+                    # assume a grey pixel immediately after the inner edge
+                    pixel = MID_LUMINANCE
+                else:
+                    pixel = buckets.getpixel(x, y)
                 if pixel == MID_LUMINANCE:
                     # treat like black everywhere
                     pixel = MIN_LUMINANCE
-                if pixel == MAX_LUMINANCE and up_end_at is None:
+                if pixel == MAX_LUMINANCE and down_lead_start_at is None:
+                    # ignore until we see a black
+                    continue
+                if pixel == MIN_LUMINANCE and down_lead_start_at is None:
+                    # start of lead
+                    down_lead_start_at = start_y  # use real start (first black after inner edge)
+                    continue
+                if pixel == MAX_LUMINANCE and down_head_start_at is None:
+                    # start of head, end of lead
+                    down_head_start_at = y  # first white after last black
+                    continue
+                if pixel == MIN_LUMINANCE and down_head_start_at is not None:
+                    # end of head, begin of tail
+                    down_tail_start_at = y  # first black after last white
+                    break
+            if down_lead_start_at is None:
+                # all white
+                down_lead_start_at = start_y
+                down_head_start_at = start_y + 1
+                down_tail_start_at = end_y - 1
+            elif down_head_start_at is None:
+                # all black (this is a 0)
+                down_head_start_at = end_y
+                down_tail_start_at = end_y
+            elif down_tail_start_at is None:
+                # white to the end
+                down_tail_start_at = end_y - 1
+            # scan up for tail/head/lead edges
+            up_head_start_at = None
+            up_tail_start_at = None
+            up_tail_end_at = None
+            for y in range(end_y - 1, start_y - 1, -1):  # NB: scanning backwards, from bottom to top
+                if y == end_y - 1:
+                    # assume a grey pixel immediately before the outer edge
+                    pixel = MID_LUMINANCE
+                else:
+                    pixel = buckets.getpixel(x, y)
+                if pixel == MID_LUMINANCE:
+                    # treat like black everywhere
+                    pixel = MIN_LUMINANCE
+                if pixel == MAX_LUMINANCE and up_tail_end_at is None:
                     # ignore until see a black
                     continue
-                if pixel == MIN_LUMINANCE and up_end_at is None:
+                if pixel == MIN_LUMINANCE and up_tail_end_at is None:
                     # end of tail
-                    up_end_at = end_y - 1  # use real end
+                    up_tail_end_at = end_y - 1  # use real end (last black before outer edge)
                     continue
-                if pixel == MAX_LUMINANCE and up_tail_at is None:
-                    # start of tail
-                    up_tail_at = y + 1  # get back to the black
+                if pixel == MAX_LUMINANCE and up_tail_start_at is None:
+                    # start of tail, end of head
+                    up_tail_start_at = y + 1  # get back to the black (first black after last head white)
                     continue
-                if pixel == MIN_LUMINANCE and up_tail_at is not None:
-                    # end of head
-                    up_head_at = y + 1  # get back to the white
+                if pixel == MIN_LUMINANCE and up_tail_start_at is not None:
+                    # start of head
+                    up_head_start_at = y + 1  # get back to the white (last head white)
                     break
-            if up_end_at is None:
+            if up_tail_end_at is None:
                 # all white
-                up_end_at = end_y
-                up_tail_at = end_y - 1
-                up_head_at = start_y
-            elif up_tail_at is None:
-                # all black
-                up_tail_at = start_y + 1
-                up_head_at = start_y
-            elif up_head_at is None:
+                up_tail_end_at = end_y - 1
+                up_tail_start_at = end_y - 2
+                up_head_start_at = start_y + 1
+            elif up_tail_start_at is None:
+                # all black (this is a 0)
+                up_tail_start_at = end_y
+                up_head_start_at = end_y
+            elif up_head_start_at is None:
                 # white to the end
-                up_head_at = start_y
-            # calculate ratios using average lead/head and head/tail edges
-            head_at = (up_head_at + down_head_at) / 2
-            tail_at = (up_tail_at + down_tail_at) / 2
-            lead_length = head_at - down_lead_at
-            head_length = tail_at - head_at
-            tail_length = up_end_at - tail_at
-            slices[x][0] = self.decoder.make_ratio(lead_length, head_length, tail_length)
+                up_head_start_at = start_y + 1
+            # calculate ratios using the discovered lead/head and head/tail edges
+            # we calculate the overall data width (outer - inner edges), and the
+            # lengths of the components discovered, this is passed to our decode
+            # to determine the ratios (this delegates knowledge of pulse shapes
+            # to the decoded)
+            down_lead_length = down_head_start_at - down_lead_start_at
+            down_head_length = down_tail_start_at - down_head_start_at
+            up_head_length = up_tail_start_at - up_head_start_at
+            up_tail_length = up_tail_end_at - up_tail_start_at + 1
+            data_length = end_y - start_y
+            slices[x][0] = self.decoder.make_ratio(down_lead_length, down_head_length, up_tail_length,
+                                                   up_head_length, data_length)
             slices[x][1] = self.decoder.classify(slices[x][0])
         if self.logging:
             if header is not None:
                 self._log(header)
                 header = None
             self._log('    initial slices:')
-            for x, (ratio, digit) in enumerate(slices):
-                self._log('        {}: ratio={}, options={}'.format(x, ratio, show_options(digit)))
+            for x, (ratio, options) in enumerate(slices):
+                self._log('        {}: ratio={}, options={}'.format(x, ratio, show_options(options)))
         # endregion
 
-        # region repeat removing orphans, twins and triplets until nothing changes...
-        orphans = 0
-        twins = 0
-        triplets = 0
+        # region repeat removing singles, doubles and triples until nothing changes...
+        singles = 0
+        doubles = 0
+        triples = 0
         changes = True
         passes = 0
         if self.logging:
-            sub_header = 'remove orphans, twins and triplets'
+            sub_header = 'remove singles, doubles and triples'
         while changes:
             passes += 1
             changes = False
-            # adjust orphans by removing its first choice
+            # adjust singles by removing its first choice
             for x, (ratio, this) in enumerate(slices):
                 if ratio is None:
                     continue
@@ -1680,20 +1720,24 @@ class Scan:
                 if ratio is None:
                     continue
                 removed = []
-                if this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
-                    # got an orphan, remove top choice
-                    if len(this) > 1:
-                        # got choices, so remove one
-                        removed.append(this[0])
-                        del this[0]
+                while len(this) > 0:
+                    if this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
+                        # got a single, remove top choice
+                        if len(this) > 1:
+                            # got choices, so remove one
+                            removed.append(this[0])
+                            del this[0]
+                        else:
+                            # no choices left, morph to one of our neighbours, which one?
+                            removed.append(this[0])
+                            this[0] = pred[0]
                     else:
-                        # no choices left, morph to one of our neighbours, which one?
-                        removed.append(this[0])
-                        this[0] = pred[0]
+                        # not, or no longer, a single
+                        break
                 if len(removed) > 0:
                     # we made a change
                     changes = True
-                    orphans += 1
+                    singles += 1
                     if self.logging:
                         if header is not None:
                             self._log(header)
@@ -1701,12 +1745,12 @@ class Scan:
                         if sub_header is not None:
                             self._log('    {}:'.format(sub_header))
                             sub_header = None
-                        self._log('        pass {} at {}: (orphan) removed {} leaving {}'.
+                        self._log('        pass {} at {}: (single) removed {} leaving {}'.
                                   format(passes, x, show_options(removed), show_options(this)))
             if changes:
                 continue
 
-            # no orphans left, adjust twins by making one of them into an orphan
+            # no singles left, adjust doubles by making one of them into a single
             for x, (ratio, this) in enumerate(slices):
                 if ratio is None:
                     continue
@@ -1722,7 +1766,7 @@ class Scan:
                 removed = []
                 while len(this) > 0 or len(that) > 0:
                     if this[0][0] == that[0][0] and this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
-                        # got a twin, remove top choices
+                        # got a double, remove top choices
                         if len(this) > 1:
                             # there is a choice
                             removed.append(this[0])
@@ -1736,26 +1780,29 @@ class Scan:
                             removed.append(this[0])
                             this[0] = pred[0]
                     else:
-                        # not or no longer a twin
+                        # not or no longer a double
                         break
                 if len(removed) > 0:
                     # we made a change
                     changes = True
-                    twins += 1
+                    doubles += 1
                     if self.logging:
                         if header is not None:
                             self._log(header)
                             header = None
-                        self._log('        pass {} at {}: (twin) removed {} leaving {}'.
+                        if sub_header is not None:
+                            self._log('    {}:'.format(sub_header))
+                            sub_header = None
+                        self._log('        pass {} at {}: (double) removed {} leaving {}'.
                                   format(passes, x, show_options(removed), show_options(this)))
             if changes:
                 continue
 
-            # no twins left, adjust triplets by making one of them into an orphan
+            # no doubles left, adjust triples by making one of them into a single
             for x, (ratio, this) in enumerate(slices):
                 if ratio is None:
                     continue
-                ratio, far_left = slices[(x - 2) % max_x]
+                ratio, pred = slices[(x - 2) % max_x]
                 if ratio is None:
                     continue
                 ratio, left = slices[(x - 1) % max_x]
@@ -1764,50 +1811,59 @@ class Scan:
                 ratio, right = slices[(x + 1) % max_x]
                 if ratio is None:
                     continue
-                ratio, far_right = slices[(x + 2) % max_x]
+                ratio, succ = slices[(x + 2) % max_x]
                 if ratio is None:
                     continue
                 removed = []
-                while len(this) > 0 or len(left) > 0 or len(right) > 0:
-                    if this[0][0] == left[0][0] and this[0][0] == right[0][0] \
-                            and this[0][0] != far_left[0][0] and this[0][0] != far_right[0][0]:
-                        # got an isolated triplet, remove top choice
-                        if len(this) > 1:
-                            # this has choices, remove top one
-                            removed.append(this[0])
-                            del this[0]
-                        elif len(left) > 1:
-                            # left has choices, remove top one
-                            removed.append(left[0])
-                            del left[0]
-                        elif len(right) > 1:
-                            # right has choices, remove top one
-                            removed.append(right[0])
-                            del right[0]
+                while len(left) > 0 or len(this) > 0 or len(right) > 0:
+                    if this[0][0] == left[0][0] and this[0][0] == right[0][0]:
+                        # got a potential triple
+                        if this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
+                            # got a triple, remove top choice
+                            if len(this) > 1:
+                                # there is a choice
+                                removed.append(this[0])
+                                del this[0]
+                            elif len(left) > 1:
+                                # there is a choice
+                                removed.append(left[0])
+                                del left[0]
+                            elif len(right) > 1:
+                                # there is a choice
+                                removed.append(right[0])
+                                del right[0]
+                            else:
+                                # no choices left, morph to one of our neighbours, which one?
+                                removed.append(this[0])
+                                this[0] = pred[0]
                         else:
-                            # no choices left, morph to one of our neighbours, which one?
-                            removed.append(this[0])
-                            this[0] = far_left[0]
+                            # not or no longer a triple
+                            break
                     else:
-                        # not or no longer a triplet
+                        # not or no longer a triple
                         break
                 if len(removed) > 0:
                     # we made a change
                     changes = True
-                    triplets += 1
+                    triples += 1
                     if self.logging:
                         if header is not None:
                             self._log(header)
                             header = None
-                        self._log('        pass {} at {}: (triplet) removed {} leaving {}'.
+                        if sub_header is not None:
+                            self._log('    {}:'.format(sub_header))
+                            sub_header = None
+                        self._log('        pass {} at {}: (triple) removed {} leaving {}'.
                                   format(passes, x, show_options(removed), show_options(this)))
+            if changes:
+                continue
 
         if self.logging:
             if header is not None:
                 self._log(header)
                 header = None
-            self._log('    {} passes, {} orphans adjusted, {} twins adjusted, {} triplets adjusted'.
-                      format(passes, orphans, twins, triplets))
+            self._log('    {} passes, {} singles adjusted, {} doubles adjusted, {} triples adjusted'.
+                      format(passes, singles, doubles, triples))
             self._log('    final slices:')
             for x, (ratio, digit) in enumerate(slices):
                 self._log('        {}: ratio={}, options={}'.format(x, ratio, show_options(digit)))
@@ -1815,26 +1871,24 @@ class Scan:
 
         # region build digit list...
         digits = []
-        last_digit = Scan.Digit(None, 0, 0)
+        last_digit = None
         for x, (ratio, this) in enumerate(slices):
             if ratio is None:
                 # this is junk - ignore it
                 continue
-            if last_digit.digit is None:
+            if last_digit is None:
                 # first digit
-                last_digit.digit = this[0][0]
-                last_digit.error = this[0][1][0]
-                last_digit.samples = 1
+                last_digit = Scan.Digit(this[0][0], this[0][1].error, x, 1)
             elif this[0][0] == last_digit.digit:
                 # continue with this digit
-                last_digit.error += this[0][1][0]  # accumulate error
+                last_digit.error += this[0][1].error  # accumulate error
                 last_digit.samples += 1         # and sample count
             else:
                 # save last digit
                 last_digit.error /= last_digit.samples  # set average error
                 digits.append(last_digit)
                 # start a new digit
-                last_digit = Scan.Digit(this[0][0], this[0][1][0], 1)
+                last_digit = Scan.Digit(this[0][0], this[0][1].error, x, 1)
         # deal with last digit
         if len(digits) == 0:
             # its all the same digit - this must be junk
@@ -1844,29 +1898,24 @@ class Scan:
             # its part of the first digit
             last_digit.error /= last_digit.samples  # set average error
             digits[0].error = (digits[0].error + last_digit.error) / 2
+            digits[0].start = last_digit.start
             digits[0].samples += last_digit.samples
         else:
             # its a separate digit
             last_digit.error /= last_digit.samples  # set average error
             digits.append(last_digit)
+        # endregion
 
-        if len(digits) < Scan.NUM_SEGMENTS:
-            # ToDo: split large digits?
-            reason = 'too few digits'
-        elif len(digits) > Scan.NUM_SEGMENTS:
-            # ToDo: combine small digits
-            reason = 'too many digits'
-        else:
-            reason = None
+        # save slices in the extent for others to use
+        extent.slices = slices
 
         if self.logging:
             if header is not None:
                 self._log(header)
                 header = None
-            self._log('    {} digits (fail reason {}):'.format(len(digits), reason))
+            self._log('    {} digits:'.format(len(digits)))
             for x, digit in enumerate(digits):
                 self._log('        {}: {}'.format(x, digit))
-        # endregion
 
         if self.save_images:
             plot = self.transform.copy(buckets)
@@ -1874,34 +1923,248 @@ class Scan:
             head_lines = []
             tail_lines = []
             for x, (_, slice) in enumerate(slices):
-                ideal = self.decoder.to_ratio(slice[0][0])
-                if ideal is None:
+                x_slice = self._make_slice(slice[0][0], extent)
+                if x_slice is None:
+                    # not a valid digit
                     continue
-                inner_average, outer_average = self._measure(extent, log=False)
-                start_y = int(round(inner_average + 1))
-                end_y = int(round(outer_average))
-                span = end_y - start_y + 1
-                lead_length = span * ideal.lead
-                head_length = span * ideal.head
-                tail_length = span * ideal.tail
-                total = lead_length + head_length + tail_length  # this covers span and is in range 0..?
-                scale = span / total  # so scale by this to get 0..span
-                lead_length *= scale
-                head_length *= scale
-                tail_length *= scale
-                lead_start = start_y
-                head_start = int(round(start_y + lead_length))
-                tail_start = int(round(head_start + head_length))
-                tail_end = end_y
+                lead_start, head_start, tail_start, tail_end = x_slice
                 lead_lines.append((x, lead_start, x, head_start - 1))
                 head_lines.append((x, head_start, x, tail_start - 1))
                 tail_lines.append((x, tail_start, x, tail_end - 1))
             plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
             plot = self._draw_lines(plot, head_lines, Scan.RED)
             plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
-            self._unload(plot, '07-slices')
+            self._unload(plot, '05-slices')
 
-        return digits, reason
+        return digits
+
+    def _find_best_digits(self, digits: [Digit], extent: Extent = None) -> ([Digit], str):
+        """ analyse the given digits to isolate the 'best' ones,
+            extent provides the slices found by _find_all_digits,
+            the 'best' digits are those that conform to the known code structure,
+            specifically one zero per copy and correct number of digits per copy,
+            returns the revised digit list and None if succeeded
+            or a partial list and a reason if failed
+            """
+
+        if self.logging:
+            header = 'find_best_digits:'
+
+        def find_best_2nd_choice(slices, slice_start, slice_end):
+            """ find the best 2nd choice in the given slices,
+                return the digit, how many there are and the average error,
+                the return info is sufficient to create a Scan.Digit
+                """
+            second_choice = [[0, 0] for _ in range(self.decoder.base)]
+            for x in range(slice_start, slice_end):
+                _, options = slices[x % len(slices)]
+                if len(options) > 1:
+                    second_choice[options[1][0]][0] += 1
+                    second_choice[options[1][0]][1] += options[1][1].error
+            best_digit = None
+            best_count = 0
+            best_error = 0
+            for digit, (count, error) in enumerate(second_choice):
+                if count > best_count:
+                    best_digit = digit
+                    best_count = count
+                    best_error = error
+            return best_digit, best_count, best_error / best_count
+
+        def shrink_digit(slices, digit, start, samples) -> Scan.Digit:
+            """ shrink the indicated digit to the start and size given,
+                this involves moving the start, updating the samples and adjusting the error,
+                the revised digit is returned
+                """
+            # calculate the revised error
+            error = 0
+            for x in range(start, start + samples):
+                _, options = slices[x % len(slices)]
+                error += options[0][1].error
+            error /= samples
+            # create a new digit
+            new_digit = Scan.Digit(digit.digit, error, start, samples)
+            return new_digit
+
+        # translate digits from [Digit] to [[Digit]] so we can mess with it and not change indices
+        # indices into digits_list must remain constant even while we are adding/removing digits
+        # we achieve this by having a list of digits for each 'digit', that list is emptied when
+        # a digit is removed or extended when a digit is added, for any index 'x' digits[x] is
+        # the original digit and digits_list[x] is a list of 1 or 2 digits or None, None=removed,
+        # 2=split, and 1=no change
+        digits_list = [[options] for options in digits]
+
+        best_digits = digits  # default response
+
+        # zero detection is relatively robust, so we expect to find exactly Scan.COPIES
+        copies = []
+        for x, digit in enumerate(digits):
+            if digit.digit == 0:
+                copies.append([x])
+        if len(copies) < Scan.COPIES:
+            # not enough zeroes - that's a show-stopper
+            reason = 'too few zeroes'
+        else:
+            # if too many zeroes - dump the smallest with the most error
+            while len(copies) > Scan.COPIES:
+                smallest_x = 0  # index into copy
+                for x in range(1, len(copies)):
+                    xx = copies[x][0]
+                    smallest_xx = copies[smallest_x][0]
+                    if digits[xx].samples < digits[smallest_xx].samples:
+                        # less samples
+                        smallest_x = x
+                    elif digits[xx].samples == digits[smallest_xx].samples:
+                        if digits[xx].error > digits[smallest_xx].error:
+                            # same samples but bigger error
+                            smallest_x = x
+                smallest_xx = copies[smallest_x][0]
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    self._log('    {}: dropping excess zero {}'.
+                              format(smallest_xx, digits[smallest_xx]))
+                digits_list[smallest_xx] = None
+                del copies[smallest_x]
+            reason = None
+        if reason is None:
+            # find the actual digits between the zeroes
+            reason = None
+            for copy in copies:
+                xx = copy[0]
+                while True:
+                    xx = (xx + 1) % len(digits)
+                    if digits_list[xx] is None:
+                        # this one has been dumped
+                        continue
+                    if digits[xx].digit == 0:
+                        # ran into next copy
+                        break
+                    copy.append(xx)
+                digits_required = Scan.DIGITS_PER_NUM
+                while len(copy) < digits_required:
+                    # not enough digits - split the biggest with the biggest error
+                    biggest_x = 1  # index into copy, index 0 is the (precious) zero
+                    for x in range(2, len(copy)):
+                        xx = copy[x]
+                        digits_xx = digits_list[xx]
+                        if digits_xx is None:
+                            # this one has been dumped
+                            continue
+                        if len(digits_xx) > 1:
+                            # this one has already been split
+                            continue
+                        biggest_digit = digits[copy[biggest_x]]
+                        if digits[xx].samples > biggest_digit.samples:
+                            biggest_x = x
+                        elif digits[xx].samples == biggest_digit.samples:
+                            if digits[xx].error > biggest_digit.error:
+                                biggest_x = x
+                    biggest_xx = copy[biggest_x]
+                    biggest_digit = digits[biggest_xx]
+                    # we want to split the biggest using the second choice in the spanned slices
+                    # count 2nd choices in the first half and second half of the biggest span
+                    # use the option with the biggest count, this represents the least error 2nd choice
+                    # this algorithm is very crude and is only reliable when we are one digit short
+                    # this is the most common case, eg. when a 100 smudges into a 010
+                    # we only split a sequence once so digits[x] and digits_list[x][0] are the same here
+                    slices = extent.slices
+                    slice_start = digits[biggest_xx].start
+                    slice_end = slice_start + digits[biggest_xx].samples
+                    if slice_end < slice_start:
+                        slice_full_span = (slice_end + len(slices)) - slice_start
+                    else:
+                        slice_full_span = slice_end - slice_start
+                    slice_first_span = int(round(slice_full_span / 2))
+                    slice_second_span = slice_full_span - slice_first_span
+                    best_1 = find_best_2nd_choice(slices, slice_start, slice_start + slice_first_span)
+                    best_2 = find_best_2nd_choice(slices, slice_start + slice_first_span, slice_start + slice_full_span)
+                    if best_1[1] > best_2[1]:
+                        # first half is better, create a digit for that, insert before the other and shrink the other
+                        digit_1 = Scan.Digit(best_1[0], best_1[2], slice_start, slice_first_span)
+                        digit_2 = shrink_digit(slices, biggest_digit, slice_start + slice_first_span, slice_second_span)
+                    else:
+                        # second half is better, create a digit for that
+                        digit_1 = shrink_digit(slices, biggest_digit, slice_start, slice_first_span)
+                        digit_2 = Scan.Digit(best_2[0], best_2[2], slice_start + slice_first_span, slice_second_span)
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    {}: splitting {} into {} and {}'.
+                                  format(biggest_xx, biggest_digit, digit_1, digit_2))
+                    digits_list[biggest_xx] = [digit_1, digit_2]
+                    digits_required -= 1
+                while len(copy) > digits_required:
+                    # too many digits - drop the smallest with the biggest error that is not a zero
+                    smallest_x = 1  # index into copy, index 0 is the (precious) zero
+                    for x in range(2, len(copy)):
+                        xx = copy[x]
+                        digits_xx = digits_list[xx]
+                        if digits_xx is None:
+                            # this one has been dumped
+                            continue
+                        if len(digits_xx) > 1:
+                            # this one has been split - not possible to see that here!
+                            continue
+                        smallest_digit = digits[copy[smallest_x]]
+                        if digits[xx].samples < smallest_digit.samples:
+                            smallest_x = x
+                        elif digits[xx].samples == smallest_digit.samples:
+                            if digits[xx].error > smallest_digit.error:
+                                smallest_x = x
+                    smallest_xx = copy[smallest_x]
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    {}: dropping excess digit {}'.
+                                  format(smallest_xx, digits[smallest_xx]))
+                    digits_list[smallest_xx] = None
+                    digits_required += 1
+            if reason is None:
+                # build the final digit list
+                best_digits = []
+                for digits in digits_list:
+                    if digits is None:
+                        # this has been deleted
+                        continue
+                    for digit in digits:
+                        best_digits.append(digit)
+
+        if self.logging:
+            if header is not None:
+                self._log(header)
+                header = None
+            self._log('    {} digits (fail reason: {}):'.format(len(best_digits), reason))
+            for x, digit in enumerate(best_digits):
+                self._log('        {}: {}'.format(x, digit))
+
+        if self.save_images:
+            buckets = extent.buckets
+            max_x, max_y = buckets.size()
+            plot = self.transform.copy(buckets)
+            lead_lines = []
+            head_lines = []
+            tail_lines = []
+            for digit in best_digits:
+                digit_slice = self._make_slice(digit.digit, extent)
+                if digit_slice is None:
+                    # not a valid digit
+                    continue
+                lead_start, head_start, tail_start, tail_end = digit_slice
+                for sample in range(digit.samples):
+                    x = (digit.start + sample) % max_x
+                    lead_lines.append((x, lead_start, x, head_start - 1))
+                    head_lines.append((x, head_start, x, tail_start - 1))
+                    tail_lines.append((x, tail_start, x, tail_end - 1))
+            plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
+            plot = self._draw_lines(plot, head_lines, Scan.RED)
+            plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
+            self._unload(plot, '06-digits')
+
+        return best_digits, reason
 
     def _decode_digits(self, digits: [Digit]) -> [Result]:
         """ decode the digits into their corresponding code and doubt """
@@ -1965,7 +2228,7 @@ class Scan:
                     rejects.append(Scan.Reject(self.centre_x, self.centre_y, blob_size, blob_size*4, reason))
                 continue
 
-            digits, reason = self._find_digits(extent)
+            digits, reason = self._find_best_digits(self._find_all_digits(extent), extent)
             if reason is not None:
                 # we failed to find segment edges
                 if self.save_images:

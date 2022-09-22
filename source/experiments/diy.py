@@ -42,25 +42,6 @@ MIN_LUMINANCE = 0
 MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
 
 
-def nstr(number, fmt='.2f'):
-    """ given a number that may be None, return an appropriate string """
-    if number is None:
-        return 'None'
-    else:
-        fmt = '{:' + fmt + '}'
-        return fmt.format(number)
-
-
-def vstr(vector, fmt='.2f', open='[', close=']'):
-    """ given a list of numbers return a string representing them """
-    if vector is None:
-        return 'None'
-    result = ''
-    for pt in vector:
-        result += ', ' + nstr(pt)
-    return open + result[2:] + close
-
-
 class Test:
     # exit codes from scan
     EXIT_OK = 0  # found what was expected
@@ -259,7 +240,7 @@ class Test:
         # black/white lengths. The biggest length is cell-height * cells-in-radius
         try:
             max_span = self.cells[1] * codec.Codec.SPAN * 2  # *2 so get effective 0.5 lengths (which scan can do)
-            min_length = 1
+            min_length = 0
             max_length = max_span - min_length + 1
             # generate all possible ratios
             ratios = []
@@ -346,12 +327,12 @@ class Test:
                 min_lead, max_lead, min_head, max_head, min_tail, max_tail = stats
                 self._log('Digit {} ideal={}: steps={} ({:.2f}%):'.format(digit, ideal, steps,
                                                                           (steps/len(ratios))*100))
-                self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], vstr(min_lead[2])))
-                self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], vstr(max_lead[2])))
-                self._log('    min head:{}, digit={}, err={}'.format(min_head[0], min_head[1], vstr(min_head[2])))
-                self._log('    max head:{}, digit={}, err={}'.format(max_head[0], max_head[1], vstr(max_head[2])))
-                self._log('    min tail:{}, digit={}, err={}'.format(min_tail[0], min_tail[1], vstr(min_tail[2])))
-                self._log('    max tail:{}, digit={}, err={}'.format(max_tail[0], max_tail[1], vstr(max_tail[2])))
+                self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], min_lead[2]))
+                self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], max_lead[2]))
+                self._log('    min head:{}, digit={}, err={}'.format(min_head[0], min_head[1], min_head[2]))
+                self._log('    max head:{}, digit={}, err={}'.format(max_head[0], max_head[1], max_head[2]))
+                self._log('    min tail:{}, digit={}, err={}'.format(min_tail[0], min_tail[1], min_tail[2]))
+                self._log('    max tail:{}, digit={}, err={}'.format(max_tail[0], max_tail[1], max_tail[2]))
         except:
             traceback.print_exc()
         self._log('******************')
@@ -487,9 +468,6 @@ class Test:
                 bit = bits[int(slice % len(bits))]
                 slice_mask = 1 << slice
                 for r in range(codec.Codec.RINGS_PER_DIGIT):
-                    if bit[r] is None:
-                        # this is a don't care 0
-                        continue
                     if bit[r] == 1:
                         block[r] += slice_mask
             ring.code(000, block)
@@ -754,12 +732,12 @@ def verify():
     # parameters
     min_num = 101  # min number we want
     max_num = 999  # max number we want (may not be achievable)
-    code_base = 7
+    code_base = 6
 
     test_codes_folder = 'codes'
     test_media_folder = 'media'
     test_log_folder = 'logs'
-    test_ring_width = 30  # this makes a target that fits on A5
+    test_ring_width = 34  # this makes a target that fits on A5
 
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
@@ -800,12 +778,7 @@ def verify():
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [101], 'test-code-101.png')
 
-        test.scan(test_media_folder, [000,101,107,111,146,153,215,222,302,327,333,396,444,555,600,681,696,774,852,855,999], 'far-000-101-107-111-146-153-215-222-302-327-333-396-444-555-600-681-696-774-852-855-999.jpg')
-        # test.scan(test_media_folder, [775, 592, 184, 111, 101, 285, 612, 655, 333, 444], 'photo-775-592-184-111-101-285-612-655-333-444.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-mid.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-distant.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132.jpg')
-        # test.scan(test_media_folder, [332, 222, 555, 800, 574, 371, 757, 611, 620, 132], 'photo-332-222-555-800-574-371-757-611-620-132-near.jpg')
+        test.scan(test_media_folder, [000,101,111,222,323,333,348,424,425,444,478,522,555,568,623,691,759,760,871,898,920], 'distant-000-101-111-222-323-333-348-424-425-444-478-522-555-568-623-691-759-760-871-898-920.jpg')
 
     except:
         traceback.print_exc()

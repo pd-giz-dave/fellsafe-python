@@ -146,14 +146,14 @@ class Transform:
     def label(self, source, keypoint, colour=(0, 0, 255), title=None):
         """ return an image with a coloured ring around the given key point in the given image
             and a textual title at the key point centre if one is given,
-            keypoint is a list of centre x,y and circle radius
+            keypoint is a centre x,y and circle radius
             """
         objects = []
-        org = (int(round(keypoint[0])), int(round(keypoint[1])))
+        org = (keypoint[0], keypoint[1])
         objects.append({"colour": colour,
                         "type": self.CIRCLE,
                         "centre": org,
-                        "radius": int(round(keypoint[2]))})
+                        "radius": keypoint[2]})
         if title is not None:
             objects.append({"colour": colour,
                             "type": self.TEXT,
@@ -209,6 +209,7 @@ class Transform:
                     image = cv2.line(image, _int(start1), _int(end1), obj["colour"], 1)
                 image = cv2.line(image, _int(start), _int(end), obj["colour"], 1)
             elif obj["type"] == self.CIRCLE:
+                # ToDo: allow for centre not being on a pixel boundary?
                 image = cv2.circle(image, _int(obj["centre"]), int(round(obj["radius"])), obj["colour"], 1)
             elif obj["type"] == self.RECTANGLE:
                 image = cv2.rectangle(image, _int(obj["start"]), _int(obj["end"]), obj["colour"], 1)
