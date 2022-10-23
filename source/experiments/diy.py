@@ -239,17 +239,22 @@ class Test:
         # so a one pixel error can be significant, we test ratios for every possibility
         # black/white lengths. The biggest length is cell-height * cells-in-radius
         try:
-            max_span = self.cells[1] * codec.Codec.SPAN * 2  # *2 so get effective 0.5 lengths (which scan can do)
-            min_length = 0
+            max_span = self.cells[1] * codec.Codec.SPAN
+            min_length = 1
             max_length = max_span - min_length + 1
             # generate all possible ratios
             ratios = []
-            for lead_length in range(min_length, max_length + 1):
+            ratios.append(self.codec.make_ratio(max_length, 0, 0))  # do 0 separately
+            for lead_length in range(min_length, max_length):  # one short on max 'cos already done 0
                 for head_length in range(min_length, (max_span - lead_length) + 1):
                     tail_length = max_length - (lead_length + head_length)
-                    if tail_length < min_length:
+                    if tail_length < min_length or tail_length == 0:
+                        # not allowed
                         continue
-                    ratios.append(self.codec.make_ratio(lead_length, head_length, tail_length))
+                    if head_length == 0:
+                        # this is a zero (already covered)
+                        continue
+                    ratios.append(self.codec.make_ratio(lead_length, tail_length, head_length))
             digits = {}
             for ratio in ratios:
                 candidates = self.codec.classify(ratio)
@@ -262,12 +267,12 @@ class Test:
             errors = []
             for digit, options in digits.items():
                 # find the ratio span limits for each option
-                min_lead = self.codec.Ratio(max_span * 2, -1, -1)
-                max_lead = self.codec.Ratio(-1, -1, -1)
-                min_head = self.codec.Ratio(-1, max_span * 2, -1)
-                max_head = self.codec.Ratio(-1, -1, -1)
-                min_tail = self.codec.Ratio(-1, -1, max_span * 2)
-                max_tail = self.codec.Ratio(-1, -1, -1)
+                min_lead = None
+                max_lead = None
+                min_head = None
+                max_head = None
+                min_tail = None
+                max_tail = None
                 min_lead_digit = None
                 max_lead_digit = None
                 min_head_digit = None
@@ -280,28 +285,42 @@ class Test:
                 max_head_err = None
                 min_tail_err = None
                 max_tail_err = None
+                min_error = None
+                max_error = None
+                min_error_digit = None
+                max_error_digit = None
+                max_error_err = None
+                min_error_err = None
                 for ratio, candidates in options:
-                    if ratio.lead < min_lead.lead:
+                    if min_error is None or candidates[0][1].error < min_error_err.error:
+                        min_error_err = candidates[0][1]
+                        min_error_digit = candidates[0][0]
+                        min_error = ratio
+                    if max_error is None or candidates[0][1].error > max_error_err.error:
+                        max_error_err = candidates[0][1]
+                        max_error_digit = candidates[0][0]
+                        max_error = ratio
+                    if min_lead is None or ratio.lead_ratio() < min_lead.lead_ratio():
                         min_lead = ratio
                         min_lead_digit = candidates[1][0]
                         min_lead_err = candidates[1][1]
-                    if ratio.lead > max_lead.lead:
+                    if max_lead is None or ratio.lead_ratio() > max_lead.lead_ratio():
                         max_lead = ratio
                         max_lead_digit = candidates[1][0]
                         max_lead_err = candidates[1][1]
-                    if ratio.head < min_head.head:
+                    if min_head is None or ratio.head_ratio() < min_head.head_ratio():
                         min_head = ratio
                         min_head_digit = candidates[1][0]
                         min_head_err = candidates[1][1]
-                    if ratio.head > max_head.head:
+                    if max_head is None or ratio.head_ratio() > max_head.head_ratio():
                         max_head = ratio
                         max_head_digit = candidates[1][0]
                         max_head_err = candidates[1][1]
-                    if ratio.tail < min_tail.tail:
+                    if min_tail is None or ratio.tail_ratio() < min_tail.tail_ratio():
                         min_tail = ratio
                         min_tail_digit = candidates[1][0]
                         min_tail_err = candidates[1][1]
-                    if ratio.tail > max_tail.tail:
+                    if max_tail is None or ratio.tail_ratio() > max_tail.tail_ratio():
                         max_tail = ratio
                         max_tail_digit = candidates[1][0]
                         max_tail_err = candidates[1][1]
@@ -312,21 +331,22 @@ class Test:
                                 (min_head, min_head_digit, min_head_err),
                                 (max_head, max_head_digit, max_head_err),
                                 (min_tail, min_tail_digit, min_tail_err),
-                                (max_tail, max_tail_digit, max_tail_err))))
+                                (max_tail, max_tail_digit, max_tail_err),
+                                (min_error, min_error_digit, min_error_err),
+                                (max_error, max_error_digit, max_error_err))))
             errors.sort(key=lambda e: e[0])  # put into digit order
             # show digit stats
             ideal_ratios_per_digit = len(ratios) / self.codec.base
-            self._log('Ratio spans: lead={:.2f}..{:.2f}, head={:.2f}..{:.2f}, tail={:.2f}..{:.2f}, '
-                      'max steps={}, ideal per digit={:.0f} ({:.2f}%)'.
-                      format(self.codec.min_lead_ratio, self.codec.max_lead_ratio,
-                             self.codec.min_head_ratio, self.codec.max_head_ratio,
-                             self.codec.min_tail_ratio, self.codec.max_tail_ratio,
-                             len(ratios), ideal_ratios_per_digit, (ideal_ratios_per_digit / len(ratios)) * 100))
+            self._log('Ratios: max span={}, max steps={}, ideal per digit={:.0f} ({:.2f}%)'.
+                      format(max_span, len(ratios),
+                             ideal_ratios_per_digit, (ideal_ratios_per_digit / len(ratios)) * 100))
             for (digit, steps, stats) in errors:
                 ideal = self.codec.to_ratio(digit)
-                min_lead, max_lead, min_head, max_head, min_tail, max_tail = stats
+                min_lead, max_lead, min_head, max_head, min_tail, max_tail, min_error, max_error = stats
                 self._log('Digit {} ideal={}: steps={} ({:.2f}%):'.format(digit, ideal, steps,
                                                                           (steps/len(ratios))*100))
+                self._log('    min error:{}, digit={}, err={}'.format(min_error[0], min_error[1], min_error[2]))
+                self._log('    max error:{}, digit={}, err={}'.format(max_error[0], max_error[1], max_error[2]))
                 self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], min_lead[2]))
                 self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], max_lead[2]))
                 self._log('    min head:{}, digit={}, err={}'.format(min_head[0], min_head[1], min_head[2]))
@@ -464,12 +484,19 @@ class Test:
             ring = rings.Ring(x >> 1, y >> 1, width, self.frame)
             bits = codec.Codec.ENCODING
             block = [0 for _ in range(codec.Codec.RINGS_PER_DIGIT)]
-            for slice in range(codec.Codec.DIGITS):
-                bit = bits[int(slice % len(bits))]
-                slice_mask = 1 << slice
+            digit = 0
+            slice = -1
+            while digit < codec.Codec.DIGITS:
+                slice += 1
+                bit = bits[slice % len(bits)]
+                if bit is None:
+                    # illegal digit
+                    continue
+                digit_mask = 1 << digit
                 for r in range(codec.Codec.RINGS_PER_DIGIT):
                     if bit[r] == 1:
-                        block[r] += slice_mask
+                        block[r] += digit_mask
+                digit += 1
             ring.code(000, block)
             self.frame.unload('test-code-000')
         except:
@@ -515,7 +542,7 @@ class Test:
                 num = 0
             else:
                 num = int(num)
-            self.scan(folder, [num], f)
+            self.scan(folder, [num], f, scanner.Scan.PROXIMITY_CLOSE)
 
     def scan_media(self, folder):
         """ find all the media in the given folder and scan them,
@@ -542,15 +569,18 @@ class Test:
                 digits = digits[3:]
             if len(codes) == 0:
                 codes = [0]
-            self.scan(folder, codes, f)
+            self.scan(folder, codes, f, scanner.Scan.PROXIMITY_FAR)
 
-    def scan(self, folder, numbers, image):
+    def scan(self, folder, numbers, image, proximity=scanner.Scan.PROXIMITY_FAR):
         """ do a scan for the code set in image in the given folder and expect the number given,
+            proximity specifies how close to the camera the targets can be, 'far' is suitable for
+            normal video capture, 'close' is suitable for test images that consist of just a single
+            target covering the whole frame,
             returns an exit code to indicate what happened
             """
         self._log('')
         self._log('******************')
-        self._log('Scan image {} for codes {}'.format(image, numbers))
+        self._log('Scan image {} with proximity {} for codes {}'.format(image, proximity, numbers))
         if not os.path.isfile('{}/{}'.format(folder, image)):
             self._log('Image {} does not exist in {}'.format(image, folder))
             exit_code = self.EXIT_FAILED
@@ -563,7 +593,7 @@ class Test:
                 self._remove_debug_images(debug_folder, image)
                 self.frame.load(image)
                 scan = scanner.Scan(self.codec, self.frame, self.transform, self.cells, self.video_mode,
-                                    debug=self.debug_mode, log=self.log_folder)
+                                    proximity=proximity, debug=self.debug_mode, log=self.log_folder)
                 results = scan.decode_targets()
                 # analyse the results
                 found = [False for _ in range(len(numbers))]
@@ -732,7 +762,7 @@ def verify():
     # parameters
     min_num = 101  # min number we want
     max_num = 999  # max number we want (may not be achievable)
-    code_base = 6
+    code_base = 8
 
     test_codes_folder = 'codes'
     test_media_folder = 'media'
@@ -742,7 +772,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (7, 6)
+    test_scan_cells = (6, 5)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -776,9 +806,9 @@ def verify():
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [101], 'test-code-101.png')
+        # test.scan(test_codes_folder, [850], 'test-code-850.png')
 
-        test.scan(test_media_folder, [000,101,111,222,323,333,348,424,425,444,478,522,555,568,623,691,759,760,871,898,920], 'distant-000-101-111-222-323-333-348-424-425-444-478-522-555-568-623-691-759-760-871-898-920.jpg')
+        test.scan(test_media_folder, [101,105,111,128,222,302,315,333,416,421,444,494,501,547,555,572,630,773,787,850], 'crumpled-far-101-105-111-128-222-302-315-333-416-421-444-494-501-547-555-572-630-773-787-850.jpg')
 
     except:
         traceback.print_exc()
