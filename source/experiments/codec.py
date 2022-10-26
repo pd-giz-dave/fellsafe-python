@@ -57,20 +57,20 @@ class Codec:
     # encoding is a bit pattern across the data rings for each digit (a 0 at either end is implied)
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     ENCODING = [
-                [0, 0, 0],  # must be first
+                [0, 0, 0],
                 [0, 0, 1],
-                [0, 1, 0],  # transitions to this tend to create a false 3 (1->2) or 6 (4->2)
+                [0, 1, 0],
                 [0, 1, 1],
                 [1, 0, 0],
-                None,       # not allowed, double pulse
+                [1, 0, 1],  # the only one that creates a double radial 'pulse'
                 [1, 1, 0],
-                [1, 1, 1],
+                None,  # [1, 1, 1],
                ]
 
-    ZERO_DIGIT = ENCODING[0]
+    SYNC_DIGIT = ENCODING[5]  # must not be a None above, otherwise arbitrary
     BASE_MAX = len(ENCODING)
     BASE_MIN = 2
-    RINGS_PER_DIGIT = len(ENCODING[0])  # number of rings spanning the variable data portion of a code-word
+    RINGS_PER_DIGIT = len(SYNC_DIGIT)  # number of rings spanning the variable data portion of a code-word
     SPAN = RINGS_PER_DIGIT + EDGE_RINGS  # total span of the code including its margin black rings
     DIGITS = DIGITS_PER_WORD * COPIES_PER_BLOCK  # number of digits in a full code-block (must be odd)
     DOUBT_LIMIT = int(COPIES_PER_BLOCK / 2)  # we want the majority to agree, so doubt must not exceed half
@@ -82,47 +82,82 @@ class Codec:
     # error weights to apply to the ratio components (see Error() function)
     LEAD_ERROR_WEIGHT = 1.0
     HEAD_ERROR_WEIGHT = 1.0
+    GAP_ERROR_WEIGHT  = 1.0
     TAIL_ERROR_WEIGHT = 1.0
     # endregion
 
     class Ratio:
-        """ encapsulate the digit pulse element (lead, head, tail) ratios """
+        """ encapsulate the digit pulse element (lead, head, second_head, tail) ratios """
 
-        def __init__(self, lead: float, head: float, tail: float, parts=None):
-            self.lead = lead  # this is a min/max tuple
-            self.head = head  # ..
-            self.tail = tail  # ....
+        def __init__(self, lead: float, head1: float, gap: float, head2: float, tail: float, parts=None):
+            self.lead  = lead   # this is a min/max tuple
+            self.head1 = head1  # ..
+            self.gap   = gap    # ..
+            self.head2 = head2  # ......
+            self.tail  = tail   # ........
             self.parts = parts  # the lengths used to determine these ratios (params to make_ratio())
 
         def __str__(self):
-            return '(({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}) from {})'.\
-                   format(self.lead[0], self.lead[1], self.head[0], self.head[1], self.tail[0], self.tail[1],
-                          self.parts)
+            return '(({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}) ' \
+                   'from {})'.format(self.lead[0], self.lead[1],
+                                     self.head1[0], self.head1[1],
+                                     self.gap[0], self.gap[1],
+                                     self.head2[0], self.head2[1],
+                                     self.tail[0], self.tail[1],
+                                     self.parts)
 
         def lead_ratio(self):
             """ return the average ratio for the min/max lead """
             return (self.lead[0] + self.lead[1]) / 2
 
-        def head_ratio(self):
-            """ return the average ratio for the min/max head """
-            return (self.head[0] + self.head[1]) / 2
+        def head1_ratio(self):
+            """ return the average ratio for the min/max head1 """
+            return (self.head1[0] + self.head1[1]) / 2
+
+        def gap_ratio(self):
+            """ return the average ratio for the min/max gap """
+            return (self.gap[0] + self.gap[1]) / 2
+
+        def head2_ratio(self):
+            """ return the average ratio for the min/max head2 """
+            return (self.head2[0] + self.head2[1]) / 2
 
         def tail_ratio(self):
             """ return the average ratio for the min/max tail """
             return (self.tail[0] + self.tail[1]) / 2
 
     class Error:
-        """ encapsulate the digit pulse element (lead, head, tail) errors """
+        """ encapsulate the digit pulse element (lead, head1, gap, head2, tail) errors """
 
-        def __init__(self, lead_error: float, head_error: float, tail_error: float):
+        def __init__(self, lead_error: float,
+                           head1_error: float,
+                           gap_error: float,
+                           head2_error: float,
+                           tail_error: float):
             self.lead_error = lead_error
-            self.head_error = head_error
+            self.head1_error = head1_error
+            self.gap_error = gap_error
+            self.head2_error = head2_error
             self.tail_error = tail_error
-            self.error = (self.lead_error + self.head_error + self.tail_error) / 3  # overall average
+            # overall error is the average of the errors that are not zero
+            count = 0
+            for err in [self.lead_error, self.head1_error, self.gap_error, self.head2_error, self.tail_error]:
+                if err > 0:
+                    count += 1
+            if count > 0:
+                self.error = (self.lead_error + self.head1_error + self.gap_error + self.head2_error + self.tail_error) \
+                             / count
+            else:
+                self.error = 0.0
 
         def __str__(self):
-            return '[{:.2f}, {:.2f}, {:.2f}, {:.2f}]'.\
-                   format(self.error, self.lead_error, self.head_error, self.tail_error)
+            return '[{:.2f} from {:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}]'.\
+                   format(self.error,
+                          self.lead_error,
+                          self.head1_error,
+                          self.gap_error,
+                          self.head2_error,
+                          self.tail_error)
 
     def __init__(self, min_num, max_num, base: int = BASE_MAX):
         """ create the valid code set for a number in the range min_num..max_num,
@@ -143,30 +178,29 @@ class Codec:
         # following the blob, the lead ratio is the leading black over central white, the tail ratio is
         # the trailing black over central white
         self.ratios = [None for _ in range(len(Codec.ENCODING))]
-        for digit, rings in enumerate(Codec.ENCODING):
-            if rings is None:
+        for digit, bits in enumerate(Codec.ENCODING):
+            if bits is None:
                 # illegal digit has no ratios
                 continue
-            # count the number of leading black, central white and trailing black elements
-            leading = 1  # inner black is assumed
-            central = 0
-            trailing = 1  # outer black is assumed
-            for ring in rings:
-                if ring == 0 and central == 0:
-                    # one more leading black
-                    leading += 1
-                elif ring == 0:  # and central > 0
-                    # one more trailing black
-                    trailing += 1
-                else:  # ring != 0 and central > 0
-                    # one more central white
-                    central += 1
-            # calculate the lead, head and tail ratios
-            if central == 0:
+            # count the number of elements in each part: lead, head1, gap, head2, tail
+            # we're assuming 3 rings here with at most 2 pulses (i.e. 101)
+            parts = [1, 0, 0, 0, 1]  # lead and tail have one each in the inner and outer black rings
+            need  = [0, 1, 0, 1, 0]  # what bit state needed for each part
+            part  = 0  # which part we are looking for
+            for bit in bits:
+                if bit != need[part]:
+                    part += 1
+                parts[part] += 1
+            # calculate the lead, head1, head2 and tail ratios
+            if parts[1] == 0:
                 # this is a zero, it has no tail
-                leading += trailing
-                trailing = 0
-            self.ratios[digit] = self.make_ratio(leading, trailing, central)
+                parts[0] += parts[4]
+                parts[4]  = 0
+            elif parts[3] == 0:
+                # got no head2, so gap is part of tail
+                parts[4] += parts[2]
+                parts[2]  = 0
+            self.ratios[digit] = self.make_ratio(parts[0], parts[4], parts[1], parts[3], sum(parts))
         # endregion
 
         # region build code tables...
@@ -270,17 +304,17 @@ class Codec:
             # possible doubt values are: 0==all copies the same, 1==1 different, 2+==2+ different
             merged[digit] = (counts[0][1], doubt)
 
-        # step 3 - look for the zero digit
-        zero_at = None
+        # step 3 - look for the sync digit
+        sync_at = None
         for idx, (digit, _) in enumerate(merged):
-            if digit == 0:
-                zero_at = idx
-        if zero_at is None:
+            if Codec.ENCODING[digit] == Codec.SYNC_DIGIT:
+                sync_at = idx
+        if sync_at is None:
             # got a duff code
             return None, Codec.DIGITS_PER_WORD * Codec.COPIES_PER_BLOCK
 
         # step 4 - extract the code and its doubt
-        idx = zero_at  # this is the MS digit
+        idx = sync_at  # this is the MS digit
         code = 0
         doubt = 0
         for _ in range(Codec.DIGITS_PER_WORD):
@@ -300,53 +334,52 @@ class Codec:
                 return ideal
         return None
 
-    def make_ratio(self, lead: float, tail: float, head1: float, head2: float = None, total: float = None) -> Ratio:
+    def make_ratio(self, lead: float, tail: float, head1: float, head2: float, total: float = None) -> Ratio:
         """ given several lengths return the corresponding classification ratios,
             this function is aware of the expected pulse shapes/positions,
             total is the total measured length of the data area (including the marker black rings),
             lead is the length of the leading black area (including the inner black ring),
             head1 is the length of the white area as measured going down from the inner (may be 0),
-            head2 is the length of the white area as measured going up from the outer (may be),
+            head2 is the length of the white area as measured going up from the outer (may be 0),
             tail is the length of the trailing black area (including the outer black ring),
-            if head1 and head2 are distinct we've got a double pulse (which is not expected),
+            if head1 and head2 are distinct we've got a double pulse,
             the result given here can be fed into classify to get a list of likely digits,
             all ratios are in the range 0..1, where 1 is the entire inner to outer span
             """
-        if head2 is None:
-            head2 = head1
         if total is None:
-            total = lead + head1 + tail
-        parts = (lead, head1, tail, head2, total)
+            total = lead + head1 + head2 + tail
+        gap = total - (lead + head1 + head2 + tail)
+        parts = (lead, head1, gap, head2, tail)
+        second_head = 0
         # if head1 == 0 or head2 == 0 or tail == 0:
         #     # special case for a '0'
         #     return Codec.Ratio(1, 0, 0, parts)
         # have we got a double pulse?
         # if we have lead + head1 + head2 + tail will be less than total (by the pulse gap)
-        gap = total - (lead + head1 + head2 + tail)
         if gap > 0:
             # a small gap is treated like noise and the true head is head1 + head2 + gap
-            # a bigger gap is an overlap, we then use the greater of head1 and head2
+            # a bigger gap is a double pulse
             gap_ratio = gap / total
             if gap_ratio > Codec.DOUBLE_HEAD_GAP_LIMIT:
-                # we've got two heads, use the biggest and add the other to the lead or tail
-                if head1 > head2:
-                    # use head1 and add head2 and the gap to the tail
-                    head = head1
-                    tail += (head2 + gap)
-                else:
-                    # use head2 and add head1 and the gap to the lead
-                    head = head2
-                    lead += (head1 + gap)
+                # we've got a double pulse, head1 is the top pulse, head2 is the bottom pulse
+                head = head1
+                second_head = head2
             else:
                 # its a noise gap
                 head = head1 + head2 + gap
-        else:
-            # not a double pulse, consider head to be the average of head1 and head2
-            # and spread the difference between lead and tail
+                gap = 0
+        elif head2 > 0:
+            # not a double pulse but heads overlap, this can happen with distorted images with grey areas,
+            # consider head to be the average of head1 and head2 and spread the difference between lead and tail
             head = (head1 + head2) / 2
             extra = (head - head1) / 2
             lead -= extra
             tail += extra
+            gap = 0
+        else:
+            # not a double pulse and no second head, so no gap either
+            head = head1
+            gap = 0
         # each ratio consists of a min/max pair based on jiggling the lengths by +/- 1 pixel,
         # this is to mitigate quantisation effects when only a few pixels are involved
         if lead > 0:
@@ -357,11 +390,19 @@ class Codec:
             head_ratio = ((head - Codec.RATIO_QUANTA) / total, (head + Codec.RATIO_QUANTA) / total)
         else:
             head_ratio = (0, 0)
+        if gap > 0:
+            gap_ratio = ((gap - Codec.RATIO_QUANTA) / total, (gap + Codec.RATIO_QUANTA) / total)
+        else:
+            gap_ratio = (0, 0)
+        if second_head > 0:
+            second_head_ratio = ((second_head - Codec.RATIO_QUANTA) / total, (second_head + Codec.RATIO_QUANTA) / total)
+        else:
+            second_head_ratio = (0, 0)
         if tail > 0:
             tail_ratio = ((tail - Codec.RATIO_QUANTA) / total, (tail + Codec.RATIO_QUANTA) / total)
         else:
             tail_ratio = (0, 0)
-        return Codec.Ratio(lead_ratio, head_ratio, tail_ratio, parts)
+        return Codec.Ratio(lead_ratio, head_ratio, gap_ratio, second_head_ratio, tail_ratio, parts)
 
     def classify(self, actual):
         """ given a ratio measurement, return a list of the most likely digits it represents with an error,
@@ -399,16 +440,18 @@ class Codec:
                 # error must be in range 0..1 (0=none, 1==lots)
                 return 1 - best_ratio
 
-            lead_err = error_from_ratio(ideal.lead, actual.lead) * Codec.LEAD_ERROR_WEIGHT
-            head_err = error_from_ratio(ideal.head, actual.head) * Codec.HEAD_ERROR_WEIGHT
-            tail_err = error_from_ratio(ideal.tail, actual.tail) * Codec.TAIL_ERROR_WEIGHT
+            lead_err  = error_from_ratio(ideal.lead , actual.lead ) * Codec.LEAD_ERROR_WEIGHT
+            head1_err = error_from_ratio(ideal.head1, actual.head1) * Codec.HEAD_ERROR_WEIGHT
+            gap_err   = error_from_ratio(ideal.gap  , actual.gap  ) * Codec.GAP_ERROR_WEIGHT
+            head2_err = error_from_ratio(ideal.head2, actual.head2) * Codec.HEAD_ERROR_WEIGHT
+            tail_err  = error_from_ratio(ideal.tail , actual.tail ) * Codec.TAIL_ERROR_WEIGHT
 
             # return average error and its components
-            err = Codec.Error(lead_err, head_err, tail_err)
+            err = Codec.Error(lead_err, head1_err, gap_err, head2_err, tail_err)
 
             return err
 
-        digits = [(None, Codec.Error(1, 1, 1)) for _ in range(self.base)]
+        digits = [(None, Codec.Error(1, 1, 1, 1, 1)) for _ in range(self.base)]
         if actual is not None:
             for digit in range(self.base):
                 ideal = self.ratios[digit]
@@ -447,6 +490,14 @@ class Codec:
                 return digit
         return None
 
+    def is_sync_digit(self, this_digit):
+        """ determine if the given digit is the sync digit,
+            this is abstracted so outside callers can use it
+            """
+        if Codec.ENCODING[this_digit] == Codec.SYNC_DIGIT:
+            return True
+        return False
+
     def _rings(self, code_block):
         """ build the data ring encoding for the given code-block,
             code_block must be a list of digits in the range 0..BASE-1,
@@ -484,50 +535,65 @@ class Codec:
 
     def _allowable(self, candidate):
         """ given a code word candidate return True if its allowable as the basis for a code-word,
-            code-words are not allowed if they do not meet our property requirements around the rings,
+            code-words are not allowed if they do not meet our property requirements,
             returns True iff its allowable
             """
 
         digits = self.digits(candidate)
-        first_digit = digits[0]
-        last_digit = first_digit
-        if first_digit != 0:
-            # does not meet first digit must be 0 requirement
-            return False
-        if Codec.ENCODING[first_digit] is None:
-            # not allowed to use this digit
-            return False
-        if Codec.ENCODING[first_digit][0] == 0:
-            has_black = True
-        else:
-            has_black = False
-        has_white = [False for _ in range(len(Codec.ENCODING[0]))]
-        for idx in range(1, len(digits)):
-            digit = digits[idx]
-            if Codec.ENCODING[digit] is None:
+        has_sync = False
+        has_white = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
+        has_black = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
+        for this in range(len(digits)):
+            this_digit = digits[this]
+            if Codec.ENCODING[this_digit] is None:
                 # not allowed to use this digit
                 return False
-            if digit == last_digit:
-                # does not meet adjacent digits must be different requirement
+            if self.is_sync_digit(this_digit):
+                if this != 0:
+                    # does not meet only first digit can be the sync digit requirement (so can sync correctly)
+                    return False
+                has_sync = True
+            before_digit = digits[(this - 1) % len(digits)]
+            if this_digit == before_digit:
+                # does not meet adjacent digits must be different requirement (to ensure sufficient vertical edges)
                 return False
-            if digit == 0:
-                # does not meet only first digit can be 0 requirement
-                return False
-            if Codec.ENCODING[digit][0] == 0:
-                has_black = True
-            for ring in range(len(has_white)):
-                if Codec.ENCODING[digit][ring] == 1:
-                    has_white[ring] = True
-            last_digit = digit
-
-        if not has_black:
-            # does not meet inner data ring must have a black segment requirement
+            for ring in range(Codec.RINGS_PER_DIGIT):
+                # no black bit is allowed to be fully surrounded by white ('cos it can disappear in neighbour smudges)
+                if ring == 0 or ring == (Codec.RINGS_PER_DIGIT - 1):
+                    # we know there is black above the first ring and below the last ring, so not a problem here
+                    pass
+                elif Codec.ENCODING[this_digit][ring] == 0:
+                    # there are 4 neighbours here, at least one must be black
+                    black_neighbours = 0
+                    for x, y in [          (0, -1),
+                                 (-1,  0),          (+1,  0),
+                                           (0, +1)          ]:
+                        test_digit = digits[(this + x) % len(digits)]
+                        test_ring = ring + y
+                        bits = Codec.ENCODING[test_digit]
+                        if bits is None:
+                            # hot an illegal digit
+                            return None
+                        if bits[test_ring] == 0:
+                            black_neighbours += 1
+                    if black_neighbours < 1:
+                        # does not meet black neighbours requirement
+                        return False
+                # there must be at least one black and one white bit per ring (to ensure sufficient horizontal edges)
+                if Codec.ENCODING[this_digit][ring] == 0:
+                    has_black[ring] += 1
+                if Codec.ENCODING[this_digit][ring] == 1:
+                    has_white[ring] += 1
+        if not has_sync:
+            # does not meet first digit must be the sync digiti requirement
             return False
-
+        for is_black in has_black:
+            if is_black == 0:
+                # does not meet each ring must have at least one black segment per copy requirement
+                return False
         for is_white in has_white:
-            if not is_white:
+            if is_white == 0:
                 # does not meet each ring must have at least one white segment per copy requirement
                 return False
-
         # all good
         return True

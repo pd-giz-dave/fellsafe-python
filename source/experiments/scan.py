@@ -61,7 +61,7 @@ class Scan:
     """ this class provides functions to scan an image and extract any codes in it,
         algorithm summary:
             1. blob detect our bullseye
-            2. warp polar around its centre to create a cartesian co-ordinate rectangle
+            2. warp polar around blob centres to create a cartesian co-ordinate rectangle
             3. edge detect all the ring and bit boundaries
             4. extract the bits for each ring segment
             5. decode those bits
@@ -1640,11 +1640,11 @@ class Scan:
         # do the initial edge detection
         extent = make_extent(target, clean=True, context='-warped')
 
-        # if extent.inner_fail is None and extent.outer_fail is None:
-        #     flat, flat_stretch = self._flatten(target, extent)
-        #     extent = make_extent(flat, clean=True, context='-flat')
-        #     max_x, max_y = flat.size()
-        #     return max_x, max_y, stretch_factor * flat_stretch, extent
+        if extent.inner_fail is None and extent.outer_fail is None:
+            flat, flat_stretch = self._flatten(target, extent)
+            extent = make_extent(flat, clean=True, context='-flat')
+            max_x, max_y = flat.size()
+            return max_x, max_y, stretch_factor * flat_stretch, extent
 
         max_x, max_y = target.size()
         return max_x, max_y, stretch_factor, extent
@@ -1682,20 +1682,31 @@ class Scan:
         inner_average, outer_average = self._measure(extent, log=False)
         start_y = int(round(inner_average + 1))
         end_y = int(round(outer_average))
-        span = end_y - start_y + 1
+        span = end_y - start_y
         lead_length = span * ideal.lead_ratio()
-        head_length = span * ideal.head_ratio()
+        head1_length = span * ideal.head1_ratio()
+        gap_length = span * ideal.gap_ratio()
+        head2_length = span * ideal.head2_ratio()
         tail_length = span * ideal.tail_ratio()
-        total = lead_length + head_length + tail_length  # this covers span and is in range 0..?
-        scale = span / total  # so scale by this to get 0..span
-        lead_length *= scale
-        head_length *= scale
-        tail_length *= scale
+        # total = sum(ideal.parts)  # this covers span and is in range 0..?
+        # scale = span / total  # so scale by this to get 0..span
+        # lead_length *= scale
+        # head1_length *= scale
+        # gap_length *= scale
+        # head2_length *= scale
+        # tail_length *= scale
         lead_start = start_y
-        head_start = int(round(start_y + lead_length))
-        tail_start = int(round(head_start + head_length))
-        tail_end = end_y
-        return lead_start, head_start, tail_start, tail_end
+        head1_start = lead_start + lead_length
+        gap_start = head1_start + head1_length
+        head2_start = gap_start + gap_length
+        tail_start = head2_start + head2_length
+        tail_end = tail_start + tail_length
+        return int(round(lead_start)), \
+               int(round(head1_start)), \
+               int(round(gap_start)), \
+               int(round(head2_start)), \
+               int(round(tail_start)), \
+               int(round(tail_end))
 
     def _find_all_digits(self, extent: Extent) -> ([Digit], str):
         """ find all the digits from an analysis of the given extent,
@@ -2050,7 +2061,9 @@ class Scan:
         if self.save_images:
             plot = self.transform.copy(buckets)
             lead_lines = []
-            head_lines = []
+            head1_lines = []
+            gap_lines = []
+            head2_lines = []
             tail_lines = []
             for x, (ratio, slice) in enumerate(slices):
                 if ratio is None:
@@ -2060,12 +2073,16 @@ class Scan:
                 if x_slice is None:
                     # not a valid digit
                     continue
-                lead_start, head_start, tail_start, tail_end = x_slice
-                lead_lines.append((x, lead_start, x, head_start - 1))
-                head_lines.append((x, head_start, x, tail_start - 1))
+                lead_start, head1_start, gap_start, head2_start, tail_start, tail_end = x_slice
+                lead_lines.append((x, lead_start, x, head1_start - 1))
+                head1_lines.append((x, head1_start, x, gap_start - 1))
+                gap_lines.append((x, gap_start, x, head2_start - 1))
+                head2_lines.append((x, head2_start, x, tail_start - 1))
                 tail_lines.append((x, tail_start, x, tail_end - 1))
             plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head_lines, Scan.RED)
+            plot = self._draw_lines(plot, head1_lines, Scan.RED)
+            plot = self._draw_lines(plot, gap_lines, Scan.GREEN)
+            plot = self._draw_lines(plot, head2_lines, Scan.RED)
             plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
             self._unload(plot, '05-slices')
 
@@ -2127,16 +2144,16 @@ class Scan:
         # 2=split, and 1=no change
         digits_list = [[options] for options in digits]
 
-        # zero detection is relatively robust, so we expect to find exactly Scan.COPIES
+        # we expect to find Scan.COPIES of the sync digit
         copies = []
         for x, digit in enumerate(digits):
-            if digit.digit == 0:
+            if self.decoder.is_sync_digit(digit.digit):
                 copies.append([x])
         if len(copies) < Scan.COPIES:
             # not enough zeroes - that's a show-stopper
-            reason = 'too few zeroes'
+            reason = 'too few syncs'
         else:
-            # if too many zeroes - dump the smallest with the most error
+            # if too many sync digits - dump the smallest with the most error
             while len(copies) > Scan.COPIES:
                 smallest_x = 0  # index into copy
                 for x in range(1, len(copies)):
@@ -2154,7 +2171,7 @@ class Scan:
                     if header is not None:
                         self._log(header)
                         header = None
-                    self._log('    {}: dropping excess zero {}'.
+                    self._log('    {}: dropping excess sync {}'.
                               format(smallest_xx, digits[smallest_xx]))
                 digits_list[smallest_xx] = None
                 del copies[smallest_x]
@@ -2163,7 +2180,7 @@ class Scan:
             boxes, reason = self._find_data_boxes(extent, digits, copies)  # ToDo: HACK
             if reason is None:
                 bits = self._decode_data_boxes(boxes, extent)  # ToDo: HACK
-            # find the actual digits between the zeroes
+            # find the actual digits between the syncs
             reason = None
             for copy in copies:
                 xx = copy[0]
@@ -2172,7 +2189,7 @@ class Scan:
                     if digits_list[xx] is None:
                         # this one has been dumped
                         continue
-                    if digits[xx].digit == 0:
+                    if self.decoder.is_sync_digit(digits[xx].digit):
                         # ran into next copy
                         break
                     copy.append(xx)
@@ -2292,21 +2309,27 @@ class Scan:
             max_x, max_y = buckets.size()
             plot = self.transform.copy(buckets)
             lead_lines = []
-            head_lines = []
+            head1_lines = []
+            gap_lines = []
+            head2_lines = []
             tail_lines = []
             for digit in best_digits:
                 digit_slice = self._make_slice(digit.digit, extent)
                 if digit_slice is None:
                     # not a valid digit
                     continue
-                lead_start, head_start, tail_start, tail_end = digit_slice
+                lead_start, head1_start, gap_start, head2_start, tail_start, tail_end = digit_slice
                 for sample in range(digit.samples):
                     x = (digit.start + sample) % max_x
-                    lead_lines.append((x, lead_start, x, head_start - 1))
-                    head_lines.append((x, head_start, x, tail_start - 1))
+                    lead_lines.append((x, lead_start, x, head1_start - 1))
+                    head1_lines.append((x, head1_start, x, gap_start - 1))
+                    gap_lines.append((x, gap_start, x, head2_start - 1))
+                    head2_lines.append((x, head2_start, x, tail_start - 1))
                     tail_lines.append((x, tail_start, x, tail_end - 1))
             plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head_lines, Scan.RED)
+            plot = self._draw_lines(plot, head1_lines, Scan.RED)
+            plot = self._draw_lines(plot, gap_lines, Scan.GREEN)
+            plot = self._draw_lines(plot, head2_lines, Scan.RED)
             plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
             self._unload(plot, '06-digits')
 
@@ -2485,13 +2508,12 @@ class Scan:
 
         # ToDo: move this to a Scan constant
         MIN_VERTICAL_EDGE_LENGTH = 2  # vertical edges of less than this many pixels are ignored
-        MAX_V_NEIGHBOUR_GAP = 2  # max x pixel gap between neighbour vertical edges where merging is allowed
-        MAX_V_END_GAP = 1  # max y pixel gap between neighbour vertical edges where merging is allowed
+        MAX_VERT_X_GAP = 2.5  # max x pixel gap between neighbour vertical edges where merging is allowed
+        MAX_VERT_Y_GAP = 1  # max y pixel gap between neighbour vertical edges where merging is allowed
         MIN_HORIZONTAL_EDGE_LENGTH = 2  # horizontal edges of less than this many pixels are ignored
         HORIZONTAL_Y_OFFSETS = [0]  # ToDo: HACK-->[0, -1, +1]  # y offsets used for following horizontal edges
-        MAX_H_POINT_GAP = 1.5  # max y pixel gap between neighbour horizontal edge points where merging is allowed
+        MAX_HORIZ_Y_GAP = 2.5  # max y pixel gap between neighbour horizontal edge points where merging is allowed
         EXTENT_BORDER = 2  # pixels at inner/outer extent that are considered to be black
-        TREAT_GREY_AS = MIN_LUMINANCE  # how to interpret grey pixels, MIN_LUMINANCE, MID_LUMINANCE or MAX_LUMINANCE
 
         inner = extent.inner
         outer = extent.outer
@@ -2512,10 +2534,10 @@ class Scan:
                 x_gap = wrapped_gap(that_x, this_x, max_x)
                 if x_gap < 0:
                     x_gap = 0 - x_gap  # we've wrapped
-                if x_gap > MAX_V_NEIGHBOUR_GAP:
+                if x_gap > MAX_VERT_X_GAP:
                     # too far way to merge
                     return None
-                if (this_end_y + MAX_V_END_GAP) < that_start_y or (that_end_y + MAX_V_END_GAP) < this_start_y:
+                if (this_end_y + MAX_VERT_Y_GAP) < that_start_y or (that_end_y + MAX_VERT_Y_GAP) < this_start_y:
                     # they do not overlap or (nearly) abutt
                     return None
                 # merge these
@@ -2538,8 +2560,8 @@ class Scan:
 
             for this_edge, (this_type, this_start_y, this_end_y) in enumerate(this_edges):
                 for next_edge, (next_type, next_start_y, next_end_y) in enumerate(next_edges):
-                    if this_x == next_x and this_edge == next_edge:
-                        # ignore self (for case where looking to merge within the same x)
+                    if this_idx == next_idx and this_edge == next_edge:
+                        # ignore self
                         continue
                     if this_type != next_type:
                         # not same type
@@ -2566,7 +2588,7 @@ class Scan:
                         # in which case we update it, otherwise we create a new x in digit_edges
                         # find index in digit_edges to put this merged x
                         target_idx = None
-                        for idx in range(this_idx + 1, next_idx + 1):  # we know its not this_idx, hence +1
+                        for idx in range(this_idx, next_idx + 1):
                             idx = idx % len(digit_edges)
                             target_x, target_edges = digit_edges[idx]
                             if target_x == merged_x:
@@ -2590,6 +2612,7 @@ class Scan:
                                             format(this_x, next_x, merged_x))
                     # note change for caller
                     return True
+
             # nothing merged
             return False
 
@@ -2607,65 +2630,76 @@ class Scan:
         if reason is None:
             # region Phase 1 - find vertical edges...
             # vertical edges represent potential digit boundaries
+            # we do two passes, treating gray as black in one pass and as white in the other
             digit_edges = []  # vertical edges as [x, [type, start y, end y]]
-            for x in range(max_x):
-                good_edges = []  # edge at this x as [type, start y, end y]
-                start_y = inner[x] + 1  # get into the first black pixel (inner edge is the last white pixel)
-                end_y = outer[x]  # end_y is exclusive (outer edge is the first white pixel)
-                # Don't do the below 2 lines, it obscures legitimate edges close to the extent edges
-                # start_y += EXTENT_BORDER  # get over the no-go zone
-                # end_y -= EXTENT_BORDER  # get over the no-go zone
-                span_type = None
-                span_start = None
-                span_size = None
-                for y in range(start_y, end_y):
-                    here_pixel = buckets.getpixel(x, y)
-                    if here_pixel == MID_LUMINANCE:
-                        # consider grey as directed
-                        here_pixel = TREAT_GREY_AS
-                    left_pixel = buckets.getpixel((x - 1) % max_x, y)
-                    if left_pixel == MID_LUMINANCE:
-                        # consider grey as directed
-                        left_pixel = TREAT_GREY_AS
-                    if left_pixel != here_pixel:
-                        # got the beginnings or continuation of a vertical edge
-                        if span_start is None:
-                            # its a new edge
-                            span_start = y
-                            span_size = 1
-                            if left_pixel > here_pixel:
-                                span_type = Scan.FALLING
-                            else:
-                                span_type = Scan.RISING
-                            continue
-                        if left_pixel > here_pixel and span_type == Scan.FALLING:
-                            # still in a falling edge
-                            span_size += 1
-                            continue
-                        if here_pixel > left_pixel and span_type == Scan.RISING:
-                            # still in a rising edge
-                            span_size += 1
-                            continue
-                    if span_start is None:  # and left_pixel == here_pixel:
-                        # we're nowhere (yet)
-                        continue
-                    # got end of a vertical edge, keep it if its long enough
-                    if span_size >= MIN_VERTICAL_EDGE_LENGTH:
-                        # qualifies
-                        good_edges.append((span_type, span_start, span_start + span_size))
-                    # look for next
+            for grey_as in [MIN_LUMINANCE, MAX_LUMINANCE]:
+                for x in range(max_x):
+                    good_edges = []  # edge at this x as [type, start y, end y]
+                    start_y = inner[x] + 1  # get into the first black pixel (inner edge is the last white pixel)
+                    end_y = outer[x]  # end_y is exclusive (outer edge is the first white pixel)
+                    # Don't do the below 2 lines, it obscures legitimate edges close to the extent edges
+                    # start_y += EXTENT_BORDER  # get over the no-go zone
+                    # end_y -= EXTENT_BORDER  # get over the no-go zone
                     span_type = None
                     span_start = None
                     span_size = None
-                if span_start is not None:
-                    # got end of a vertical edge at the end
-                    # does this qualify?
-                    if span_size >= MIN_VERTICAL_EDGE_LENGTH:
-                        # qualifies
-                        good_edges.append((span_type, span_start, span_start + span_size))
-                if len(good_edges) > 0:
-                    digit_edges.append([x, good_edges])
+                    for y in range(start_y, end_y):
+                        here_pixel = buckets.getpixel(x, y)
+                        if here_pixel == MID_LUMINANCE:
+                            # consider grey as directed
+                            here_pixel = grey_as
+                        left_pixel = buckets.getpixel((x - 1) % max_x, y)
+                        if left_pixel == MID_LUMINANCE:
+                            # consider grey as directed
+                            left_pixel = grey_as
+                        if left_pixel != here_pixel:
+                            # got the beginnings or continuation of a vertical edge
+                            if span_start is None:
+                                # its a new edge
+                                span_start = y
+                                span_size = 1
+                                if left_pixel > here_pixel:
+                                    span_type = Scan.FALLING
+                                else:
+                                    span_type = Scan.RISING
+                                continue
+                            if left_pixel > here_pixel and span_type == Scan.FALLING:
+                                # still in a falling edge
+                                span_size += 1
+                                continue
+                            if here_pixel > left_pixel and span_type == Scan.RISING:
+                                # still in a rising edge
+                                span_size += 1
+                                continue
+                        if span_start is None:  # and left_pixel == here_pixel:
+                            # we're nowhere (yet)
+                            continue
+                        # got end of a vertical edge, keep it if its long enough
+                        if span_size >= MIN_VERTICAL_EDGE_LENGTH:
+                            # qualifies
+                            good_edges.append((span_type, span_start, span_start + span_size))
+                        # look for next
+                        span_type = None
+                        span_start = None
+                        span_size = None
+                    if span_start is not None:
+                        # got end of a vertical edge at the end
+                        # does this qualify?
+                        if span_size >= MIN_VERTICAL_EDGE_LENGTH:
+                            # qualifies
+                            good_edges.append((span_type, span_start, span_start + span_size))
+                    if len(good_edges) > 0:
+                        digit_edges.append([x, good_edges])
             # digit edges is now a list of all vertical edges
+            # put into x,y for merging purposes
+            digit_edges.sort(key=lambda e: (e[0], e[1][0][1]))
+            # region remove duplicates...
+            # if there are no greys we'll end of up with every edge duplicated, find and drop those
+            for edge in range(len(digit_edges) - 1, 0, -1):  # NB: stop 1 short 'cos we address -1
+                if digit_edges[edge] == digit_edges[edge - 1]:
+                    # got a dup
+                    del digit_edges[edge]
+            # endregion
             if self.logging:
                 self._log('find_data_boxes: discovered digit_edges (before merging):')
                 for x, edges in digit_edges:
@@ -2682,10 +2716,14 @@ class Scan:
             changed = True
             while changed:
                 changed = False
-                for this_idx in range(len(digit_edges) - 1):
-                    # look forward N spans, where N is the max neighbour gap in x, including self
-                    # this is OTT but is guaranteed to cover the required x span
-                    for next_idx in range(this_idx, this_idx + MAX_V_NEIGHBOUR_GAP):
+                for this_idx in range(len(digit_edges)):
+                    if len(digit_edges[this_idx]) == 0:
+                        # ignore empty list
+                        continue
+                    for next_idx in range(len(digit_edges)):
+                        if len(digit_edges[next_idx]) == 0:
+                            # ignore empty list
+                            continue
                         changed = merge_y_edges(digit_edges, this_idx, next_idx)
                         if changed:
                             break
@@ -2702,125 +2740,136 @@ class Scan:
         if reason is None:
             # region Phase 3 - find horizontal edges...
             # horizontal edges represent potential ring boundaries
+            # we do two passes, treating gray as black in one pass and as white in the other
             ring_edges = []  # discovered edges
-            used = [[False for _ in range(max_y)] for _ in range(max_x)]  # been here before detector
-            if EXTENT_BORDER > 0:
-                # region consider all extent border pixels to be 'used' to stop them being considered...
+            for grey_as in [MIN_LUMINANCE, MAX_LUMINANCE]:
+                used = [[False for _ in range(max_y)] for _ in range(max_x)]  # been here before detector
+                if EXTENT_BORDER > 0:
+                    # region consider all extent border pixels to be 'used' to stop them being considered...
+                    for x in range(max_x):
+                        for y in range(max_y):
+                            if y <= inner[x] + (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
+                                used[x][y] = True
+                            if y >= outer[x] - (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
+                                used[x][y] = True
+                    # endregion
+                # region find an initial x to scan from...
+                # this must be a place where there is no edge, i.e. within a zero,
+                # we look for 2 consecutive x's where there is nothing between the inner and outer edge,
+                # this is required to allow for edges that wrap, we must not start in the middle of a wrapped edge
+                start_x = None
                 for x in range(max_x):
-                    for y in range(max_y):
-                        if y <= inner[x] + (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
-                            used[x][y] = True
-                        if y >= outer[x] - (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
-                            used[x][y] = True
-                # endregion
-            # region find an initial x to scan from...
-            # this must be a place where there is no edge, i.e. within a zero,
-            # we look for 2 consecutive x's where there is nothing between the inner and outer edge,
-            # this is required to allow for edges that wrap, we must not start in the middle of a wrapped edge
-            start_x = None
-            for x in range(max_x):
-                empty = True
-                for dx in [0, 1]:
-                    try_x = (x + dx) % max_x
-                    for y in range(inner[try_x] + EXTENT_BORDER + 1, outer[try_x] - EXTENT_BORDER - 1):
-                        pixel = buckets.getpixel(x, y)
-                        if pixel == MID_LUMINANCE:
-                            # treat grey as directed
-                            pixel = TREAT_GREY_AS
-                        if pixel != MIN_LUMINANCE:
-                            # something here, so look at next x
-                            empty = False
+                    empty = True
+                    for dx in [0, 1]:
+                        try_x = (x + dx) % max_x
+                        for y in range(inner[try_x] + EXTENT_BORDER + 1, outer[try_x] - EXTENT_BORDER - 1):
+                            pixel = buckets.getpixel(x, y)
+                            if pixel == MID_LUMINANCE:
+                                # treat grey as directed
+                                pixel = grey_as
+                            if pixel != MIN_LUMINANCE:
+                                # something here, so look at next x
+                                empty = False
+                                break
+                        if not empty:
                             break
-                    if not empty:
+                    if empty:
+                        start_x = x
                         break
-                if empty:
-                    start_x = x
-                    break
-            if start_x is None:
-                # this means there are no zeroes, so we're looking at junk
-                reason = 'no zeroes'
-            # endregion
-            if reason is None:
-                for dx in range(start_x, start_x + max_x):
-                    dx = dx % max_x
-                    start_y = inner[dx] + 1  # +1 to get past the inner edge white
-                    end_y = outer[dx]  # not +1 'cos want exclusive y range
-                    # look for a black to white or white to black transition in y at this x
-                    for y in range(start_y + 1, end_y):  # +1 'cos we look above
-                        edge_begin = x
-                        edge_points = []
-                        edge_type = None
-                        last_y = y  # note our starting point
-                        for x in range(dx, dx + max_x):
-                            x %= max_x
-                            use_y = None
-                            for dy in HORIZONTAL_Y_OFFSETS:
-                                y = last_y + dy
-                                above_pixel = buckets.getpixel(x, y - 1)
-                                if above_pixel == MID_LUMINANCE:
-                                    # treat grey as directed
-                                    above_pixel = TREAT_GREY_AS
-                                here_pixel = buckets.getpixel(x, y)
-                                if here_pixel == MID_LUMINANCE:
-                                    # treat grey as directed
-                                    here_pixel = TREAT_GREY_AS
-                                if here_pixel != above_pixel:
-                                    use_y = y  # note this candidate
+                if start_x is None:
+                    # this means there are no zeroes, so we're looking at junk
+                    reason = 'no zeroes'
+                # endregion
+                if reason is None:
+                    for dx in range(start_x, start_x + max_x):
+                        dx = dx % max_x
+                        start_y = inner[dx] + 1  # +1 to get past the inner edge white
+                        end_y = outer[dx]  # not +1 'cos want exclusive y range
+                        # look for a black to white or white to black transition in y at this x
+                        for y in range(start_y + 1, end_y):  # +1 'cos we look above
+                            edge_begin = x
+                            edge_points = []
+                            edge_type = None
+                            last_y = y  # note our starting point
+                            for x in range(dx, dx + max_x):
+                                x %= max_x
+                                use_y = None
+                                for dy in HORIZONTAL_Y_OFFSETS:
+                                    y = last_y + dy
+                                    above_pixel = buckets.getpixel(x, y - 1)
+                                    if above_pixel == MID_LUMINANCE:
+                                        # treat grey as directed
+                                        above_pixel = grey_as
+                                    here_pixel = buckets.getpixel(x, y)
+                                    if here_pixel == MID_LUMINANCE:
+                                        # treat grey as directed
+                                        here_pixel = grey_as
+                                    if here_pixel != above_pixel:
+                                        use_y = y  # note this candidate
+                                        break
+                                if use_y is None:
+                                    # no edge candidate here
                                     break
-                            if use_y is None:
-                                # no edge candidate here
-                                break
-                            # found the next y for this edge
-                            if used[x][use_y]:
-                                # been here before
-                                break
-                            # region check/set edge type
-                            if above_pixel > here_pixel:
-                                # falling edge
-                                if edge_type is None:
-                                    # lock onto a falling edge
-                                    edge_type = Scan.FALLING
-                                elif edge_type != Scan.FALLING:
-                                    # run into a different edge type
-                                    use_y = None
+                                # found the next y for this edge
+                                if used[x][use_y]:
+                                    # been here before
                                     break
+                                # region check/set edge type
+                                if above_pixel > here_pixel:
+                                    # falling edge
+                                    if edge_type is None:
+                                        # lock onto a falling edge
+                                        edge_type = Scan.FALLING
+                                    elif edge_type != Scan.FALLING:
+                                        # run into a different edge type
+                                        use_y = None
+                                        break
+                                else:
+                                    # rising edge
+                                    if edge_type is None:
+                                        # lock onto a rising edge
+                                        edge_type = Scan.RISING
+                                    elif edge_type != Scan.RISING:
+                                        # run into a different edge type
+                                        use_y = None
+                                        break
+                                # endregion
+                                edge_points.append(use_y)
+                                used[x][use_y] = True  # note been here, so we don't start a new edge from here again
+                                last_y = use_y  # note where we are for looking at the next y
+                            if len(edge_points) < MIN_HORIZONTAL_EDGE_LENGTH:
+                                # too small to consider
+                                pass
                             else:
-                                # rising edge
-                                if edge_type is None:
-                                    # lock onto a rising edge
-                                    edge_type = Scan.RISING
-                                elif edge_type != Scan.RISING:
-                                    # run into a different edge type
-                                    use_y = None
-                                    break
-                            # endregion
-                            edge_points.append(use_y)
-                            used[x][use_y] = True  # note been here, so we don't start a new edge from here again
-                            last_y = use_y  # note where we are for looking at the next y
-                        if len(edge_points) < MIN_HORIZONTAL_EDGE_LENGTH:
-                            # too small to consider
-                            pass
-                        else:
-                            # note this edge
-                            ring_edges.append([edge_type, edge_begin, edge_points])
-                        # carry on looking for more edges at this x
+                                # note this edge
+                                ring_edges.append([edge_type, edge_begin, edge_points])
+                            # carry on looking for more edges at this x
+                            continue
+                        # continue looking for edges at the next x
                         continue
-                    # continue looking for edges at the next x
-                    continue
-                if self.logging:
-                    # sort into x,y to make looking at logs easier
-                    ring_edges.sort(key=lambda e: (e[1], e[2][0]))
-                    self._log('find_data_boxes: discovered ring edges (before merging):')
-                    for edge in ring_edges:
-                        self._log('    {}'.format(edge))
+            # region remove duplicates...
+            # if there are no greys we'll end of up with every edge duplicated, find and drop those
+            # sort into x order, so we can easily find dups
+            ring_edges.sort(key=lambda e: (e[1], e[2][0]))
+            for edge in range(len(ring_edges)-1, 0, -1):  # NB: stop 1 short 'cos we address -1
+                if ring_edges[edge] == ring_edges[edge-1]:
+                    # got a dup
+                    del ring_edges[edge]
+            # endregion
+            if self.logging:
+                self._log('find_data_boxes: discovered ring edges (before merging):')
+                for edge in ring_edges:
+                    self._log('    {}'.format(edge))
             # endregion
         if reason is None:
             # region Phase 4 - merge neighbour horizontal edges...
             # any edges within some limit of each other are merged wrt their start and points
             # for each edge we search for an overlapping edge and try to merge it
             # this is a crude N*N loop, but N is small so OK
+            passes = 0
             changed = True
             while changed:
+                passes += 1
                 changed = False
                 for edge_1 in range(len(ring_edges)):
                     # get this edge stats
@@ -2829,7 +2878,7 @@ class Scan:
                     edge_1_size = len(edge_1_points)
                     edge_1_end = edge_1_start + edge_1_size  # do not wrap this
                     # look for another edge that overlaps this one in x
-                    for edge_2 in range(edge_1 + 1, len(ring_edges) - 1):  # scan all but edge_1
+                    for edge_2 in range((edge_1 + 1) % len(ring_edges), len(ring_edges) - 1):  # scan all but edge_1
                         edge_2_edge = ring_edges[edge_2 % len(ring_edges)]
                         edge_2_type, edge_2_start, edge_2_points = edge_2_edge
                         edge_2_size = len(edge_2_points)
@@ -2839,12 +2888,12 @@ class Scan:
                             # different type
                             continue
                         # pre-filter for no overlap
-                        if edge_1_end < edge_2_start:  # NB: edge_1_end == edge_2_start means they abutt, we want those
-                            # does not overlap
-                            continue
-                        if edge_2_end < edge_1_start:  # NB: edge_2_end == edge_1_start means they abutt, we want those
-                            # does not overlap
-                            continue
+                        # if edge_1_end < edge_2_start:  # NB: edge_1_end == edge_2_start means they abutt, we want those
+                        #     # does not overlap
+                        #     continue
+                        # if edge_2_end < edge_1_start:  # NB: edge_2_end == edge_1_start means they abutt, we want those
+                        #     # does not overlap
+                        #     continue
                         # got a potential overlap in x, try to merge
                         # build combined points list
                         line = [[None, None] for _ in range(max_x)]
@@ -2853,8 +2902,20 @@ class Scan:
                         for dx in range(len(edge_2_points)):
                             line[(edge_2_start + dx) % max_x][1] = edge_2_points[dx]
                         # merge overlapping 'close' points
-                        merged = 0
+                        # find the start scan point (first None, None position)
+                        start_x = None
                         for x, (y1, y2) in enumerate(line):
+                            if y1 is None and y2 is None:
+                                # found it
+                                start_x = x
+                                break
+                        if start_x is None:
+                            # got a full line!!
+                            start_x = 0
+                        # now scan for our points
+                        merged = 0
+                        for x in range(start_x, start_x + max_x):
+                            y1, y2 = line[x % max_x]
                             # merge if y1 'close' to y2
                             if y1 is None and y2 is None:
                                 # not in either edge
@@ -2868,7 +2929,7 @@ class Scan:
                                 y2 = prev_y2
                             if y1 is not None and y2 is not None:
                                 gap = max(y1, y2) - min(y1, y2)
-                                if gap > MAX_H_POINT_GAP:
+                                if gap > MAX_HORIZ_Y_GAP:
                                     # points do not merge
                                     continue
                                 # merge as the average
@@ -2876,16 +2937,16 @@ class Scan:
                                 # only merge if the merge point is not too far from its neighbours
                                 if prev_y1 is not None:
                                     gap = max(merged_y, prev_y1) - min(merged_y, prev_y1)
-                                    if gap > MAX_H_POINT_GAP:
+                                    if gap > MAX_HORIZ_Y_GAP:
                                         # neighbour gap too big
                                         continue
                                 if prev_y2 is not None:
                                     gap = max(merged_y, prev_y2) - min(merged_y, prev_y2)
-                                    if gap > MAX_H_POINT_GAP:
+                                    if gap > MAX_HORIZ_Y_GAP:
                                         # neighbour gap too big
                                         continue
                                 # merged point OK
-                                line[x] = [merged_y, merged_y]
+                                line[x % max_x] = [merged_y, merged_y]
                                 merged += 1
                         if merged == 0:
                             # edge does not merge
@@ -2948,13 +3009,13 @@ class Scan:
                     self._log('    {}'.format(edge))
             # endregion
         if reason is None:
-            pass  # ToDo: as below
-            # between each vertical edge pair of different types, for each x that has one leading *and* one trailing
-            # ring edge classify its 'ratio' as a digit, if no ring edges its a zero, if distance between ring edges
-            # is too small, ignore it, each set of digits between vertical edge pairs must resolve to a single digit,
-            # pick the 'best' with a doubt that is a ratio of the count of that against the rest,
-            # if the gap between a vertical edge pair is too small, ignore it
-            # if trailing ring edge with no leading, estimate it as line between nearest left and right neighbour
+            # region Phase 5 - find likely digit edges
+            pass  # ToDo: find likely digit edges
+            # endregion
+        if reason is None:
+            # region Phase 6 - find likely ring edges
+            pass  # ToDo: find likely ring edges
+            # endregion
         if self.save_images:
             # show ideal boxes (as in blocks and ring_edge_estimates),
             # and discovered boxes (as in digit_edges and ring_edges)
@@ -2982,76 +3043,7 @@ class Scan:
         ###############################################
         # ToDo: HACK old scheme based on guessing
         ###############################################
-        inner = extent.inner
-        outer = extent.outer
-        buckets = extent.buckets
-        max_x, max_y = buckets.size()
-        reason = None
-        boxes = []
-        if reason is None:
-            # region Phase 1 - estimate where the bit boundaries should be based on the zero positions...
-            for z in range(len(zeroes)):
-                zero = digits[zeroes[z][0]]
-                digit_start = (zero.start + zero.samples) % max_x
-                last_digit = digits[zeroes[(z + 1) % len(zeroes)][0]]
-                if last_digit.start < digit_start:
-                    # we've wrapped
-                    digit_width = (last_digit.start + max_x) - digit_start
-                else:
-                    digit_width = last_digit.start - digit_start
-                digit_width /= (Scan.DIGITS_PER_NUM - 1)  # -1 'cos we're excluding the zero
-                if digit_width < 1:
-                    # not enough room for digits, so this is junk (it means the zeroes are too big)
-                    reason = 'zeroes too big'
-                    break
-                boxes.append(Scan.Box(zero.start, zero.samples))
-                edge = []
-                for _ in range(Scan.DIGITS_PER_NUM - 1):  # -1 'cos already done the zero
-                    edge.append(int(round(digit_start)))  # ignore wrapping for now
-                    digit_start += digit_width
-                edge.append(last_digit.start)  # so we can always use index+1 to calculate true width
-                for digit in range(Scan.DIGITS_PER_NUM - 1):  # -1 'cos already done the zero
-                    boxes.append(Scan.Box(edge[digit] % max_x, (edge[digit + 1] - edge[digit]) % max_x))
-            # endregion
-        if reason is None:
-            # region Phase 2 - estimate where the ring boundaries should be based on the inner and outer edge positions...
-            for box in boxes:
-                edges = [[] for _ in range(Scan.NUM_DATA_RINGS)]
-                for x in range(box.start, box.start + box.span):
-                    y_start = inner[x % max_x] + 1  # +1 to get into the black
-                    y_end = outer[x % max_x]
-                    ring_width = (y_end - y_start) / Scan.INNER_OUTER_SPAN_RINGS
-                    if ring_width < 1:
-                        # not enough room for rings, so this is junk
-                        reason = 'data too narrow'
-                        break
-                    edge = []
-                    for _ in range(Scan.INNER_BLACK_RINGS):  # skip inner black ring(s)
-                        y_start += ring_width
-                    for _ in range(Scan.NUM_DATA_RINGS + 1):  # +1 to get end of final ring
-                        edge.append(int(round(y_start)))  # leading edge
-                        y_start += ring_width
-                    for ring in range(Scan.NUM_DATA_RINGS):
-                        edges[ring].append([edge[ring], edge[ring + 1]])  # trailing edge
-                for edge in edges:
-                    box.add_edge(edge)
-            # endregion
-
-        if self.logging:
-            # put boxes into start order - makes matching diagnostic images with the logs easier
-            boxes.sort(key=lambda b: b.start)
-
-        if self.save_images:
-            # draw data boxes
-            plot = self._draw_edges((extent.falling_edges, extent.rising_edges), buckets, extent)
-            plot = self._draw_boxes(boxes, plot)
-            self._unload(plot, '06-boxes')
-
-        if self.logging:
-            if reason is not None:
-                self._log('find_data_boxes: failed: {}'.format(reason))
-
-        return boxes, reason
+        return self.__find_data_boxes(extent, digits, zeroes)
 
     def __find_data_boxes(self, extent: Extent, digits: [Digit], zeroes: [[int]]) -> ([Box], str):
         """ find the boundaries for all the data boxes given an extent a digit list and zero positions,

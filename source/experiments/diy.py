@@ -185,6 +185,8 @@ class Test:
             if self.max_num is not None:
                 for n in range(self.min_num, self.max_num + 1):
                     rings = self.codec.build(n)
+                    if rings is None:
+                        continue  # not a valid code
                     # do a random rotation to test it gets re-aligned correctly
                     rotation = random.randrange(0, codec.Codec.DIGITS - 1)
                     for ring in range(len(rings)):
@@ -242,19 +244,22 @@ class Test:
             max_span = self.cells[1] * codec.Codec.SPAN
             min_length = 1
             max_length = max_span - min_length + 1
-            # generate all possible ratios
+            # generate all possible ratios (lead, head1, gap, head2, tail within max_length)
+            # all lengths must sum to max_length, lead cannot be 0, all others can
             ratios = []
-            ratios.append(self.codec.make_ratio(max_length, 0, 0))  # do 0 separately
+            ratios.append(self.codec.make_ratio(max_length, 0, 0, 0))  # do 0 separately (all lengths are 0 except lead)
             for lead_length in range(min_length, max_length):  # one short on max 'cos already done 0
-                for head_length in range(min_length, (max_span - lead_length) + 1):
-                    tail_length = max_length - (lead_length + head_length)
-                    if tail_length < min_length or tail_length == 0:
-                        # not allowed
-                        continue
-                    if head_length == 0:
-                        # this is a zero (already covered)
-                        continue
-                    ratios.append(self.codec.make_ratio(lead_length, tail_length, head_length))
+                lead_residue = max_length - lead_length
+                for head1_length in range(lead_residue):
+                    head1_residue = lead_residue - head1_length
+                    for gap_length in range(head1_residue):
+                        gap_residue = head1_residue - gap_length
+                        for head2_length in range(gap_residue):
+                            head2_residue = gap_residue - head2_length
+                            for tail_length in range(head2_residue):
+                                ratios.append(self.codec.make_ratio(lead_length, tail_length,
+                                                                    head1_length, head2_length,
+                                                                    max_length))
             digits = {}
             for ratio in ratios:
                 candidates = self.codec.classify(ratio)
@@ -269,20 +274,32 @@ class Test:
                 # find the ratio span limits for each option
                 min_lead = None
                 max_lead = None
-                min_head = None
-                max_head = None
+                min_head1 = None
+                max_head1 = None
+                min_gap = None
+                max_gap = None
+                min_head2 = None
+                max_head2 = None
                 min_tail = None
                 max_tail = None
                 min_lead_digit = None
                 max_lead_digit = None
-                min_head_digit = None
-                max_head_digit = None
+                min_head1_digit = None
+                max_head1_digit = None
+                min_gap_digit = None
+                max_gap_digit = None
+                min_head2_digit = None
+                max_head2_digit = None
                 min_tail_digit = None
                 max_tail_digit = None
                 min_lead_err = None
                 max_lead_err = None
-                min_head_err = None
-                max_head_err = None
+                min_head1_err = None
+                max_head1_err = None
+                min_gap_err = None
+                max_gap_err = None
+                min_head2_err = None
+                max_head2_err = None
                 min_tail_err = None
                 max_tail_err = None
                 min_error = None
@@ -308,14 +325,30 @@ class Test:
                         max_lead = ratio
                         max_lead_digit = candidates[1][0]
                         max_lead_err = candidates[1][1]
-                    if min_head is None or ratio.head_ratio() < min_head.head_ratio():
-                        min_head = ratio
-                        min_head_digit = candidates[1][0]
-                        min_head_err = candidates[1][1]
-                    if max_head is None or ratio.head_ratio() > max_head.head_ratio():
-                        max_head = ratio
-                        max_head_digit = candidates[1][0]
-                        max_head_err = candidates[1][1]
+                    if min_head1 is None or ratio.head1_ratio() < min_head1.head1_ratio():
+                        min_head1 = ratio
+                        min_head1_digit = candidates[1][0]
+                        min_head1_err = candidates[1][1]
+                    if max_head1 is None or ratio.head1_ratio() > max_head1.head1_ratio():
+                        max_head1 = ratio
+                        max_head1_digit = candidates[1][0]
+                        max_head1_err = candidates[1][1]
+                    if min_gap is None or ratio.gap_ratio() < min_gap.gap_ratio():
+                        min_gap = ratio
+                        min_gap_digit = candidates[1][0]
+                        min_gap_err = candidates[1][1]
+                    if max_gap is None or ratio.gap_ratio() > max_gap.gap_ratio():
+                        max_gap = ratio
+                        max_gap_digit = candidates[1][0]
+                        max_gap_err = candidates[1][1]
+                    if min_head2 is None or ratio.head2_ratio() < min_head2.head2_ratio():
+                        min_head2 = ratio
+                        min_head2_digit = candidates[1][0]
+                        min_head2_err = candidates[1][1]
+                    if max_head2 is None or ratio.head2_ratio() > max_head2.head2_ratio():
+                        max_head2 = ratio
+                        max_head2_digit = candidates[1][0]
+                        max_head2_err = candidates[1][1]
                     if min_tail is None or ratio.tail_ratio() < min_tail.tail_ratio():
                         min_tail = ratio
                         min_tail_digit = candidates[1][0]
@@ -328,8 +361,12 @@ class Test:
                 errors.append((digit, len(options),
                                ((min_lead, min_lead_digit, min_lead_err),
                                 (max_lead, max_lead_digit, max_lead_err),
-                                (min_head, min_head_digit, min_head_err),
-                                (max_head, max_head_digit, max_head_err),
+                                (min_head1, min_head1_digit, min_head1_err),
+                                (max_head1, max_head1_digit, max_head1_err),
+                                (min_gap, min_gap_digit, min_gap_err),
+                                (max_gap, max_gap_digit, max_gap_err),
+                                (min_head2, min_head2_digit, min_head2_err),
+                                (max_head2, max_head2_digit, max_head2_err),
                                 (min_tail, min_tail_digit, min_tail_err),
                                 (max_tail, max_tail_digit, max_tail_err),
                                 (min_error, min_error_digit, min_error_err),
@@ -342,15 +379,24 @@ class Test:
                              ideal_ratios_per_digit, (ideal_ratios_per_digit / len(ratios)) * 100))
             for (digit, steps, stats) in errors:
                 ideal = self.codec.to_ratio(digit)
-                min_lead, max_lead, min_head, max_head, min_tail, max_tail, min_error, max_error = stats
+                min_lead, max_lead, \
+                min_head1, max_head1, \
+                min_gap, max_gap, \
+                min_head2, max_head2, \
+                min_tail, max_tail,\
+                min_error, max_error = stats
                 self._log('Digit {} ideal={}: steps={} ({:.2f}%):'.format(digit, ideal, steps,
                                                                           (steps/len(ratios))*100))
                 self._log('    min error:{}, digit={}, err={}'.format(min_error[0], min_error[1], min_error[2]))
                 self._log('    max error:{}, digit={}, err={}'.format(max_error[0], max_error[1], max_error[2]))
                 self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], min_lead[2]))
                 self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], max_lead[2]))
-                self._log('    min head:{}, digit={}, err={}'.format(min_head[0], min_head[1], min_head[2]))
-                self._log('    max head:{}, digit={}, err={}'.format(max_head[0], max_head[1], max_head[2]))
+                self._log('    min head1:{}, digit={}, err={}'.format(min_head1[0], min_head1[1], min_head1[2]))
+                self._log('    max head1:{}, digit={}, err={}'.format(max_head1[0], max_head1[1], max_head1[2]))
+                self._log('    min gap:{}, digit={}, err={}'.format(min_gap[0], min_gap[1], min_gap[2]))
+                self._log('    max gap:{}, digit={}, err={}'.format(max_gap[0], max_gap[1], max_gap[2]))
+                self._log('    min head2:{}, digit={}, err={}'.format(min_head2[0], min_head2[1], min_head2[2]))
+                self._log('    max head2:{}, digit={}, err={}'.format(max_head2[0], max_head2[1], max_head2[2]))
                 self._log('    min tail:{}, digit={}, err={}'.format(min_tail[0], min_tail[1], min_tail[2]))
                 self._log('    max tail:{}, digit={}, err={}'.format(max_tail[0], max_tail[1], max_tail[2]))
         except:
@@ -370,7 +416,15 @@ class Test:
             return [num for num in range(self.min_num, self.max_num + 1)]
         num_set = [self.min_num, self.max_num]
         if presets is not None:
-            num_set += presets
+            for preset in presets:
+                if preset < self.min_num or preset > self.max_num:
+                    # don't use illegal preset
+                    self._log('ignoring invalid test set number: {}'.format(preset))
+                    continue
+                if preset in num_set:
+                    # don't want a duplicate
+                    continue
+                num_set.append(preset)
         while len(num_set) < size:
             num = random.randrange(self.min_num + 1, self.max_num - 1)
             if num in num_set:
@@ -385,25 +439,27 @@ class Test:
         self._log('')
         self._log('******************')
         self._log('Check code-words (visual)')
-        frm_bin = '{:0' + str(codec.Codec.DIGITS) + 'b}'
-        frm_prefix = '{}(' + frm_bin + ')=('
-        suffix = ')'
         try:
             for n in numbers:
                 if n is None:
                     # this means a test code pattern is not available
-                    continue
-                prefix = frm_prefix.format(n, n)
-                rings = self.codec.build(n)
-                if rings is None:
-                    infix = 'None'
+                    num = 'None'
+                    code = 'None'
+                    digits = 'None'
                 else:
-                    infix = ''
-                    for ring in rings:
-                        bits = frm_bin.format(ring)
-                        infix = '{}, {}'.format(infix, bits)
-                    infix = infix[2:]  # remove leading comma space
-                self._log('{}{}{}'.format(prefix, infix, suffix))
+                    num = '{:03n}'.format(n)
+                    code = self.codec.encode(n)
+                    if code is None:
+                        # should not get here!
+                        code = 'None'
+                        digits = 'None'
+                    else:
+                        digits = self.codec.digits(code)
+                        code = '{:05n}'.format(code)
+                        if digits is None:
+                            # this should not happen
+                            digits = 'None'
+                self._log('    {} ({}) = {}'.format(num, code, digits))
         except:
             traceback.print_exc()
         self._log('******************')
@@ -772,7 +828,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (6, 5)
+    test_scan_cells = (7, 7)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -791,13 +847,13 @@ def verify():
                      debug=test_debug_mode)
 
         # build a test code set
-        test_num_set = test.test_set(20, [111, 222, 333, 444, 555])
+        test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
 
         test.rand()
         test.coding()
         test.decoding()
-        test.errors()
-        test.circles()
+        # test.errors()
+        # test.circles()
         # test.code_words(test_num_set)
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
@@ -806,9 +862,10 @@ def verify():
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [850], 'test-code-850.png')
+        # test.scan(test_codes_folder, [222], 'test-code-222.png')
 
-        test.scan(test_media_folder, [101,105,111,128,222,302,315,333,416,421,444,494,501,547,555,572,630,773,787,850], 'crumpled-far-101-105-111-128-222-302-315-333-416-421-444-494-501-547-555-572-630-773-787-850.jpg')
+        # test.scan(test_media_folder, [101,105,111,128,222,302,315,333,416,421,444,494,501,547,555,572,630,773,787,850],
+        #           'crumpled-distant-101-105-111-128-222-302-315-333-416-421-444-494-501-547-555-572-630-773-787-850.jpg')
 
     except:
         traceback.print_exc()
