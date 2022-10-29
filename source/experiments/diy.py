@@ -455,7 +455,7 @@ class Test:
                         digits = 'None'
                     else:
                         digits = self.codec.digits(code)
-                        code = '{:05n}'.format(code)
+                        code = '{:06n}'.format(code)
                         if digits is None:
                             # this should not happen
                             digits = 'None'
@@ -828,7 +828,7 @@ def verify():
     # cell size is critical,
     # going small in length creates edges that are steep vertically, going more takes too long
     # going small in height creates edges that are too small and easily confused with noise
-    test_scan_cells = (7, 7)
+    test_scan_cells = (8, 8)
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
@@ -854,9 +854,9 @@ def verify():
         test.decoding()
         # test.errors()
         # test.circles()
-        # test.code_words(test_num_set)
-        # test.codes(test_codes_folder, test_num_set, test_ring_width)
-        # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
+        test.code_words(test_num_set)
+        test.codes(test_codes_folder, test_num_set, test_ring_width)
+        test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
@@ -864,8 +864,8 @@ def verify():
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [222], 'test-code-222.png')
 
-        # test.scan(test_media_folder, [101,105,111,128,222,302,315,333,416,421,444,494,501,547,555,572,630,773,787,850],
-        #           'crumpled-distant-101-105-111-128-222-302-315-333-416-421-444-494-501-547-555-572-630-773-787-850.jpg')
+        # test.scan(test_media_folder, [101,111,126,159,205,209,222,223,225,252,333,360,366,383,412,427,444,454,497,518],
+        #           'distant-101-111-126-159-205-209-222-223-225-252-333-360-366-383-412-427-444-454-497-518.jpg')
 
     except:
         traceback.print_exc()

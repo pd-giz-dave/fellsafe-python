@@ -48,7 +48,7 @@ class Codec:
         """
 
     # region constants...
-    DIGITS_PER_WORD = 5  # how many digits per encoded code-word
+    DIGITS_PER_WORD = 6  # how many digits per encoded code-word
     COPIES_PER_BLOCK = 3  # number of copies in a code-word (DIGITS_PER_WORD * COPIES_PER_BLOCK must be odd)
     INNER_BLACK_RINGS = 1  # number of inner black rings (defined here 'cos encoding relies on it)
     OUTER_BLACK_RINGS = 1  # number of outer black rings (defined here 'cos encoding relies on it)
@@ -62,12 +62,12 @@ class Codec:
                 [0, 1, 0],
                 [0, 1, 1],
                 [1, 0, 0],
-                [1, 0, 1],  # the only one that creates a double radial 'pulse'
+                None,  # [1, 0, 1],  # the only one that creates a double radial 'pulse'
                 [1, 1, 0],
                 None,  # [1, 1, 1],
                ]
 
-    SYNC_DIGIT = ENCODING[5]  # must not be a None above, otherwise arbitrary
+    SYNC_DIGIT = ENCODING[0]  # must not be a None above, otherwise arbitrary, zero is the easiest to detect
     BASE_MAX = len(ENCODING)
     BASE_MIN = 2
     RINGS_PER_DIGIT = len(SYNC_DIGIT)  # number of rings spanning the variable data portion of a code-word
@@ -540,7 +540,6 @@ class Codec:
             """
 
         digits = self.digits(candidate)
-        has_sync = False
         has_white = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
         has_black = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
         for this in range(len(digits)):
@@ -550,20 +549,25 @@ class Codec:
                 return False
             if self.is_sync_digit(this_digit):
                 if this != 0:
-                    # does not meet only first digit can be the sync digit requirement (so can sync correctly)
+                    # does not meet only first digit can be the sync digit requirement
                     return False
-                has_sync = True
+            elif this == 0:
+                # does not meet first digit must be the sync digit requirement
+                return False
             before_digit = digits[(this - 1) % len(digits)]
             if this_digit == before_digit:
-                # does not meet adjacent digits must be different requirement (to ensure sufficient vertical edges)
+                # does not meet consecutive digits must be different requirement
                 return False
             for ring in range(Codec.RINGS_PER_DIGIT):
-                # no black bit is allowed to be fully surrounded by white ('cos it can disappear in neighbour smudges)
+                # consecutive digits cannot be the same
+                # no black bit is allowed to be fully surrounded by white
+                # because it can disappear in neighbour smudges, neighbours that are white smudge the corner,
+                # if all 4 corners get smudged the whole thing can disappear!
                 if ring == 0 or ring == (Codec.RINGS_PER_DIGIT - 1):
                     # we know there is black above the first ring and below the last ring, so not a problem here
                     pass
                 elif Codec.ENCODING[this_digit][ring] == 0:
-                    # there are 4 neighbours here, at least one must be black
+                    # there are 4 neighbours here, at least one must be black (so at least one corner survives)
                     black_neighbours = 0
                     for x, y in [          (0, -1),
                                  (-1,  0),          (+1,  0),
@@ -572,21 +576,19 @@ class Codec:
                         test_ring = ring + y
                         bits = Codec.ENCODING[test_digit]
                         if bits is None:
-                            # hot an illegal digit
+                            # not an illegal digit
                             return None
                         if bits[test_ring] == 0:
                             black_neighbours += 1
                     if black_neighbours < 1:
                         # does not meet black neighbours requirement
                         return False
-                # there must be at least one black and one white bit per ring (to ensure sufficient horizontal edges)
+                # there must be at least one black and one white bit per ring,
+                # to prevent continuous edges around a ring that could be confused with the target inner/outer edges
                 if Codec.ENCODING[this_digit][ring] == 0:
                     has_black[ring] += 1
                 if Codec.ENCODING[this_digit][ring] == 1:
                     has_white[ring] += 1
-        if not has_sync:
-            # does not meet first digit must be the sync digiti requirement
-            return False
         for is_black in has_black:
             if is_black == 0:
                 # does not meet each ring must have at least one black segment per copy requirement

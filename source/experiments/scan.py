@@ -91,10 +91,10 @@ class Scan:
     # region Tuning constants...
     MIN_BLOB_AREA = 10  # min area of a blob we want (in pixels) (default 9)
     MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
-    BLOB_RADIUS_STRETCH = 1.25  # how much to stretch blob radius to ensure always cover everything when projecting
+    BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.15  # minimum luminance variation of a valid blob projection relative to the max luminance
-    THRESHOLD_WIDTH = 5  # the fraction of the projected image width to use as the integration area when binarizing
-    THRESHOLD_HEIGHT = 1.5  # the fraction of the projected image height to use as the integration area (None=as width)
+    THRESHOLD_WIDTH = 6  # the fraction of the projected image width to use as the integration area when binarizing
+    THRESHOLD_HEIGHT = 2  # the fraction of the projected image height to use as the integration area (None=as width)
     THRESHOLD_BLACK = 10  # the % below the average luminance in a projected image that is considered to be black
     THRESHOLD_WHITE = 0  # the % above the average luminance in a projected image that is considered to be white
     MIN_EDGE_SAMPLES = 2  # minimum samples in an edge to be considered a valid edge
@@ -369,6 +369,7 @@ class Scan:
         params.integration_width = self.proximity
         params.min_area = Scan.MIN_BLOB_AREA
         params.min_radius = Scan.MIN_BLOB_RADIUS
+        # ToDo: get a better estimate of the blob centre - see openCV eg's
         blobs, binary = contours.get_targets(self.image.buffer, params=params, logger=logger)
         self.binary = self.image.instance()
         self.binary.set(binary)
@@ -571,8 +572,8 @@ class Scan:
                 See the adaptive-threshold-algorithm.pdf paper for algorithm details.
                 """
 
-            # the image being thresholded wraps in x, to allow for this when binarizing we extend
-            # the image by a half height to the left and right, then remove it from the binary
+            # the image being thresholded wraps in x, to allow for this when binarizing, we extend the
+            # image by a half of its height or width to the left and right, then remove it from the binary
 
             # make a bigger buffer to copy image into
             x_extra = min(int(round(max_y / 2)), int(round(max_x / 2)))
@@ -804,6 +805,7 @@ class Scan:
 
         max_x = len(slices)
         used = [[False for _ in range(max_y)] for _ in range(max_x)]
+        edges = []
 
         def make_candidates(start_x, start_y, edge_type):
             """ make candidate edges from the step from start_x,
@@ -833,22 +835,22 @@ class Scan:
                             # already been here so not a candidate for another edge
                             continue
                         if step.type == Scan.FALLING:
-                            if step.to_pixel == MIN_LUMINANCE:
+                            to_pixel = step.to_pixel
+                            if to_pixel == MID_LUMINANCE:
+                                to_pixel = treat_grey_as
+                            if to_pixel == MIN_LUMINANCE:
                                 # got a qualifying falling step
                                 pass
-                            # elif step.from_pixel == MAX_LUMINANCE:
-                            #     # got a qualifying falling step
-                            #     pass
                             else:
                                 # ignore this step
                                 continue
                         else:  # step.type == Scan.RISING
-                            if step.to_pixel == MAX_LUMINANCE:
+                            to_pixel = step.to_pixel
+                            if to_pixel == MID_LUMINANCE:
+                                to_pixel = treat_grey_as
+                            if to_pixel == MAX_LUMINANCE:
                                 # got a qualifying rising step
                                 pass
-                            # elif step.from_pixel == MIN_LUMINANCE:
-                            #     # got a qualifying rising step
-                            #     pass
                             else:
                                 # ignore this step
                                 continue
@@ -975,20 +977,20 @@ class Scan:
                 return None
 
         # build the edges list
-        edges = []
-        for x, slice in enumerate(slices):
-            for step in slice:
-                if step.type != mode:
-                    # not the step type we are looking for
-                    continue
-                if from_y is not None:
-                    if step.where <= from_y[x]:
-                        # too close to top
+        for treat_grey_as in [MIN_LUMINANCE, MAX_LUMINANCE]:
+            for x, slice in enumerate(slices):
+                for step in slice:
+                    if step.type != mode:
+                        # not the step type we are looking for
                         continue
-                candidates = make_candidates(x, step.where, step.type)
-                if candidates is not None:
-                    for candidate in candidates:
-                        edges.append(candidate)
+                    if from_y is not None:
+                        if step.where <= from_y[x]:
+                            # too close to top
+                            continue
+                    candidates = make_candidates(x, step.where, step.type)
+                    if candidates is not None:
+                        for candidate in candidates:
+                            edges.append(candidate)
 
         if self.logging:
             self._log('{}edges: {} edges'.format(context, len(edges)))
@@ -1640,11 +1642,11 @@ class Scan:
         # do the initial edge detection
         extent = make_extent(target, clean=True, context='-warped')
 
-        if extent.inner_fail is None and extent.outer_fail is None:
-            flat, flat_stretch = self._flatten(target, extent)
-            extent = make_extent(flat, clean=True, context='-flat')
-            max_x, max_y = flat.size()
-            return max_x, max_y, stretch_factor * flat_stretch, extent
+        # if extent.inner_fail is None and extent.outer_fail is None:
+        #     flat, flat_stretch = self._flatten(target, extent)
+        #     extent = make_extent(flat, clean=True, context='-flat')
+        #     max_x, max_y = flat.size()
+        #     return max_x, max_y, stretch_factor * flat_stretch, extent
 
         max_x, max_y = target.size()
         return max_x, max_y, stretch_factor, extent

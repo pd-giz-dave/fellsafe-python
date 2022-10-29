@@ -143,7 +143,7 @@ class Contour:
 
     def get_area(self) -> float:
         """ when external is False the area is an approximation on the assumption it is circular and enclosed
-            when external is True the area is the internal area plus the perimeter minus one (end is same as start)
+            when external is True the area is the internal area plus the perimeter
             """
         if self.points is None:
             return None
@@ -182,6 +182,9 @@ class Contour:
         return Circle(Point(x, y), r)
 
     def get_perimeter(self) -> int:
+        """ get the number of unique points that make up the perimeter,
+            this function is lazy, it calculates the points once on first demand
+            """
         if self.points is None:
             return None
         if self.unique_points is None:
@@ -189,7 +192,7 @@ class Contour:
         return len(self.unique_points)
 
     def get_circularity(self, tolerance: float = 1.0, aspect_ratio: float = 0.66) -> float:
-        """ get the (approximate) circularity of the contour as (area * tolerance) / ellipse area
+        """ get the (approximate) circularity of the contour as (area * tolerance) / ellipse area,
             to be considered circular the circularity must be close to one,
             also its aspect ratio must be close to square
             """
@@ -273,8 +276,8 @@ class Targets:
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
     min_area: float = 9
     max_area: float = 200000
-    max_hole_tolerance: float = 0.1
-    max_aspect_ratio: float = 0.6
+    max_hole_tolerance: float = 0.1      # max ratio of hole area to self area that is tolerated to be a blob
+    max_aspect_ratio: float = 0.6        # max ratio of width to height that is tolerated to be a blob
     min_roundness: float = 0.84
     max_roundness: float = 1.3           # NB: max poss roundness is 1.273 (4/pi)
     min_radius: float = 2.0
