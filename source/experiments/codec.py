@@ -1,26 +1,18 @@
 
 """ coding scheme
 
-    This coding scheme is intended to be easy to detect and robust against noise, distortion and luminance artifacts.
+    This coding scheme is intended to be easy to detect and be robust against noise, distortion and luminance artifacts.
     The code is designed for use as competitor numbers in club level fell races, as such the number range
     is limited to between 101 and 999 inclusive, i.e. always a 3 digit number and max 899 competitors.
     The actual implementation limit may be less depending on coding constraints chosen.
     The code is circular (so orientation does not matter) and consists of:
         a solid circular centre of 'white' with a radius 2R (a 'blob'),
         surrounded by a solid ring of 'black' and width 1R,
-        surrounded by a data ring of width 4R and divided into N equal segments,
+        surrounded by a data ring of width 3R and divided into 18 equal segments,
         surrounded by a solid ring of 'black' and width 1R
     Total radius is 8R.
-    The code consists of a 5 digit number in base 6 (or 7), these 5 digits are repeated 3 times yielding
-    a 15 digit number with triple redundancy. Each base 6 (or 7) digit is represented by the ratio of the
-    length of the black region and white region following the inner blob. The lengths are chosen to
-    maximise the differences between the resulting ratios. For base 6 the ratios are:
-        1:2, 1:3, 1:4, 2:1, 3:1, 4:1
-    For base 7 a ratio of 1:1 is added.
-    Each ratio is assigned a number 1..6 (or 7) - the digit. In a 5 digit code, the most significant digit
-    is always the biggest, this is the mechanism to detect code boundaries. Also, within the 5 digit code
-    no two adjacent digits may be the same, this ensures there is a digit 'edge' (black/white transition)
-    for every digit and is the mechanism to detect digit boundaries.
+    The code consists of a 6 digit number in base 8, with the first digit always 0 (the sync digit), these 6 digits
+    are repeated 3 times yielding an 18 digit number with triple redundancy.
 
     Some codes are reserved for special purposes - start, check, retired, finish, etc.
     Codes are allocated to numbers pseudo randomly (but deterministically) to ensure a spread of codes
@@ -32,7 +24,7 @@
 
     This Python implementation is just a proof-of-concept. In particular, it does not represent good
     coding practice, nor does it utilise the Python language to its fullest extent, and performance
-    is mostly irrelevant.
+    is mostly irrelevant. It represents the specification for the actual implementation.
 
     """
 
@@ -56,152 +48,74 @@ class Codec:
 
     # encoding is a bit pattern across the data rings for each digit (a 0 at either end is implied)
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
-    ENCODING = [
-                [0, 0, 0],
-                [0, 0, 1],
-                [0, 1, 0],
-                [0, 1, 1],
-                [1, 0, 0],
-                None,  # [1, 0, 1],  # the only one that creates a double radial 'pulse'
-                [1, 1, 0],
-                None,  # [1, 1, 1],
+    # if you do change it, also make appropriate changes to BIT_WEIGHTS and NOT_ALLOWED_ERROR
+    ENCODING = [  # allowed, coding
+                (True,  [0, 0, 0]),
+                (True,  [0, 0, 1]),
+                (True,  [0, 1, 0]),
+                (True,  [0, 1, 1]),
+                (True,  [1, 0, 0]),
+                (False, [1, 0, 1]),  # never use this, it creates a double radial 'pulse'
+                (True,  [1, 1, 0]),
+                (False, [1, 1, 1]),  # too easily confused with 3 or 6
                ]
 
-    SYNC_DIGIT = ENCODING[0]  # must not be a None above, otherwise arbitrary, zero is the easiest to detect
-    BASE_MAX = len(ENCODING)
-    BASE_MIN = 2
-    RINGS_PER_DIGIT = len(SYNC_DIGIT)  # number of rings spanning the variable data portion of a code-word
+    SYNC_DIGIT = 0  # must be allowed above, otherwise arbitrary, zero is the easiest to detect
+    DIGIT_BASE = len(ENCODING)  # how many digits in our encoding
+    RINGS_PER_DIGIT = len(ENCODING[SYNC_DIGIT][1])  # number of rings spanning the variable data portion of a code-word
     SPAN = RINGS_PER_DIGIT + EDGE_RINGS  # total span of the code including its margin black rings
     DIGITS = DIGITS_PER_WORD * COPIES_PER_BLOCK  # number of digits in a full code-block (must be odd)
     DOUBT_LIMIT = int(COPIES_PER_BLOCK / 2)  # we want the majority to agree, so doubt must not exceed half
-    DOUBLE_HEAD_GAP_LIMIT = 0.1  # (see make_ratio) head gap ratio required to consider it as 2 distinct heads
+    # endregion
+    # region qualify/classify tuning constants
+    # error weights when classifying pixel slices across the ring SPAN (ie. including the edge rings),
+    # all the weights should sum to 1, see classify() function for usage
+    VIRTUAL_RINGS_PER_RING = 3  # how many times to split a data ring for classification purposes
+    # NB: if ENCODING changes, make appropriate changes here too (e.g. if change number of rings)
+    BIT_WEIGHTS = [0.00, 0.00, 0.00,  # rings are split into N 'virtual rings'
+                   0.08, 0.16, 0.08,  # centre of bit has more weight
+                   0.09, 0.18, 0.09,  # centre ring has more weight
+                   0.08, 0.16, 0.08,
+                   0.00, 0.00, 0.00]
 
-    # ratio quantisation mitigation
-    RATIO_QUANTA = 0  # this is +/- added to lengths when calculating ratios (see make_ratio)
+    # max proportion of the data portion of a slice that can be white (i.e. 1's),
+    # more than this disqualifies the slice for digit classification (removes 7's)
+    MAX_SLICE_WHITE = 0.9
 
-    # error weights to apply to the ratio components (see Error() function)
-    LEAD_ERROR_WEIGHT = 1.0
-    HEAD_ERROR_WEIGHT = 1.0
-    GAP_ERROR_WEIGHT  = 1.0
-    TAIL_ERROR_WEIGHT = 1.0
+    # min proportion of the data portion of a slice that is white (i.e. 1's),
+    # less than this qualifies the slice for digit classification (its a 0)
+    MIN_SLICE_WHITE = 0.1
+
+    # 1's run length, as a fraction of the nominal ring width, on either side of a 0's run when qualifying a slice
+    ONES_RUN_LENGTH = 0.8
+    ONES_THRESHOLD = 0.7  # proportion of ONES_RUN_LENGTH that must be 1 to qualify the run as a 1
+    # 0's run length, as a fraction of the nominal ring width, within a pair of 1's runs when qualifying a slice
+    ZERO_RUN_LENGTH = 0.8
+    ZERO_THRESHOLD = 0.7  # proportion of ZERO_RUN_LENGTH that must be 0 to qualify the run as a 0
+
+    # min correct digit bit samples, if less than this many samples are correct, the digit classification fails
+    MIN_CORRECT_SAMPLES = 1
     # endregion
 
-    class Ratio:
-        """ encapsulate the digit pulse element (lead, head, second_head, tail) ratios """
-
-        def __init__(self, lead: float, head1: float, gap: float, head2: float, tail: float, parts=None):
-            self.lead  = lead   # this is a min/max tuple
-            self.head1 = head1  # ..
-            self.gap   = gap    # ..
-            self.head2 = head2  # ......
-            self.tail  = tail   # ........
-            self.parts = parts  # the lengths used to determine these ratios (params to make_ratio())
-
-        def __str__(self):
-            return '(({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}), ({:.2f}, {:.2f}) ' \
-                   'from {})'.format(self.lead[0], self.lead[1],
-                                     self.head1[0], self.head1[1],
-                                     self.gap[0], self.gap[1],
-                                     self.head2[0], self.head2[1],
-                                     self.tail[0], self.tail[1],
-                                     self.parts)
-
-        def lead_ratio(self):
-            """ return the average ratio for the min/max lead """
-            return (self.lead[0] + self.lead[1]) / 2
-
-        def head1_ratio(self):
-            """ return the average ratio for the min/max head1 """
-            return (self.head1[0] + self.head1[1]) / 2
-
-        def gap_ratio(self):
-            """ return the average ratio for the min/max gap """
-            return (self.gap[0] + self.gap[1]) / 2
-
-        def head2_ratio(self):
-            """ return the average ratio for the min/max head2 """
-            return (self.head2[0] + self.head2[1]) / 2
-
-        def tail_ratio(self):
-            """ return the average ratio for the min/max tail """
-            return (self.tail[0] + self.tail[1]) / 2
-
-    class Error:
-        """ encapsulate the digit pulse element (lead, head1, gap, head2, tail) errors """
-
-        def __init__(self, lead_error: float,
-                           head1_error: float,
-                           gap_error: float,
-                           head2_error: float,
-                           tail_error: float):
-            self.lead_error = lead_error
-            self.head1_error = head1_error
-            self.gap_error = gap_error
-            self.head2_error = head2_error
-            self.tail_error = tail_error
-            # overall error is the average of the errors that are not zero
-            count = 0
-            for err in [self.lead_error, self.head1_error, self.gap_error, self.head2_error, self.tail_error]:
-                if err > 0:
-                    count += 1
-            if count > 0:
-                self.error = (self.lead_error + self.head1_error + self.gap_error + self.head2_error + self.tail_error) \
-                             / count
-            else:
-                self.error = 0.0
-
-        def __str__(self):
-            return '[{:.2f} from {:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}]'.\
-                   format(self.error,
-                          self.lead_error,
-                          self.head1_error,
-                          self.gap_error,
-                          self.head2_error,
-                          self.tail_error)
-
-    def __init__(self, min_num, max_num, base: int = BASE_MAX):
+    def __init__(self, min_num, max_num):
         """ create the valid code set for a number in the range min_num..max_num,
             the min_num cannot be zero,
             we create two arrays - one maps a number to its code and the other maps a code to its number.
             """
 
-        self.base = max(min(base, Codec.BASE_MAX), Codec.BASE_MIN)
-        self.code_range = int(math.pow(self.base, Codec.DIGITS_PER_WORD))
+        # sanity check
+        bits = self._make_slice_bits(Codec.SYNC_DIGIT)  # only digit we can guarantee is valid
+        if len(Codec.BIT_WEIGHTS) != len(bits):
+            raise Exception('BIT_WEIGHTS size ({}) is not same as slice bits ({})'.
+                            format(len(Codec.BIT_WEIGHTS), len(bits)))
+        if sum(Codec.BIT_WEIGHTS) != 1.0:
+            raise Exception('BIT_WEIGHTS must sum to 1.0 not {}'.format(sum(Codec.BIT_WEIGHTS)))
 
         # params
         self.min_num = max(min_num, 1)  # minimum number we want to be able to encode (0 not allowed)
         self.max_num = max(max_num, self.min_num)  # maximum number we want to be able to encode
 
-        # region build ratios table...
-        # ratios are the relative lengths, across a radial, of the leading black rings (including the
-        # inner black), the central white rings and the trailing black rings (including the outer black
-        # following the blob, the lead ratio is the leading black over central white, the tail ratio is
-        # the trailing black over central white
-        self.ratios = [None for _ in range(len(Codec.ENCODING))]
-        for digit, bits in enumerate(Codec.ENCODING):
-            if bits is None:
-                # illegal digit has no ratios
-                continue
-            # count the number of elements in each part: lead, head1, gap, head2, tail
-            # we're assuming 3 rings here with at most 2 pulses (i.e. 101)
-            parts = [1, 0, 0, 0, 1]  # lead and tail have one each in the inner and outer black rings
-            need  = [0, 1, 0, 1, 0]  # what bit state needed for each part
-            part  = 0  # which part we are looking for
-            for bit in bits:
-                if bit != need[part]:
-                    part += 1
-                parts[part] += 1
-            # calculate the lead, head1, head2 and tail ratios
-            if parts[1] == 0:
-                # this is a zero, it has no tail
-                parts[0] += parts[4]
-                parts[4]  = 0
-            elif parts[3] == 0:
-                # got no head2, so gap is part of tail
-                parts[4] += parts[2]
-                parts[2]  = 0
-            self.ratios[digit] = self.make_ratio(parts[0], parts[4], parts[1], parts[3], sum(parts))
-        # endregion
+        self.code_range = int(math.pow(Codec.DIGIT_BASE, Codec.DIGITS_PER_WORD))
 
         # region build code tables...
         # we first build a list of all allowable codes then allocate them pseudo randomly to numbers.
@@ -231,6 +145,9 @@ class Codec:
         # we also need the opposite - codes to numbers - self.nums[code] -> number
         self.nums = [None for _ in range(self.code_range)]  # NB: This array is sparsely populated
         for num, code in enumerate(self.codes):
+            if num > (self.max_num - self.min_num):
+                # not in required range, so its not valid
+                continue
             self.nums[code] = num
         # endregion
 
@@ -291,7 +208,7 @@ class Codec:
         merged = [[None, None] for _ in range(Codec.DIGITS_PER_WORD)]  # number and doubt for each digit in a word
         for digit in range(len(copies[0])):
             # the counts structure contains the digit and a count of how many copies of that digit exist
-            counts = [[0, idx] for idx in range(self.base)]
+            counts = [[0, idx] for idx in range(Codec.DIGIT_BASE)]
             for copy in range(len(copies)):
                 digit_copy = copies[copy][digit]
                 if digit_copy is None:
@@ -307,7 +224,7 @@ class Codec:
         # step 3 - look for the sync digit
         sync_at = None
         for idx, (digit, _) in enumerate(merged):
-            if Codec.ENCODING[digit] == Codec.SYNC_DIGIT:
+            if self.is_sync_digit(digit):
                 sync_at = idx
         if sync_at is None:
             # got a duff code
@@ -320,146 +237,311 @@ class Codec:
         for _ in range(Codec.DIGITS_PER_WORD):
             idx = (idx - 1) % Codec.DIGITS_PER_WORD  # scan backwards so we go LS to MS digit
             digit, digit_doubt = merged[idx]
-            code *= self.base
+            code *= Codec.DIGIT_BASE
             code += digit
             doubt += digit_doubt
 
         # that's it
         return code, doubt
 
-    def to_ratio(self, digit: int) -> Ratio:
-        """ given a digit return its ratios, these represent the ideal ratios """
-        for candidate, ideal in enumerate(self.ratios):
-            if candidate == digit:
-                return ideal
-        return None
-
-    def make_ratio(self, lead: float, tail: float, head1: float, head2: float, total: float = None) -> Ratio:
-        """ given several lengths return the corresponding classification ratios,
-            this function is aware of the expected pulse shapes/positions,
-            total is the total measured length of the data area (including the marker black rings),
-            lead is the length of the leading black area (including the inner black ring),
-            head1 is the length of the white area as measured going down from the inner (may be 0),
-            head2 is the length of the white area as measured going up from the outer (may be 0),
-            tail is the length of the trailing black area (including the outer black ring),
-            if head1 and head2 are distinct we've got a double pulse,
-            the result given here can be fed into classify to get a list of likely digits,
-            all ratios are in the range 0..1, where 1 is the entire inner to outer span
+    def make_slice(self, digit, length, index=None):
+        """ build a bit slice for the given digit of the given length,
+            this represents an 'ideal' slice that can be used for diagnostic purposes,
+            the slice entries are 0 or 1 for expected bits,
             """
-        if total is None:
-            total = lead + head1 + head2 + tail
-        gap = total - (lead + head1 + head2 + tail)
-        parts = (lead, head1, gap, head2, tail)
-        second_head = 0
-        # if head1 == 0 or head2 == 0 or tail == 0:
-        #     # special case for a '0'
-        #     return Codec.Ratio(1, 0, 0, parts)
-        # have we got a double pulse?
-        # if we have lead + head1 + head2 + tail will be less than total (by the pulse gap)
-        if gap > 0:
-            # a small gap is treated like noise and the true head is head1 + head2 + gap
-            # a bigger gap is a double pulse
-            gap_ratio = gap / total
-            if gap_ratio > Codec.DOUBLE_HEAD_GAP_LIMIT:
-                # we've got a double pulse, head1 is the top pulse, head2 is the bottom pulse
-                head = head1
-                second_head = head2
-            else:
-                # its a noise gap
-                head = head1 + head2 + gap
-                gap = 0
-        elif head2 > 0:
-            # not a double pulse but heads overlap, this can happen with distorted images with grey areas,
-            # consider head to be the average of head1 and head2 and spread the difference between lead and tail
-            head = (head1 + head2) / 2
-            extra = (head - head1) / 2
-            lead -= extra
-            tail += extra
-            gap = 0
-        else:
-            # not a double pulse and no second head, so no gap either
-            head = head1
-            gap = 0
-        # each ratio consists of a min/max pair based on jiggling the lengths by +/- 1 pixel,
-        # this is to mitigate quantisation effects when only a few pixels are involved
-        if lead > 0:
-            lead_ratio = ((lead - Codec.RATIO_QUANTA) / total, (lead + Codec.RATIO_QUANTA) / total)
-        else:
-            lead_ratio = (0, 0)
-        if head > 0:
-            head_ratio = ((head - Codec.RATIO_QUANTA) / total, (head + Codec.RATIO_QUANTA) / total)
-        else:
-            head_ratio = (0, 0)
-        if gap > 0:
-            gap_ratio = ((gap - Codec.RATIO_QUANTA) / total, (gap + Codec.RATIO_QUANTA) / total)
-        else:
-            gap_ratio = (0, 0)
-        if second_head > 0:
-            second_head_ratio = ((second_head - Codec.RATIO_QUANTA) / total, (second_head + Codec.RATIO_QUANTA) / total)
-        else:
-            second_head_ratio = (0, 0)
-        if tail > 0:
-            tail_ratio = ((tail - Codec.RATIO_QUANTA) / total, (tail + Codec.RATIO_QUANTA) / total)
-        else:
-            tail_ratio = (0, 0)
-        return Codec.Ratio(lead_ratio, head_ratio, gap_ratio, second_head_ratio, tail_ratio, parts)
+        if digit is None:
+            return None
+        bits = self._make_slice_bits(digit)
+        if bits is None:
+            # illegal digit, no slice for these
+            return None
+        if index is None:
+            index = self._make_slice_index(length)
+        if index is None:
+            # not enough length to make a slice
+            return None
+        slice = [None for _ in range(length)]
+        for entry in range(length):
+            bit_num = int(index[entry])
+            bit_value = bits[bit_num]
+            slice[entry] = bit_value
+        return slice
 
-    def classify(self, actual):
-        """ given a ratio measurement, return a list of the most likely digits it represents with an error,
-            every possible digit is returned in least error first order,
-            all errors are in the range 0..1, with 0=perfect and 1=utter crap
+    def _make_slice_bits(self, digit):
+        """ make the complete slice bits for the given digit,
+            the complete bits include the inner/outer ring,
+            there is 1 bit returned for each 'virtual ring'
+            """
+        if digit is None:
+            return None
+        bits = self.coding(digit, only_if_allowed=False)  # we want the coding regardless of it being allowed
+        prefix = [0 for _ in range(Codec.INNER_BLACK_RINGS)]
+        suffix = [0 for _ in range(Codec.OUTER_BLACK_RINGS)]
+        slice = prefix + bits + suffix
+        virtual_slice = []
+        for bit in slice:
+            virtual_slice += [bit for _ in range(Codec.VIRTUAL_RINGS_PER_RING)]
+        return virtual_slice
+
+    def _get_slice_scale(self, length):
+        """ determine if a slice of the given length is eligible for classification,
+            if it is return the 'scale' for that length, else None
+            the scale is used to map ideal slice bit indices to actual
+            """
+        bits = self._make_slice_bits(Codec.SYNC_DIGIT)  # only digit we can guarantee is valid
+        scale = length / len(bits)
+        if scale < 1.0:
+            # not enough length to make a slice
+            return None
+        return scale
+
+    def _make_slice_index(self, length):
+        """ make a bit index of the given length,
+            a bit index is the virtual bit number to associate with every offset into a slice of 'length'
+            edge_weight is how much weight to give the inner/outer edges, this affects how much 'smudging'
+            of the data rings into the edge rings is done, a weight of 1.0 is none, 0.0 is total,
+            the indices generated here match the bits produced by _make_slice_bits
             """
 
-        def error(actual: Codec.Ratio, ideal: Codec.Ratio) -> Codec.Error:
-            """ calculate an error between the actual ratio and the ideal,
-                all ratios are in the range 0..1,
-                we want a number that is in the range 0..1 where 0 is no error and 1 is a huge error,
+        scale = self._get_slice_scale(length)
+        if scale is None:
+            # not enough length to make a slice
+            return None
+
+        slice = [None for _ in range(length)]
+
+        for entry in range(length):
+            bit_num = entry / scale
+            slice[entry] = bit_num
+
+        return slice
+
+    def qualify(self, actual: [int]):
+        """ given a pixel slice, determine if it meets the minimum criteria required to be able to classify it,
+            the minimum criteria is that there should be either nothing or a single 'pulse' of 1's with at least
+            one zero on either end, also the sequence of 1's should have no significant holes in it,
+            the coding scheme is such that there should only be single sequence of ones, but we must allow for noise,
+            this function should be called before the slice is presented to classify(),
+            returns True if the slice qualifies
+            """
+
+        def is_101(here: int, ones_length: int, zero_length: int, ones: [int]) -> bool:
+            """ test for a 101 sequence in the ones array starting from here with ones_length and zero_length,
+                ones is an integration of the 1 bits in a slice,
+                so ones[b] - ones[a] is the number of 1's between a and b (a < b)
+                """
+            limit = len(ones)
+            # check for the one's lead-in
+            pre_ones_start_at = here
+            pre_ones_end_at = pre_ones_start_at + ones_length
+            if pre_ones_end_at > (limit - 1):
+                # run out of room
+                return False
+            pre_ones = (ones[pre_ones_end_at] - ones[pre_ones_start_at]) / ones_length
+            if pre_ones < Codec.ONES_THRESHOLD:
+                # have not got a 1's lead-in run from here
+                return False
+            # check for the zero run (we keep extending it from the minimum until it fails)
+            zero_start_at = pre_ones_end_at - 1
+            found_zero = False
+            while True:
+                zero_start_at += 1  # keep extending until it fails
+                zero_end_at = zero_start_at + zero_length
+                if zero_end_at > (limit - 1):
+                    # run out of room
+                    return False
+                zeroes = 1 - ((ones[zero_end_at] - ones[zero_start_at]) / zero_length)
+                if zeroes < Codec.ZERO_THRESHOLD:
+                    # have not got a 0's run from here
+                    if not found_zero:
+                        # we did not find a minimum zero length
+                        return False
+                    # we've now found the end of the 0 run, so go look for the end ones run
+                    zero_start_at -= 1  # backup to last good position
+                    zero_end_at = zero_start_at + zero_length
+                    break
+                # note we found a minimum length zero run
+                found_zero = True
+            # check for the ones lead-out
+            post_ones_start_at = zero_end_at
+            post_ones_end_at = post_ones_start_at + ones_length
+            if post_ones_end_at > (limit - 1):
+                # run out of room
+                return False
+            post_ones = (ones[post_ones_end_at] - ones[post_ones_start_at]) / ones_length
+            if post_ones < Codec.ONES_THRESHOLD:
+                # have not got a 1's lead-out run
+                return False
+            # we've got a 101
+            return True
+
+        length = len(actual)
+        if self._get_slice_scale(length) is None:
+            # not enough room for a slice
+            return False
+
+        ring_width = length / Codec.SPAN
+        if ring_width < 1:
+            # length too small to differentiate each ring
+            return False
+
+        ones_length = int(round(ring_width * Codec.ONES_RUN_LENGTH))
+        if ones_length < 2:
+            # slice not big enough to properly qualify
+            return True
+        zero_length = int(round(ring_width * Codec.ZERO_RUN_LENGTH))
+        if zero_length < 2:
+            # slice not big enough to properly qualify
+            return True
+        data_length = int(round(ring_width * Codec.RINGS_PER_DIGIT))
+
+        # the objective of this function is to detect slices that could be construed as a '5' (i.e. 2 pulses)
+        # or a '7' (i.e. too big a pulse), the detection here differs from classify() in that here we are not
+        # concerned with ring boundaries, we look for bit boundaries of the form ..1..1[0..0]1..1.. where the
+        # [0..0] portion is a significant fraction of a ring width and is 'mostly' 0's.
+
+        # run a sliding window across the data bits looking for a 101 pattern
+        # integrate the slice (so we can get a 1's count between any 2 indices by a simple subtract)
+        count = 0
+        ones = [None for _ in range(length)]  # how many ones there are *before* each x
+        for x in range(int(ring_width)+1):
+            # no more 1's in the outer ring
+            ones[x] = 0
+        for x in range(int(ring_width)+1, length - int(ring_width) + 1):
+            count += actual[x-1]
+            ones[x] = count
+        for x in range(length - int(ring_width) + 1, length):
+            # no more 1's in the outer ring
+            ones[x] = ones[x-1]
+        # test for edge cases
+        if count <= int((ring_width * Codec.RINGS_PER_DIGIT) * Codec.MIN_SLICE_WHITE):
+            # its all, or mostly, black, always OK (its a 0)
+            return True
+        if count >= int(round((ring_width * Codec.RINGS_PER_DIGIT) * Codec.MAX_SLICE_WHITE)):
+            # its all, or mostly, white, always crap (its a 7)
+            return False
+        # test every offset in the data portion of a 101 sequence
+        start_data = int(ring_width * Codec.INNER_BLACK_RINGS)
+        end_data = min(start_data + data_length, length)
+        for x in range(start_data, end_data):
+            if is_101(x, ones_length, zero_length, ones):
+                # got a 101 sequence, this is crap (its a 5)
+                return False
+
+        return True
+
+    def classify(self, actual: [int]):
+        """ given a pixel slice, return a list of the most likely digits it represents with an error,
+            the pixel list must be a list of 0's, 1's or None's and must have at least SPAN bits,
+            every viable digit is returned in least error first order, the list may be empty
+            all errors are in the range 0..1, with 0=perfect and 1=utter crap,
+            """
+
+        def compare_pixel_slices(ideal, actual, spans, weights):
+            """ compare ideal and actual slices,
+                ideal is an array of bits for a digit, 1 bit per 'virtual ring',
+                actual is an array of N bits that has been extracted from some image,
+                spans is a mapping of bit indices to a set of actual indices to be matched for each bit,
+                the length of spans must be the same as ideal,
+                spans entries must be valid actual indices,
+                weights is a weight factor for each bit error (0..1, 0=ignore, 1=use full),
+                slices consist of 0's, 1's and None's, a None means do-not-care and are ignored,
+                returns an error for the 0 bits and 1 bits, both in range 0..1 (0=no error, 1=utter crap),
+                the term 'virtual ring' is used here to reflect the fact that this function operates on
+                rings as implied by the length of ideal and may bear no resemblance to the code rings
                 """
 
-            def error_from_ratio(ideal: (float, float), actual: (float, float)) -> float:
-                """ calculate the least error between the two given ratio tuples,
-                    the ratio tuple is the min/max, in the case of the ideal we
-                    take the average, and test that against the min/max of actual,
-                    the average is taken as the result
-                    """
-                ideal_ratio = (ideal[0] + ideal[1]) / 2
-                if ideal_ratio > actual[0]:
-                    min_ratio = actual[0] / ideal_ratio
-                elif ideal_ratio < actual[0]:
-                    min_ratio = ideal_ratio / actual[0]
+            zero_errors = [0.0 for _ in range(len(ideal))]  # init to 0 so skipped bits do not distort the result
+            ones_errors = [0.0 for _ in range(len(ideal))]  # ditto
+
+            for bit, ideal_value in enumerate(ideal):
+                span_start, span_end = spans[bit]
+                zero_samples = 0
+                zero_matches = 0
+                one_samples = 0
+                one_matches = 0
+                for entry in range(span_start, span_end + 1):
+                    actual_value = actual[entry]
+                    if actual_value is None:
+                        continue
+                    if ideal_value == 0:
+                        zero_samples += 1
+                        if actual_value == 0:
+                            zero_matches += 1
+                    elif ideal_value == 1:
+                        one_samples += 1
+                        if actual_value == 1:
+                            one_matches += 1
+                if zero_samples > 0:
+                    zero_errors[bit] = 1 - (zero_matches / zero_samples)  # range 0..1 (0==good, 1==crap)
                 else:
-                    min_ratio = 1
-                if ideal_ratio > actual[1]:
-                    max_ratio = actual[1] / ideal_ratio
-                elif ideal_ratio < actual[1]:
-                    max_ratio = ideal_ratio / actual[1]
+                    zero_errors[bit] = 0.0  # this means ideal has no zeroes, so we cannot have a zero error
+                if one_samples > 0:
+                    ones_errors[bit] = 1 - (one_matches / one_samples)  # range 0..1 (0==good, 1==crap)
                 else:
-                    max_ratio = 1
-                # min/max_ratio are in range 1..0 (1==good, 0==bad)
-                best_ratio = (min_ratio + max_ratio) / 2
-                # error must be in range 0..1 (0=none, 1==lots)
-                return 1 - best_ratio
+                    ones_errors[bit] = 0.0  # this means ideal has no ones, so we cannot have a ones error
+                zero_errors[bit] *= weights[bit]
+                ones_errors[bit] *= weights[bit]
 
-            lead_err  = error_from_ratio(ideal.lead , actual.lead ) * Codec.LEAD_ERROR_WEIGHT
-            head1_err = error_from_ratio(ideal.head1, actual.head1) * Codec.HEAD_ERROR_WEIGHT
-            gap_err   = error_from_ratio(ideal.gap  , actual.gap  ) * Codec.GAP_ERROR_WEIGHT
-            head2_err = error_from_ratio(ideal.head2, actual.head2) * Codec.HEAD_ERROR_WEIGHT
-            tail_err  = error_from_ratio(ideal.tail , actual.tail ) * Codec.TAIL_ERROR_WEIGHT
+            zero_error = min(sum(zero_errors), 1.0)  # range 0..1
+            ones_error = min(sum(ones_errors), 1.0)  # range 0..1
 
-            # return average error and its components
-            err = Codec.Error(lead_err, head1_err, gap_err, head2_err, tail_err)
+            pass  # only here as a debug hook, as placing it on the return gets missed :-(
 
-            return err
+            return zero_error, ones_error
 
-        digits = [(None, Codec.Error(1, 1, 1, 1, 1)) for _ in range(self.base)]
-        if actual is not None:
-            for digit in range(self.base):
-                ideal = self.ratios[digit]
-                if ideal is None:
-                    # this is an illegal digit
-                    continue
-                digits[digit] = (digit, error(actual, ideal))
-            digits.sort(key=lambda d: d[1].error)  # put into least error order
+        def error_acceptable(error, samples):
+            """ test if the given error is acceptable for the given sample size,
+                error is in the range 0..1, 0==no bits wrong, 1==all wrong,
+                'acceptable' is at least MIN_CORRECT_SAMPLES bits are correct,
+                less than that is interpreted as junk
+                """
+            if samples < (Codec.MIN_CORRECT_SAMPLES + 1):
+                # not enough samples to set a meaningful max, so anything is OK
+                return True
+            max_error = 1 - (Codec.MIN_CORRECT_SAMPLES / samples)
+            if error > max_error:
+                return False
+            else:
+                return True
+
+        # build the ideal pixel list for each digit possibility
+        ideals = [None for _ in range(Codec.DIGIT_BASE)]
+        for digit in range(Codec.DIGIT_BASE):
+            # comment here purely so the IDE will collapse this one line for loop :-(
+            ideals[digit] = self._make_slice_bits(digit)
+
+        # get the ideal bit index and split into a start/stop pair for each bit
+        index = self._make_slice_index(len(actual))
+        if index is None:
+            # not enough length
+            return []
+        bit_edges = [[None, None] for _ in range(len(ideals[Codec.SYNC_DIGIT]))]
+        for i, bit in enumerate(index):
+            start_bit_num = max(int(bit), 0)
+            end_bit_num = min(int(round(bit)), len(bit_edges) - 1)
+            for edge_bit in [start_bit_num, end_bit_num]:
+                if bit_edges[edge_bit][0] is None:
+                    bit_edges[edge_bit][0] = i  # set start edge for this bit
+                bit_edges[edge_bit][1] = i  # set stop edge for this bit
+
+        # test actual to ideal match for every digit
+        digits = []
+        ring_width = len(actual) / Codec.SPAN
+        for digit in range(Codec.DIGIT_BASE):
+            zero_error, ones_error = compare_pixel_slices(ideals[digit], actual, bit_edges, Codec.BIT_WEIGHTS)
+            if error_acceptable(zero_error, ring_width) and error_acceptable(ones_error, ring_width):
+                # we only want to keep classifications that are 'reasonable'
+                # NB: adding errors is correct as their spans are independent, the result is still 0..1
+                error = zero_error + ones_error
+                if error > 1.0:
+                    raise Exception('Zero error ({:.2f}) plus ones error ({:.2f}) is greater than 1.0 for digit {}'.
+                                    format(zero_error, ones_error, digit))
+                digits.append((digit, error))
+
+        # put into least error first order
+        digits.sort(key=lambda d: d[1])
+
         return digits
 
     def digits(self, code):
@@ -467,16 +549,16 @@ class Codec:
         partial = [None for _ in range(Codec.DIGITS_PER_WORD)]
         if code is not None:
             for digit in range(Codec.DIGITS_PER_WORD):
-                partial[digit] = code % self.base
-                code = int(code / self.base)
+                partial[digit] = code % Codec.DIGIT_BASE
+                code = int(code / Codec.DIGIT_BASE)
         return partial
 
     def digit(self, rings):
         """ given a set of data rings for a single digit return the corresponding digit,
             it is, in a sense, the opposite to _rings for a single digit
             """
-        for digit, coding in enumerate(Codec.ENCODING):
-            if coding is None:
+        for digit, (allowed, coding) in enumerate(Codec.ENCODING):
+            if not allowed:
                 # illegal digit
                 continue
             same = 0
@@ -494,26 +576,39 @@ class Codec:
         """ determine if the given digit is the sync digit,
             this is abstracted so outside callers can use it
             """
-        if Codec.ENCODING[this_digit] == Codec.SYNC_DIGIT:
+        if this_digit is None:
+            return False
+        if this_digit == Codec.SYNC_DIGIT:
             return True
         return False
+
+    @staticmethod
+    def coding(digit, only_if_allowed=True):
+        """ given a digit return the coding for that digit or None if its a not allowed digit,
+            if only_if_allowed is True allowed digit coding is returned else None is returned,
+            if only_if_allowed is False the coding is returned regardless of its allowed status,
+            an out of range digit always return None
+            """
+        if digit < 0 or digit >= len(Codec.ENCODING):
+            return None
+        allowed, coding = Codec.ENCODING[digit]
+        if only_if_allowed and not allowed:
+            return None
+        return coding
 
     def _rings(self, code_block):
         """ build the data ring encoding for the given code-block,
             code_block must be a list of digits in the range 0..BASE-1,
-            each digit is encoded into 5 bits, one for each ring,
+            the Nth bit of each digit is encoded into the Nth data ring,
             returns a list of integers representing each ring
             """
 
-        # build code block
+        # build code block (regardless of the validity of the given digits)
         rings = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
         data = 1 << (Codec.DIGITS - 1)  # start at the msb
         for digit in code_block:
-            coding = Codec.ENCODING[digit]
+            coding = self.coding(digit, only_if_allowed=False)  # we want the coding regardless of it being allowed
             for ring, bit in enumerate(coding):
-                if bit is None:
-                    # this is a don't care 0
-                    continue
                 if bit == 1:
                     # want a 1 bit in this position in this ring
                     rings[ring] += data
@@ -544,7 +639,8 @@ class Codec:
         has_black = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
         for this in range(len(digits)):
             this_digit = digits[this]
-            if Codec.ENCODING[this_digit] is None:
+            coding = self.coding(this_digit)
+            if coding is None:
                 # not allowed to use this digit
                 return False
             if self.is_sync_digit(this_digit):
@@ -566,7 +662,7 @@ class Codec:
                 if ring == 0 or ring == (Codec.RINGS_PER_DIGIT - 1):
                     # we know there is black above the first ring and below the last ring, so not a problem here
                     pass
-                elif Codec.ENCODING[this_digit][ring] == 0:
+                elif coding[ring] == 0:
                     # there are 4 neighbours here, at least one must be black (so at least one corner survives)
                     black_neighbours = 0
                     for x, y in [          (0, -1),
@@ -574,9 +670,9 @@ class Codec:
                                            (0, +1)          ]:
                         test_digit = digits[(this + x) % len(digits)]
                         test_ring = ring + y
-                        bits = Codec.ENCODING[test_digit]
+                        bits = self.coding(test_digit)
                         if bits is None:
-                            # not an illegal digit
+                            # not a legal digit
                             return None
                         if bits[test_ring] == 0:
                             black_neighbours += 1
@@ -585,9 +681,9 @@ class Codec:
                         return False
                 # there must be at least one black and one white bit per ring,
                 # to prevent continuous edges around a ring that could be confused with the target inner/outer edges
-                if Codec.ENCODING[this_digit][ring] == 0:
+                if coding[ring] == 0:
                     has_black[ring] += 1
-                if Codec.ENCODING[this_digit][ring] == 1:
+                if coding[ring] == 1:
                     has_white[ring] += 1
         for is_black in has_black:
             if is_black == 0:
@@ -597,5 +693,6 @@ class Codec:
             if is_white == 0:
                 # does not meet each ring must have at least one white segment per copy requirement
                 return False
+
         # all good
         return True

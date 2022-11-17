@@ -16,6 +16,7 @@ MAX_LUMINANCE = 255
 MIN_LUMINANCE = 0
 MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
 
+# ToDo: split this module into 3: bit level, digit level, code level
 
 def nstr(number, fmt='.2f'):
     """ given a number that may be None, return an appropriate string """
@@ -72,6 +73,7 @@ class Scan:
     # our target shape
     NUM_RINGS = ring.Ring.NUM_RINGS  # total number of rings in the whole code (ring==cell in height)
     BULLSEYE_RINGS = ring.Ring.BULLSEYE_RINGS  # number of rings inside the inner edge
+    DIGIT_BASE = codec.Codec.DIGIT_BASE  # number base for our digits
     NUM_DATA_RINGS = codec.Codec.RINGS_PER_DIGIT  # how many data rings in our codes
     INNER_BLACK_RINGS = codec.Codec.INNER_BLACK_RINGS  # black rings from inner to first data ring
     OUTER_BLACK_RINGS = codec.Codec.OUTER_BLACK_RINGS  # black rings from outer to last data ring
@@ -107,7 +109,14 @@ class Scan:
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
     MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
     MAX_EDGE_HEIGHT_JUMP = 8  # max jump in y, in pixels, allowed along an edge, more than this is an edge 'failure'
-    MAX_DIGIT_WIDTH = 3  # maximum width of a digit relative to the nominal width (image / all digits)
+    MAX_NOT_ALLOWED_ERROR_DIFF = 0.15  # a not-allowed choice error within this of its neighbour is noise, else junk
+    MAX_DIGIT_ERROR = 0.6  # digits with an error of more than this are dropped
+    MAX_ZERO_ERROR_DIFF = 0.25  # a zero with a choice with a smaller error difference than this is dropped
+    MAX_DIGIT_ERROR_DIFF = 0.05  # if two digit choices have an error difference less than this its ambiguous
+    MAX_DIGIT_WIDTH = 2.0  # maximum width of a keep-able digit relative to the nominal digit width
+    MIN_DIGIT_WIDTH = 0.5  # minimum width of a keep-able digit relative to the nominal digit width
+    MIN_DROPPABLE_WIDTH = MIN_DIGIT_WIDTH * 1  # minimum width of a droppable digit
+    MIN_SPLITTABLE_DIGIT_WIDTH = MIN_DIGIT_WIDTH * 2  # minimum width of a splittable digit (/2 must be >=1)
     # endregion
 
     # region Video modes image height...
@@ -230,19 +239,6 @@ class Scan:
 
         def __str__(self):
             return '({}, {:.2f}, at {} for {})'.format(self.digit, self.error, self.start, self.samples)
-
-    class Box:
-        """ a 'box' is an area that represents one black or white data bit in the projected image """
-
-        def __init__(self, start: int, span: int):
-            self.start = start  # x co-ord of start of box
-            self.span = span  # the x co-ord span of the digit
-            self.edges = None  # list of y co-ords pairs for a box top/bottom edge
-
-        def add_edge(self, edge: [[int, int]]):
-            if self.edges is None:
-                self.edges = []
-            self.edges.append(edge)  # start/end y co-ords of a ring (exclusive)
 
     class Result:
         """ a result is the result of a number decode and its associated error/confidence level """
@@ -367,9 +363,8 @@ class Scan:
             logger = None
         params = contours.Targets()
         params.integration_width = self.proximity
-        params.min_area = Scan.MIN_BLOB_AREA
-        params.min_radius = Scan.MIN_BLOB_RADIUS
-        # ToDo: get a better estimate of the blob centre - see openCV eg's
+        # params.min_area = Scan.MIN_BLOB_AREA
+        # params.min_radius = Scan.MIN_BLOB_RADIUS
         blobs, binary = contours.get_targets(self.image.buffer, params=params, logger=logger)
         self.binary = self.image.instance()
         self.binary.set(binary)
@@ -1451,150 +1446,6 @@ class Scan:
 
         return edge, fail
 
-    def _flatten(self, image: frame.Frame, extent: Extent) -> (frame.Frame, float):
-        """ remove perspective distortions from the given projected image and its inner/outer edges,
-            this helps to mitigate ring width distortions which is significant when we analyse the image,
-            a circle when not viewed straight on appears as an ellipse, when that is projected into a rectangle
-            the radius edges become 'wavy' (a sine wave), this function straightens those wavy edges, other
-            distortions can arise if the target is curved (e.g. if it is wrapped around someone's leg), in
-            this case the outer rings are even more 'wavy', for the purposes of this function the distortion
-            is assumed to be proportional to the variance in the inner and outer edge positions, we know between
-            the inner and outer edges there are N rings, we apply a stretching factor to each ring that is a
-            function of the inner and outer edge variance,
-            the returned image is re-scaled to just cover the target rings
-            """
-
-        def get_extent(data_width):
-            """ given a data width return the corresponding inner start, outer end, and image height,
-                the start of the inner edge is where the first black pixel is expected,
-                the end of the outer edge is where the first white pixel is expected,
-                the image height is the resultant image height required to encompass all the elements
-                """
-
-            ring_size = data_width / Scan.INNER_OUTER_SPAN_RINGS
-            min_ring_size = max(self.cells[1], Scan.MIN_PIXELS_PER_RING)
-            ring_size = max(ring_size, min_ring_size)
-
-            new_data_width = int(math.ceil(ring_size * Scan.INNER_OUTER_SPAN_RINGS))
-            new_inner_width = int(math.ceil(ring_size * Scan.BULLSEYE_RINGS))
-            new_outer_width = int(math.ceil(ring_size))
-
-            new_inner_start = new_inner_width
-            new_outer_end = new_inner_start + new_data_width
-            new_image_height = new_outer_end + new_outer_width
-
-            return new_inner_start, new_outer_end, new_image_height
-
-        def stretch_pixels(pixels, size):
-            """ given a vector of pixels stretch/shrink them such that the resulting pixels is size long,
-                linear interpolation is done between stretched pixels,
-                see https://towardsdatascience.com/image-processing-image-scaling-algorithms-ae29aaa6b36c
-                """
-
-            dest = [None for _ in range(size)]
-            scale_y = size / len(pixels)
-
-            if size < len(pixels):
-                # we're shrinking
-                for y in range(size):
-                    y_scaled = min(int(round(y / scale_y)), len(pixels) - 1)
-                    pixel = pixels[y_scaled]
-                    dest[y] = pixel
-
-            else:
-                # we're stretching
-
-                for y in range(size):
-                    y_scaled = y / scale_y
-
-                    y_above = math.floor(y_scaled)
-                    y_below = min(math.ceil(y_scaled), len(pixels) - 1)
-
-                    if y_above == y_below:
-                        pixel = pixels[y_above]
-                    else:
-                        pixel_above = pixels[y_above]
-                        pixel_below = pixels[y_below]
-                        # Interpolating P
-                        pixel = ((y_below - y_scaled) * pixel_above) + ((y_scaled - y_above) * pixel_below)
-
-                    dest[y] = int(round(pixel))
-
-            return dest
-
-        def stretch_slice(x, src_image, src_start_y, src_end_y, dst_image, dst_start_y, dst_end_y):
-            """ stretch a slice of pixels at x co-ord from src_image to dst_image,
-                pixels between src_start_y and src_end_y (inclusive) are
-                stretched between dst_start_y and dst_end_y (also inclusive)
-                """
-            in_range = range(src_start_y, src_end_y + 1)
-            in_pixels = [None for _ in in_range]
-            out_y = 0
-            for in_y in in_range:
-                in_pixels[out_y] = src_image.getpixel(x, in_y)
-                out_y += 1
-            # stretch to the out pixels
-            out_pixels = stretch_pixels(in_pixels, dst_end_y - dst_start_y + 1)
-            # move out pixels to our image
-            out_y = dst_start_y
-            for y in range(len(out_pixels)):
-                dst_image.putpixel(x, out_y, out_pixels[y])
-                out_y += 1
-
-        ring_inner_edge = extent.inner
-        ring_outer_edge = extent.outer
-
-        # get the edge limits we need
-        max_x, projected_y = image.size()
-
-        # we stretch the data to the max distance between inner and outer,
-        # the inner and outer are stretched/shrunk to fit the ring sizes implied by the data,
-        # go find the stretch size
-        max_inner_outer_distance = 0
-        for x in range(max_x):
-            inner_edge = ring_inner_edge[x]
-            outer_edge = ring_outer_edge[x]
-            inner_outer_distance = outer_edge - inner_edge
-            if inner_outer_distance > max_inner_outer_distance:
-                max_inner_outer_distance = inner_outer_distance
-
-        extent = get_extent(max_inner_outer_distance)
-
-        if self.logging:
-            self._log('flatten: max inner/outer distance is {}, new extent is {}'.
-                      format(max_inner_outer_distance, extent))
-
-        # create a new image to flatten into
-        flat_y = extent[2]
-        code = self.original.instance().new(max_x, flat_y, MID_LUMINANCE)
-
-        # build flat image
-        for x in range(max_x):
-            # stretch/shrink the inner pixels
-            stretch_slice(x,
-                          image, 0, ring_inner_edge[x],
-                          code, 0, extent[0] - 1)
-            # stretch the data pixels
-            stretch_slice(x,
-                          image, ring_inner_edge[x] + 1, ring_outer_edge[x] - 1,
-                          code, extent[0], extent[1] - 1)
-            # stretch/shrink the outer pixels
-            stretch_slice(x,
-                          image, ring_outer_edge[x], projected_y - 1,
-                          code, extent[1], extent[2] - 1)
-
-        # calculate the flattened image stretch factor
-        new_stretch = flat_y / projected_y
-
-        if self.save_images:
-            self._unload(code, '05-flat')
-        if self.logging:
-            self._log('flatten: flattened image size {}x {}y, stretch factor={:.2f}, '.
-                      format(max_x, flat_y, new_stretch))
-
-        # return flattened image and its stretch factor
-        return code, new_stretch
-
     def _identify(self, blob_size):
         """ identify the target in the current image with the given blob size (its radius) """
 
@@ -1640,13 +1491,7 @@ class Scan:
             return None
 
         # do the initial edge detection
-        extent = make_extent(target, clean=True, context='-warped')
-
-        # if extent.inner_fail is None and extent.outer_fail is None:
-        #     flat, flat_stretch = self._flatten(target, extent)
-        #     extent = make_extent(flat, clean=True, context='-flat')
-        #     max_x, max_y = flat.size()
-        #     return max_x, max_y, stretch_factor * flat_stretch, extent
+        extent = make_extent(target, clean=False, context='-warped')
 
         max_x, max_y = target.size()
         return max_x, max_y, stretch_factor, extent
@@ -1674,49 +1519,141 @@ class Scan:
 
         return inner_size, outer_size
 
-    def _make_slice(self, digit, extent):
-        """ given a digit return the equivalent slice that fits in the given extent,
-            this is a diagnostic helper for drawing digits
+    @staticmethod
+    def drop_illegal_digits(digits):
+        """ the initial digit classification takes no regard of not allowed digits,
+            this is so we can differentiate junk from noise, we filter those here,
+            returns the modified digits list and a count of digits dropped,
+            this is public to allow test harnesses access
             """
-        ideal = self.decoder.to_ratio(digit)
-        if ideal is None:
-            return None
-        inner_average, outer_average = self._measure(extent, log=False)
-        start_y = int(round(inner_average + 1))
-        end_y = int(round(outer_average))
-        span = end_y - start_y
-        lead_length = span * ideal.lead_ratio()
-        head1_length = span * ideal.head1_ratio()
-        gap_length = span * ideal.gap_ratio()
-        head2_length = span * ideal.head2_ratio()
-        tail_length = span * ideal.tail_ratio()
-        # total = sum(ideal.parts)  # this covers span and is in range 0..?
-        # scale = span / total  # so scale by this to get 0..span
-        # lead_length *= scale
-        # head1_length *= scale
-        # gap_length *= scale
-        # head2_length *= scale
-        # tail_length *= scale
-        lead_start = start_y
-        head1_start = lead_start + lead_length
-        gap_start = head1_start + head1_length
-        head2_start = gap_start + gap_length
-        tail_start = head2_start + head2_length
-        tail_end = tail_start + tail_length
-        return int(round(lead_start)), \
-               int(round(head1_start)), \
-               int(round(gap_start)), \
-               int(round(head2_start)), \
-               int(round(tail_start)), \
-               int(round(tail_end))
+        dropped = 0
+        not_allowed = True
+        while not_allowed and len(digits) > 0:
+            not_allowed = False
+            for choice, (digit, error) in enumerate(digits):
+                coding = codec.Codec.coding(digit)
+                if coding is None:
+                    # we've got a not-allowed classification,
+                    # if the error difference between this and some other choices is small-ish
+                    # consider it noise and drop just that classification,
+                    # if the error difference is large-ish it means we're looking at junk, so drop the lot
+                    if choice == 0:
+                        if choice < (len(digits) - 1):
+                            # we're the first choice and there is a following choice, check it
+                            digit2, error2 = digits[choice + 1]
+                            coding2 = codec.Codec.coding(digit2)
+                            if coding2 is None:
+                                # got another illegal choice, drop that
+                                dropped += 1
+                                del digits[choice + 1]
+                            else:
+                                diff = max(error, error2) - min(error, error2)
+                                if diff < Scan.MAX_NOT_ALLOWED_ERROR_DIFF:
+                                    # its not a confident classification, so just drop this choice (as noise)
+                                    dropped += 1
+                                    del digits[choice]
+                                else:
+                                    # its confidently a not allowed digit, so drop the lot ('cos we're looking at junk)
+                                    dropped += len(digits)
+                                    digits = []
+                        else:
+                            # we're the only choice and illegal, drop it (not silent)
+                            dropped += 1
+                            del digits[choice]
+                    else:
+                        # not first choice, just drop it as a choice (silently)
+                        del digits[choice]
+                    not_allowed = True
+                    break
+        return digits, dropped
+
+    @staticmethod
+    def drop_bad_digits(digits):
+        """ check the error of the given digits and drop those that are 'excessive',
+            returns the modified digits list and a count of digits dropped,
+            this is public to allow test harnesses access
+            """
+        return digits, 0  # ToDo: HACK this is pointless
+        dropped = 0
+        for digit in range(len(digits) - 1, 0, -1):
+            if digits[digit][1] > Scan.MAX_DIGIT_ERROR:
+                # error too big to be considered as real
+                dropped += 1
+                del digits[digit]
+        return digits, dropped
+
+    @staticmethod
+    def drop_bad_zero_digit(digits):
+        """ drop a zero if it has a choice with a small-ish error,
+            returns the modified digits list and a count of digits dropped,
+            this is public to allow test harnesses access
+            """
+        dropped = 0
+        if len(digits) > 1:
+            # there is a choice, check if first is a 0 with a 'close' choice
+            digit1, error1 = digits[0]
+            if digit1 == 0:
+                digit2, error2 = digits[1]  # NB: we know error2 is >= error1 (due to sort above)
+                diff = error2 - error1
+                if diff < Scan.MAX_ZERO_ERROR_DIFF:
+                    # second choice is 'close' to first of 0, so treat 0 as dodgy and drop it
+                    dropped += 1
+                    del digits[0]
+                    # there can only be one zero digit, so we're now done
+        return digits, dropped
+
+    @staticmethod
+    def is_ambiguous(slice):
+        """ test if the top choices in the given slice are ambiguous,
+            this is public to allow test harnesses access
+            """
+        if len(slice) > 1:
+            error1 = slice[0][1]
+            error2 = slice[1][1]
+            diff = max(error1, error2) - min(error1, error2)
+            if diff < Scan.MAX_DIGIT_ERROR_DIFF:
+                # its ambiguous when only a small error difference
+                return True
+        return False
+
+    @staticmethod
+    def show_options(options):
+        """ produce a formatted string to describe the given digit options,
+            this is public to allow test harnesses access
+            """
+        if options is None:
+            return 'None'
+        if len(options) > 0:
+            msg = ''
+            for digit, error in options:
+                msg = '{}, ({}, {:.2f})'.format(msg, digit, error)
+            return msg[2:]
+        else:
+            return '()'
+
+    @staticmethod
+    def show_bits(slice):
+        """ produce a formatted string for the given slice of bits,
+            this is public to allow test harnesses access
+            """
+        ring_width = int(round(len(slice) / codec.Codec.SPAN))
+        bits = ''
+        for ring in range(codec.Codec.SPAN):
+            block = ''
+            for dx in range(ring_width):
+                x = (ring * ring_width) + dx
+                if x >= len(slice):
+                    block = '{}.'.format(block)
+                else:
+                    block = '{}{}'.format(block, slice[x])
+            bits = '{} {}'.format(bits, block)
+        return '[{}]'.format(bits[1:])
 
     def _find_all_digits(self, extent: Extent) -> ([Digit], str):
         """ find all the digits from an analysis of the given extent,
             returns a digit list and None or a partial list and a fail reason,
             the extent is also updated with the slices involved
             """
-
-        # ToDo: if flip to the 'box detection' method this can be simplified to just finding zeroes
 
         if self.logging:
             header = 'find_all_digits:'
@@ -1725,298 +1662,431 @@ class Scan:
         max_x, max_y = buckets.size()
         reason = None
 
-        def show_options(options):
-            """ produce a formatted string to describe the given digit options """
-            if options is None:
-                return 'None'
-            msg = ''
-            for option in options:
-                msg = '{}, ({}, {})'.format(msg, option[0], option[1])
-            return msg[2:]
+        # a 0 in these bit positions mean treat grey as black, else treat as white
+        GREY_BEFORE = 1  # grey option bit mask to specify how to handle grey before the first white
+        GREY_CENTRE = 2  # grey option bit mask to specify how to handle grey between before and after white
+        GREY_AFTER  = 4  # grey option bit mask to specify how to handle grey after the last white
+
+        def drop_dodgy_zero(x, option, digits, logging=False):
+            nonlocal header
+            if logging:
+                before = self.show_options(digits)
+            digits, dropped = self.drop_bad_zero_digit(digits)
+            if logging and dropped > 0:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    {} (option {}): dropping {} zero choices from {} leaving {}'.
+                          format(x, option, dropped, before, self.show_options(digits)))
+            return dropped
+
+        def first_good_choice(slice):
+            """ get the first choice in the given slice,
+                if there are two or more choices and they are ambiguous, return None,
+                if the top two choices are not ambiguous return the first choice (of the 2),
+                else return None,
+                NB: returning None for only 1 choice is important to stop ambiguity resolutions propagating.
+                    A single choice is only possible as a result of ambiguity resolution. ToDo: this is not always true!
+                """
+            if self.is_ambiguous(slice):
+                return None
+            if len(slice) > 1:
+                return slice[0]
+            else:
+                return None
+
+        def show_grey_option(option):
+            """ option is a bit mask of 3 bits, bit 0 = before white, 1 = between, 2 = after
+                a 1 in that bit means treat grey as white and a 0 means treat grey as black
+                """
+            if option & GREY_BEFORE == 0:
+                before = '0'
+            else:
+                before = '1'
+            if option & GREY_CENTRE == 0:
+                centre = '0'
+            else:
+                centre = '1'
+            if option & GREY_AFTER == 0:
+                after = '0'
+            else:
+                after = '1'
+            return '(grey {}{}{})'.format(before, centre, after)
 
         # region generate likely digit choices for each x...
         inner = extent.inner
         outer = extent.outer
-        slices = [[None, None] for _ in range(max_x)]
+        slices = []
         for x in range(max_x):
             start_y = inner[x] + 1  # get past the white bullseye, so start at first black
             end_y   = outer[x]      # this is the first white after the inner black
-            # calculate the nominal ring height
-            # the lead and tail are assumed to be at least this
-            # we only scan the data ring area for the pulses
-            ring_height = (end_y - start_y) / Scan.INNER_OUTER_SPAN_RINGS
-            if ring_height < 1:
-                # data area too small, so this is junk
-                reason = 'data too narrow'
-                break
-            data_start = int(math.floor(start_y + (ring_height * Scan.INNER_BLACK_RINGS)))  # assumed earliest head start
-            data_end = int(math.ceil(end_y - (ring_height * Scan.OUTER_BLACK_RINGS)))  # assumed first outer black
-            # region scan down for lead/head/tail edges...
-            down_lead_start_at = start_y
-            down_head_start_at = None
-            down_tail_start_at = None
-            for y in range(data_start, data_end):
-                pixel = buckets.getpixel(x, y)
-                if pixel == MID_LUMINANCE:
-                    # treat like white when in the data rings (which we know we are here)
-                    pixel = MAX_LUMINANCE
-                if pixel == MAX_LUMINANCE and down_head_start_at is None:
-                    # start of head, end of lead
-                    down_head_start_at = y  # first white after last black
-                    continue
-                if pixel == MIN_LUMINANCE and down_head_start_at is not None:
-                    # end of head, begin of tail
-                    down_tail_start_at = y  # first black after last white
-                    break
-            if down_head_start_at is None:
-                # all black (this is a 0)
-                down_head_start_at = end_y
-                down_tail_start_at = end_y
-            elif down_tail_start_at is None:
-                # white to the end
-                down_tail_start_at = data_end
+            # region get the raw pixels and their luminance edge extremes...
+            pixels = []
+            has_white = 0
+            has_grey = 0
+            first_white = None  # location of first transition from black or grey to white
+            last_white = None  # location of last transition from white to black or grey
+            this_pixel = buckets.getpixel(x, start_y)  # make sure we do not see a transition on the first pixel
+            for y in range(start_y, end_y):
+                prev_pixel = this_pixel
+                dy = y - start_y
+                this_pixel = buckets.getpixel(x, y)
+                pixels.append(this_pixel)
+                if this_pixel != prev_pixel:
+                    # got a transition
+                    if prev_pixel == MAX_LUMINANCE:
+                        # got a from white transition
+                        last_white = dy - 1
+                    if this_pixel == MAX_LUMINANCE and first_white is None:
+                        # got first to white transition
+                        first_white = dy
+                if this_pixel == MAX_LUMINANCE:
+                    has_white += 1
+                elif this_pixel == MID_LUMINANCE:
+                    has_grey += 1
+            # adjust for leading/trailing white
+            if first_white is None:
+                # there was no transition to white
+                if last_white is None:
+                    # there is no transition from white either
+                    if has_white > 0:
+                        # this means its all white
+                        first_white = 0
+                        last_white = len(pixels) - 1
+                    else:
+                        # there is no white
+                        # set an out of range value, so we do not have to check for None in our later loops
+                        first_white = len(pixels) + 1
+                        last_white = first_white
+                else:
+                    # there is transition from white but not to white, this means its all white from the start
+                    first_white = 0
+            elif last_white is None:
+                # there is a transition to white but not from white, that means it ran into the end
+                last_white = len(pixels) - 1
             # endregion
-            # region scan up for tail/head/lead edges...
-            up_head_start_at = None
-            up_tail_start_at = None
-            up_tail_end_at = end_y - 1
-            for y in range(data_end - 1, data_start - 1, -1):  # NB: scanning backwards, from bottom to top
-                pixel = buckets.getpixel(x, y)
-                if pixel == MID_LUMINANCE:
-                    # treat like white when in the data rings (which we know we are here)
-                    pixel = MAX_LUMINANCE
-                if pixel == MAX_LUMINANCE and up_tail_start_at is None:
-                    # start of tail, end of head
-                    up_tail_start_at = y + 1  # get back to the black (first black after last head white)
-                    continue
-                if pixel == MIN_LUMINANCE and up_tail_start_at is not None:
-                    # start of head
-                    up_head_start_at = y + 1  # get back to the white (last head white)
+            # region build the options for the grey treatment...
+            # the options are: grey before first white as black or white
+            #                  grey after last white as black or white
+            #                  grey between first and last white as black or white
+            # we classify the pixels adjusted for these options, then pick the best,
+            # this has the effect of sliding the central pulse up/down around the grey boundaries
+            # there are 8 combinations of greys - before b/w * between b/w * after b/w
+            options = []
+            for option in range(8):
+                # option is a bit mask of 3 bits, bit 0 = before white, 1 = between, 2 = after
+                # a 1 in that bit means treat grey as white and a 0 means treat grey as black
+                # NB: option 0 must be to consider *all* greys as black
+                slice = []
+                for y, pixel in enumerate(pixels):
+                    if pixel == MID_LUMINANCE:
+                        if y < first_white:
+                            if option & GREY_BEFORE == 0:
+                                # treat before as black
+                                pixel = MIN_LUMINANCE
+                            else:
+                                # treat before as white
+                                pixel = MAX_LUMINANCE
+                        if y > last_white:
+                            if option & GREY_AFTER == 0:
+                                # treat after as black
+                                pixel = MIN_LUMINANCE
+                            else:
+                                # treat after as white
+                                pixel = MAX_LUMINANCE
+                        if y > first_white and y < last_white:
+                            if option & GREY_CENTRE == 0:
+                                # treat between as black
+                                pixel = MIN_LUMINANCE
+                            else:
+                                # treat between as white
+                                pixel = MAX_LUMINANCE
+                    if pixel == MIN_LUMINANCE:
+                        slice.append(0)
+                    elif pixel == MAX_LUMINANCE:
+                        slice.append(1)
+                    else:
+                        # can't get here
+                        raise Exception('Got unexpected MID_LUMINANCE')
+                options.append((option, slice))
+                if has_grey == 0:
+                    # there are no greys, so don't bother with the rest
                     break
-            if up_tail_start_at is None:
-                # all black (this is a 0)
-                up_tail_start_at = end_y
-                up_head_start_at = end_y
-            elif up_head_start_at is None:
-                # white to the end
-                up_head_start_at = data_start
+            # get rid of duplicates (this can happen if there are no greys before but some after, etc)
+            if len(options) > 1:
+                for option in range(len(options)-1, 0, -1):
+                    _, this_bits = options[option]
+                    for other in range(option):
+                        _, other_bits = options[other]
+                        if this_bits == other_bits:
+                            del options[option]
+                            break
             # endregion
-            # calculate ratios using the discovered lead/head and head/tail edges
-            # we calculate the overall data width (outer - inner edges), and the
-            # lengths of the components discovered, this is passed to our decode
-            # to determine the ratios (this delegates knowledge of pulse shapes
-            # to the decoded)
-            down_lead_length = down_head_start_at - down_lead_start_at
-            down_head_length = down_tail_start_at - down_head_start_at
-            up_head_length = up_tail_start_at - up_head_start_at
-            up_tail_length = up_tail_end_at - up_tail_start_at + 1
-            data_length = end_y - start_y
-            slices[x][0] = self.decoder.make_ratio(down_lead_length, up_tail_length, down_head_length,
-                                                   up_head_length, data_length)
-            slices[x][1] = self.decoder.classify(slices[x][0])
+            # region build the digits for each option...
+            slice = []
+            if self.logging:
+                prefix = '{:3n}:'.format(x)
+                disqualified = []
+                illegal = []
+                big_error = []
+                bad_zero = []
+            for option, (mask, bits) in enumerate(options):
+                if not self.decoder.qualify(bits):
+                    if self.logging:
+                        disqualified.append(option)
+                    slice.append([])  # set an empty digit list
+                    continue
+                raw_digits = self.decoder.classify(bits)
+                # drop illegal digits
+                digits, dropped = self.drop_illegal_digits(raw_digits.copy())
+                if self.logging and dropped > 0:
+                    illegal.append((option, raw_digits, dropped))
+                # drop digits with an excessive error
+                digits, dropped = self.drop_bad_digits(digits)
+                if self.logging and dropped > 0:
+                    big_error.append((option, raw_digits, dropped))
+                # drop a zero if it has a choice with a small-ish error
+                dropped = drop_dodgy_zero(x, option, digits)
+                if self.logging and dropped > 0:
+                    bad_zero.append((option, raw_digits, dropped))
+                slice.append(digits)
+            # log what happened
+            if self.logging:
+                if len(disqualified) > 0 or len(illegal) > 0 or len(big_error) > 0 or len(bad_zero) > 0:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                    for option in disqualified:
+                        mask, bits = options[option]
+                        self._log('    {}{} ignoring non-qualifying bits {}'.
+                                  format(prefix, show_grey_option(mask), self.show_bits(bits)))
+                        prefix = '    '
+                    for option, raw_digits, dropped in illegal:
+                        mask, bits = options[option]
+                        self._log('    {}{} dropping {} illegal choices from {}'.
+                                  format(prefix, show_grey_option(mask), dropped, self.show_options(raw_digits)))
+                        prefix = '    '
+                    for option, raw_digits, dropped in big_error:
+                        mask, bits = options[option]
+                        self._log('    {}{} dropping {} big error choices from {}'.
+                                  format(prefix, show_grey_option(mask), dropped, self.show_options(raw_digits)))
+                        prefix = '    '
+                    for option, raw_digits, dropped in bad_zero:
+                        mask, bits = options[option]
+                        self._log('    {}{} dropping {} zero choices from {}'.
+                                  format(prefix, show_grey_option(mask), dropped, self.show_options(raw_digits)))
+                        prefix = '    '
+            # endregion
+            # region merge the grey options...
+            # get rid of dodgy 0's, a 'dodgy' 0 is one where option 0 is black but some other is not
+            # NB: option 0 is where all greys are considered to be black
+            grey_as_black = slice[0]
+            if len(grey_as_black) > 0 and grey_as_black[0][0] == 0:
+                # it thinks its a zero, so check others
+                invalid = 0
+                for option in range(1, len(slice)):
+                    if len(slice[option]) == 0:
+                        # this means this option had no valid digits, but for the classifier to say this there
+                        # must be white or grey pixels present, so the 0 is in doubt, if all other options are
+                        # also invalid, we drop the 0, so just count them here
+                        invalid += 1
+                        continue
+                    if slice[option][0][0] != 0:
+                        # some other option thinks it is not 0, so its a dodgy 0, drop all in that slice
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}{} dropping zero slice: {} in favour of {}'.
+                                      format(prefix, show_grey_option(option), self.show_options(slice[0]), self.show_options(slice[option])))
+                            prefix = '    '
+                        del slice[0]
+                        break
+                if invalid > 0 and invalid == (len(slice) - 1):
+                    # all other options are invalid, so do not trust the initial 0, drop it
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                        self._log('    {}{} dropping zero: {} all its other {} options are invalid'.
+                                  format(prefix, show_grey_option(0), self.show_options(slice[0]), invalid))
+                        prefix = '    '
+                    del slice[0]
+            # join all the (remaining) slices so we can find the best choice for each digit
+            choices = []
+            for option in slice:
+                choices += option
+            choices.sort(key=lambda d: (d[0], d[1]))  # put like digits together in least error order
+            for choice in range(len(choices) - 1, 0, -1):
+                if choices[choice][0] == choices[choice-1][0]:
+                    # duplicate digit, we're on the worst one, so dump that
+                    del choices[choice]
+            choices.sort(key=lambda d: d[1])  # put merged list into least error order
+            drop_dodgy_zero(x, 0, choices, self.logging)  # JIC some percolated up
+            # endregion
+            slices.append(choices)
+        # region check for and resolve ambiguous choices...
+        # ambiguity can lead to false positives, which we want to avoid,
+        # an ambiguous choice is when a digit has (nearly) equal error choices,
+        # we try to find a choice that matches one of its non-ambiguous neighbours,
+        # if found, resolve to that, otherwise drop the digit
+        for x, slice in enumerate(slices):
+            best_choice = first_good_choice(slice)
+            if best_choice is None:
+                # got no, or an ambiguous, choice, check its neighbours
+                left_x = (x - 1) % max_x
+                right_x = (x + 1) % max_x
+                left_choice = first_good_choice(slices[left_x])
+                right_choice = first_good_choice(slices[right_x])
+                if left_choice is None and right_choice is None:
+                    # both neighbours are ambiguous too, so just drop this one
+                    if len(slice) > 0:
+                        # there is something to drop
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}: dropping ambiguous choices: {}'.format(x, self.show_options(slices[x])))
+                        slices[x] = []
+                    continue
+                # there is scope to resolve this ambiguity
+                if self.logging:
+                    if header is not None:
+                        self._log(header)
+                        header = None
+                # if only 1 choice, inherit the other (that makes them the same in comparisons below)
+                if left_choice is None:
+                    left_choice = right_choice
+                    left_x = right_x
+                if right_choice is None:
+                    right_choice = left_choice
+                    right_x = left_x
+                # choose best neighbour
+                left_digit, left_error = left_choice
+                right_digit, right_error = right_choice
+                if len(slice) < 2:
+                    # we've got no choice, so just inherit our best neighbour
+                    if left_error < right_error:
+                        if self.logging:
+                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
+                                      format(x, self.show_options(slices[x]), left_x, self.show_options(slices[left_x])))
+                        slices[x] = [left_choice]
+                    else:
+                        if self.logging:
+                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
+                                      format(x, self.show_options(slices[x]), right_x, self.show_options(slices[right_x])))
+                        slices[x] = [right_choice]
+                    continue
+                # we have choices to resolve
+                digit1, error1 = slice[0]
+                digit2, error2 = slice[1]
+                if left_error < right_error:
+                    # try left neighbour first
+                    if digit1 == left_digit or digit2 == left_digit:
+                        # got a match use it
+                        if self.logging:
+                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
+                                      format(x, self.show_options(slices[x]), left_x, self.show_options(slices[left_x])))
+                        slice[0] = left_choice
+                        del slice[1]
+                        continue
+                # try right neighbour
+                if digit1 == right_digit or digit2 == right_digit:
+                    # got a match use it
+                    if self.logging:
+                        self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
+                                  format(x, self.show_options(slices[x]), right_x, self.show_options(slices[right_x])))
+                    slice[0] = right_choice
+                    del slice[1]
+                    continue
+                # neither side matches, just drop it
+                if self.logging:
+                    self._log('    {}: dropping ambiguous choices: {}'.format(x, self.show_options(slices[x])))
+                slices[x] = []
+                continue
+        # endregion
+        # region resolve singletons...
+        # a singleton is a single slice bordered both sides by some valid digit
+        # these are considered to be noise and inherit their best neighbour
+        for x, this_slice in enumerate(slices):
+            left_x = (x - 1) % max_x
+            right_x = (x + 1) % max_x
+            left_slice = slices[left_x]
+            right_slice = slices[right_x]
+            if len(left_slice) == 0 or len(right_slice) == 0:
+                # we have not got both neighbours
+                continue
+            left_digit, left_error = left_slice[0]
+            right_digit, right_error = right_slice[0]
+            if len(this_slice) == 0:
+                # inherit best neighbour
+                pass
+            else:
+                this_digit, this_error = this_slice[0]
+                if left_digit == this_digit or right_digit == this_digit:
+                    # not a potential singleton
+                    continue
+            # inherit best neighbour
+            # do not inherit sync unless both sides are sync
+            if left_digit == codec.Codec.SYNC_DIGIT and right_digit == codec.Codec.SYNC_DIGIT:
+                # both sides are sync, so allow inherit
+                pass
+            elif left_digit == codec.Codec.SYNC_DIGIT:
+                # do not allow inherit of left
+                left_slice = right_slice
+                left_x = right_x
+            else:  # right_digit == codec.Codec.SYNC_DIGIT:
+                # do not allow inherit of right
+                right_slice = left_slice
+                right_x = left_x
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+            if left_error < right_error:
+                if self.logging:
+                    self._log('    {}: resolve singleton {} to {}: {}'.
+                              format(x, self.show_options(this_slice), left_x, self.show_options(left_slice)))
+                slices[x] = left_slice
+            else:
+                if self.logging:
+                    self._log('    {}: resolve singleton {} to {}: {}'.
+                              format(x, self.show_options(this_slice), right_x, self.show_options(right_slice)))
+                slices[x] = right_slice
+            continue
+        # endregion
         if self.logging:
             if header is not None:
                 self._log(header)
                 header = None
             self._log('    initial slices (fail reason {}):'.format(reason))
-            for x, (ratio, options) in enumerate(slices):
-                self._log('        {}: ratio={}, options={}'.format(x, ratio, show_options(options)))
+            for x, options in enumerate(slices):
+                self._log('        {}: options={}'.format(x, self.show_options(options)))
         # endregion
-
-        if reason is None:
-            # region repeat removing singles, doubles and triples until nothing changes...
-            singles = 0
-            doubles = 0
-            triples = 0
-            changes = True
-            passes = 0
-            if self.logging:
-                sub_header = 'remove singles, doubles and triples'
-            while changes:
-                changes = False
-                # adjust singles by removing its first choice
-                for x, (ratio, this) in enumerate(slices):
-                    if ratio is None:
-                        continue
-                    ratio, pred = slices[(x - 1) % max_x]
-                    if ratio is None:
-                        continue
-                    ratio, succ = slices[(x + 1) % max_x]
-                    if ratio is None:
-                        continue
-                    removed = []
-                    while len(this) > 0:
-                        if this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
-                            # got a single, remove top choice
-                            if len(this) > 1:
-                                # got choices, so remove one
-                                removed.append(this[0])
-                                del this[0]
-                            else:
-                                # no choices left, morph to one of our neighbours, which one?
-                                removed.append(this[0])
-                                this[0] = pred[0]
-                        else:
-                            # not, or no longer, a single
-                            break
-                    if len(removed) > 0:
-                        # we made a change
-                        changes = True
-                        singles += 1
-                        if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            if sub_header is not None:
-                                self._log('    {}:'.format(sub_header))
-                                sub_header = None
-                            self._log('        pass {} at {}: (single) removed {} leaving {}'.
-                                      format(passes, x, show_options(removed), show_options(this)))
-                if changes:
-                    passes += 1
-                    continue
-
-                # no singles left, adjust doubles by making one of them into a single
-                # for x, (ratio, this) in enumerate(slices):
-                #     if ratio is None:
-                #         continue
-                #     ratio, pred = slices[(x - 1) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     ratio, that = slices[(x + 1) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     ratio, succ = slices[(x + 2) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     removed = []
-                #     while len(this) > 0 or len(that) > 0:
-                #         if this[0][0] == that[0][0] and this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
-                #             # got a double, remove top choices
-                #             if len(this) > 1:
-                #                 # there is a choice
-                #                 removed.append(this[0])
-                #                 del this[0]
-                #             elif len(that) > 1:
-                #                 # there is a choice
-                #                 removed.append(that[0])
-                #                 del that[0]
-                #             else:
-                #                 # no choices left, morph to one of our neighbours, which one?
-                #                 removed.append(this[0])
-                #                 this[0] = pred[0]
-                #         else:
-                #             # not or no longer a double
-                #             break
-                #     if len(removed) > 0:
-                #         # we made a change
-                #         changes = True
-                #         doubles += 1
-                #         if self.logging:
-                #             if header is not None:
-                #                 self._log(header)
-                #                 header = None
-                #             if sub_header is not None:
-                #                 self._log('    {}:'.format(sub_header))
-                #                 sub_header = None
-                #             self._log('        pass {} at {}: (double) removed {} leaving {}'.
-                #                       format(passes, x, show_options(removed), show_options(this)))
-                # if changes:
-                #     passes += 1
-                #     continue
-
-                # no doubles left, adjust triples by making one of them into a single
-                # for x, (ratio, this) in enumerate(slices):
-                #     if ratio is None:
-                #         continue
-                #     ratio, pred = slices[(x - 2) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     ratio, left = slices[(x - 1) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     ratio, right = slices[(x + 1) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     ratio, succ = slices[(x + 2) % max_x]
-                #     if ratio is None:
-                #         continue
-                #     removed = []
-                #     while len(left) > 0 or len(this) > 0 or len(right) > 0:
-                #         if this[0][0] == left[0][0] and this[0][0] == right[0][0]:
-                #             # got a potential triple
-                #             if this[0][0] != pred[0][0] and this[0][0] != succ[0][0]:
-                #                 # got a triple, remove top choice
-                #                 if len(this) > 1:
-                #                     # there is a choice
-                #                     removed.append(this[0])
-                #                     del this[0]
-                #                 elif len(left) > 1:
-                #                     # there is a choice
-                #                     removed.append(left[0])
-                #                     del left[0]
-                #                 elif len(right) > 1:
-                #                     # there is a choice
-                #                     removed.append(right[0])
-                #                     del right[0]
-                #                 else:
-                #                     # no choices left, morph to one of our neighbours, which one?
-                #                     removed.append(this[0])
-                #                     this[0] = pred[0]
-                #             else:
-                #                 # not or no longer a triple
-                #                 break
-                #         else:
-                #             # not or no longer a triple
-                #             break
-                #     if len(removed) > 0:
-                #         # we made a change
-                #         changes = True
-                #         triples += 1
-                #         if self.logging:
-                #             if header is not None:
-                #                 self._log(header)
-                #                 header = None
-                #             if sub_header is not None:
-                #                 self._log('    {}:'.format(sub_header))
-                #                 sub_header = None
-                #             self._log('        pass {} at {}: (triple) removed {} leaving {}'.
-                #                       format(passes, x, show_options(removed), show_options(this)))
-                # if changes:
-                #     passes += 1
-                #     continue
-
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                self._log('    {} passes, {} singles adjusted, {} doubles adjusted, {} triples adjusted'.
-                          format(passes, singles, doubles, triples))
-                self._log('    final slices:')
-                for x, (ratio, digit) in enumerate(slices):
-                    self._log('        {}: ratio={}, options={}'.format(x, ratio, show_options(digit)))
-            #endregion
-
         # region build digit list...
         digits = []
         last_digit = None
-        for x, (ratio, this) in enumerate(slices):
-            if ratio is None:
-                # this is junk - ignore it
-                continue
+        for x, options in enumerate(slices):
+            if len(options) == 0:
+                # this is junk - treat like an unknown digit
+                best_digit = None
+                best_error = 1.0
+            else:
+                # we only look at the best choice and only iff the next best has a worse error
+                best_digit, best_error = options[0]
             if last_digit is None:
                 # first digit
-                last_digit = Scan.Digit(this[0][0], this[0][1].error, x, 1)
-            elif this[0][0] == last_digit.digit:
+                last_digit = Scan.Digit(best_digit, best_error, x, 1)
+            elif best_digit == last_digit.digit:
                 # continue with this digit
-                last_digit.error += this[0][1].error  # accumulate error
+                last_digit.error += best_error  # accumulate error
                 last_digit.samples += 1         # and sample count
             else:
                 # save last digit
                 last_digit.error /= last_digit.samples  # set average error
                 digits.append(last_digit)
                 # start a new digit
-                last_digit = Scan.Digit(this[0][0], this[0][1].error, x, 1)
+                last_digit = Scan.Digit(best_digit, best_error, x, 1)
         # deal with last digit
         if last_digit is None:
             # nothing to see here...
@@ -2038,17 +2108,6 @@ class Scan:
             digits.append(last_digit)
         # endregion
 
-        if reason is None:
-            # region check digits not too big...
-            # check for reasonable digit widths, digits too big mean we are looking at junk
-            max_digit_width = (max_x / Scan.NUM_SEGMENTS) * Scan.MAX_DIGIT_WIDTH
-            for x, digit in enumerate(digits):
-                if digit.samples > max_digit_width:
-                    # too big
-                    reason = 'digit too big'
-                    break
-            # end region
-
         # save slices in the extent for others to use
         extent.slices = slices
 
@@ -2057,35 +2116,40 @@ class Scan:
                 self._log(header)
                 header = None
             self._log('    {} digits (fail reason {}):'.format(len(digits), reason))
-            for x, digit in enumerate(digits):
-                self._log('        {}: {}'.format(x, digit))
+            for item, digit in enumerate(digits):
+                self._log('        {}: {}'.format(item, digit))
 
         if self.save_images:
             plot = self.transform.copy(buckets)
-            lead_lines = []
-            head1_lines = []
-            gap_lines = []
-            head2_lines = []
-            tail_lines = []
-            for x, (ratio, slice) in enumerate(slices):
-                if ratio is None:
-                    # this is junk
+            ones = []
+            zeroes = []
+            for x, options in enumerate(slices):
+                if len(options) == 0:
                     continue
-                x_slice = self._make_slice(slice[0][0], extent)
-                if x_slice is None:
-                    # not a valid digit
+                start_y = inner[x] + 1
+                end_y = outer[x]
+                slice = self.decoder.make_slice(options[0][0], end_y - start_y)
+                if slice is None:
                     continue
-                lead_start, head1_start, gap_start, head2_start, tail_start, tail_end = x_slice
-                lead_lines.append((x, lead_start, x, head1_start - 1))
-                head1_lines.append((x, head1_start, x, gap_start - 1))
-                gap_lines.append((x, gap_start, x, head2_start - 1))
-                head2_lines.append((x, head2_start, x, tail_start - 1))
-                tail_lines.append((x, tail_start, x, tail_end - 1))
-            plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head1_lines, Scan.RED)
-            plot = self._draw_lines(plot, gap_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head2_lines, Scan.RED)
-            plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
+                last_bit = None
+                for dy, bit in enumerate(slice):
+                    if bit is None:
+                        continue
+                    if last_bit is None:
+                        last_bit = (dy, bit)
+                    elif bit != last_bit[1]:
+                        # end of a run
+                        if last_bit[1] == 0:
+                            zeroes.append((x, last_bit[0] + start_y, x, start_y + dy - 1))
+                        else:
+                            ones.append((x, last_bit[0] + start_y, x, start_y + dy - 1))
+                        last_bit = (dy, bit)
+                if last_bit[1] == 0:
+                    zeroes.append((x, last_bit[0] + start_y, x, end_y - 1))
+                else:
+                    ones.append((x, last_bit[0] + start_y, x, end_y - 1))
+            plot = self._draw_lines(plot, ones, colour=Scan.RED)
+            plot = self._draw_lines(plot, zeroes, colour=Scan.GREEN)
             self._unload(plot, '05-slices')
 
         return digits, reason
@@ -2099,20 +2163,42 @@ class Scan:
             or a partial list and a reason if failed
             """
 
+        buckets = extent.buckets
+        max_x, max_y = buckets.size()
+        nominal_digit_width = (max_x / Scan.NUM_SEGMENTS)
+        max_digit_width = nominal_digit_width * Scan.MAX_DIGIT_WIDTH
+        min_digit_width = nominal_digit_width * Scan.MIN_DIGIT_WIDTH
+        min_splittable_digit_width = nominal_digit_width * Scan.MIN_SPLITTABLE_DIGIT_WIDTH
+        min_droppable_digit_width = nominal_digit_width * Scan.MIN_DROPPABLE_WIDTH
+        reason = None  # this is set to a reason mnemonic if we fail
+
         if self.logging:
-            header = 'find_best_digits:'
+            header = 'find_best_digits: digit width: nominal={:.2f}, limits={:.2f}..{:.2f}, ' \
+                     'min splittable: {:.2f}, droppable: {:.2f}'.\
+                     format(nominal_digit_width, min_digit_width, max_digit_width,
+                            min_splittable_digit_width, min_droppable_digit_width)
 
         def find_best_2nd_choice(slices, slice_start, slice_end):
             """ find the best 2nd choice in the given slices,
                 return the digit, how many there are and the average error,
                 the return info is sufficient to create a Scan.Digit
                 """
-            second_choice = [[0, 0] for _ in range(self.decoder.base)]
+            second_choice = [[0, 0] for _ in range(Scan.DIGIT_BASE)]
             for x in range(slice_start, slice_end):
-                _, options = slices[x % len(slices)]
+                options = slices[x % len(slices)]
                 if len(options) > 1:
-                    second_choice[options[1][0]][0] += 1
-                    second_choice[options[1][0]][1] += options[1][1].error
+                    # there is a 2nd choice
+                    digit, error = options[1]
+                    second_choice[digit][0] += 1
+                    second_choice[digit][1] += error
+                elif len(options) > 0:
+                    # no second choice, use the first
+                    digit, error = options[0]
+                else:
+                    # nothing here at all
+                    continue
+                second_choice[digit][0] += 1
+                second_choice[digit][1] += error
             best_digit = None
             best_count = 0
             best_error = 0
@@ -2121,7 +2207,9 @@ class Scan:
                     best_digit = digit
                     best_count = count
                     best_error = error
-            return best_digit, best_count, best_error / best_count
+            if best_count > 0:
+                best_error /= best_count
+            return best_digit, best_count, best_error
 
         def shrink_digit(slices, digit, start, samples) -> Scan.Digit:
             """ shrink the indicated digit to the start and size given,
@@ -2131,14 +2219,19 @@ class Scan:
             # calculate the revised error
             error = 0
             for x in range(start, start + samples):
-                _, options = slices[x % len(slices)]
-                error += options[0][1].error
-            error /= samples
+                options = slices[x % len(slices)]
+                if len(options) == 0:
+                    # treat nothing as a worst case error
+                    error += 1.0
+                else:
+                    error += options[0][1]
+            if samples > 0:
+                error /= samples
             # create a new digit
             new_digit = Scan.Digit(digit.digit, error, start % len(slices), samples)
             return new_digit
 
-        # translate digits from [Digit] to [[Digit]] so we can mess with it and not change indices
+        # translate digits from [Digit] to [[Digit]] so we can mess with it and not change indices,
         # indices into digits_list must remain constant even while we are adding/removing digits
         # we achieve this by having a list of digits for each 'digit', that list is emptied when
         # a digit is removed or extended when a digit is added, for any index 'x' digits[x] is
@@ -2152,14 +2245,20 @@ class Scan:
             if self.decoder.is_sync_digit(digit.digit):
                 copies.append([x])
         if len(copies) < Scan.COPIES:
-            # not enough zeroes - that's a show-stopper
+            # not enough sync digits - that's a show-stopper
             reason = 'too few syncs'
         else:
-            # if too many sync digits - dump the smallest with the most error
+            # if too many sync digits - dump the smallest droppable sync digit with the biggest error
             while len(copies) > Scan.COPIES:
-                smallest_x = 0  # index into copy
-                for x in range(1, len(copies)):
+                smallest_x = None  # index into copy of the smallest sync digit
+                for x in range(len(copies)):
                     xx = copies[x][0]
+                    if digits[xx].samples >= min_droppable_digit_width:
+                        # too big to drop
+                        continue
+                    if smallest_x is None:
+                        smallest_x = x
+                        continue
                     smallest_xx = copies[smallest_x][0]
                     if digits[xx].samples < digits[smallest_xx].samples:
                         # less samples
@@ -2168,6 +2267,10 @@ class Scan:
                         if digits[xx].error > digits[smallest_xx].error:
                             # same samples but bigger error
                             smallest_x = x
+                if smallest_x is None:
+                    # nothing small enough to drop - that's a show stopper
+                    reason = 'too many syncs'
+                    break
                 smallest_xx = copies[smallest_x][0]
                 if self.logging:
                     if header is not None:
@@ -2177,14 +2280,9 @@ class Scan:
                               format(smallest_xx, digits[smallest_xx]))
                 digits_list[smallest_xx] = None
                 del copies[smallest_x]
-            reason = None
         if reason is None:
-            boxes, reason = self._find_data_boxes(extent, digits, copies)  # ToDo: HACK
-            if reason is None:
-                bits = self._decode_data_boxes(boxes, extent)  # ToDo: HACK
             # find the actual digits between the syncs
-            reason = None
-            for copy in copies:
+            for copy_num, copy in enumerate(copies):
                 xx = copy[0]
                 while True:
                     xx = (xx + 1) % len(digits)
@@ -2211,15 +2309,21 @@ class Scan:
                         if biggest_x is None:
                             # found first split candidate
                             biggest_x = x
+                            biggest_digit = digits[copy[biggest_x]]
+                            if biggest_digit.samples < min_splittable_digit_width:
+                                # too small to split:
+                                biggest_x = None
                             continue
                         biggest_digit = digits[copy[biggest_x]]
                         if digits[xx].samples > biggest_digit.samples:
+                            # found a bigger candidate
                             biggest_x = x
                         elif digits[xx].samples == biggest_digit.samples:
                             if digits[xx].error > biggest_digit.error:
+                                # find a same size candidate with a bigger error
                                 biggest_x = x
                     if biggest_x is None:
-                        # everything has been split and still not enough - this is a show stopper
+                        # everything splittable has been split and still not enough - this is a show stopper
                         reason = 'too few digits'
                         break
                     biggest_xx = copy[biggest_x]
@@ -2255,9 +2359,9 @@ class Scan:
                     digits_list[biggest_xx] = [digit_1, digit_2]
                     digits_required -= 1
                 while len(copy) > digits_required:
-                    # too many digits - drop the smallest with the biggest error that is not a zero
+                    # too many digits - drop the smallest with the biggest error that is not a sync digit
                     smallest_x = None
-                    for x in range(1, len(copy)):  # never consider the initial 0
+                    for x in range(1, len(copy)):  # never consider the initial sync digit
                         xx = copy[x]
                         digits_xx = digits_list[xx]
                         if digits_xx is None:
@@ -2269,13 +2373,23 @@ class Scan:
                         if smallest_x is None:
                             # found first dump candidate
                             smallest_x = x
+                            smallest_digit = digits[copy[smallest_x]]
+                            if smallest_digit.samples >= min_droppable_digit_width:
+                                # too big to drop
+                                smallest_x = None
                             continue
                         smallest_digit = digits[copy[smallest_x]]
                         if digits[xx].samples < smallest_digit.samples:
+                            # found a smaller candidate
                             smallest_x = x
                         elif digits[xx].samples == smallest_digit.samples:
                             if digits[xx].error > smallest_digit.error:
+                                # found a similar size candidate with a bigger error
                                 smallest_x = x
+                    if smallest_x is None:
+                        # nothing (left) small enough to drop, that's a show stopper
+                        reason = 'too many digits'
+                        break
                     smallest_xx = copy[smallest_x]
                     if self.logging:
                         if header is not None:
@@ -2287,7 +2401,10 @@ class Scan:
                     digits_required += 1
                 if reason is not None:
                     # we've given up someplace
-                    break
+                    if self.logging:
+                        continue  # carry on to check other copies so logs are more intelligible
+                    else:
+                        break  # no point looking at other copies
 
         # build the final digit list
         best_digits = []
@@ -2297,6 +2414,18 @@ class Scan:
                 continue
             for digit in digits:
                 best_digits.append(digit)
+
+        if reason is None:
+            # check we're not left with digits that are too small or too big
+            for digit in best_digits:
+                if digit.samples > max_digit_width:
+                    # too big
+                    reason = 'digit too big'
+                    break
+                elif digit.samples < min_digit_width:
+                    # too small
+                    reason = 'digit too small'
+                    break
 
         if self.logging:
             if header is not None:
@@ -2308,1170 +2437,45 @@ class Scan:
 
         if self.save_images:
             buckets = extent.buckets
-            max_x, max_y = buckets.size()
+            max_x, _ = buckets.size()
             plot = self.transform.copy(buckets)
-            lead_lines = []
-            head1_lines = []
-            gap_lines = []
-            head2_lines = []
-            tail_lines = []
+            ones = []
+            zeroes = []
+            nones = []
             for digit in best_digits:
-                digit_slice = self._make_slice(digit.digit, extent)
-                if digit_slice is None:
-                    # not a valid digit
-                    continue
-                lead_start, head1_start, gap_start, head2_start, tail_start, tail_end = digit_slice
-                for sample in range(digit.samples):
-                    x = (digit.start + sample) % max_x
-                    lead_lines.append((x, lead_start, x, head1_start - 1))
-                    head1_lines.append((x, head1_start, x, gap_start - 1))
-                    gap_lines.append((x, gap_start, x, head2_start - 1))
-                    head2_lines.append((x, head2_start, x, tail_start - 1))
-                    tail_lines.append((x, tail_start, x, tail_end - 1))
-            plot = self._draw_lines(plot, lead_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head1_lines, Scan.RED)
-            plot = self._draw_lines(plot, gap_lines, Scan.GREEN)
-            plot = self._draw_lines(plot, head2_lines, Scan.RED)
-            plot = self._draw_lines(plot, tail_lines, Scan.GREEN)
+                for x in range(digit.start, digit.start + digit.samples):
+                    x %= max_x
+                    start_y = extent.inner[x] + 1
+                    end_y = extent.outer[x]
+                    digit_slice = self.decoder.make_slice(digit.digit, end_y - start_y)
+                    if digit_slice is None:
+                        # this is a 'None' digit - draw those as blue
+                        nones.append((x, start_y, x, end_y - 1))
+                        continue
+                    last_bit = None
+                    for dy, bit in enumerate(digit_slice):
+                        if bit is None:
+                            continue
+                        if last_bit is None:
+                            last_bit = (dy, bit)
+                        elif bit != last_bit[1]:
+                            # end of a run
+                            if last_bit[1] == 0:
+                                zeroes.append((x, last_bit[0] + start_y, x, start_y + dy - 1))
+                            else:
+                                ones.append((x, last_bit[0] + start_y, x, start_y + dy - 1))
+                            last_bit = (dy, bit)
+                    if last_bit[1] == 0:
+                        zeroes.append((x, last_bit[0] + start_y, x, end_y - 1))
+                    else:
+                        ones.append((x, last_bit[0] + start_y, x, end_y - 1))
+            plot = self._draw_lines(plot, nones, colour=Scan.BLUE)
+            plot = self._draw_lines(plot, ones, colour=Scan.RED)
+            plot = self._draw_lines(plot, zeroes, colour=Scan.GREEN)
             self._unload(plot, '06-digits')
+            self._log('find_best_digits: 06-digits: green==zeroes, red==ones, blue==nones, black/white==ignored')
 
         return best_digits, reason
-
-    def _find_boundaries(self, extent):
-        """ given an extent, return a list of x co-ords representing the maxima/minima lead/tail lengths,
-            these represent the centre of (some of) the data cells, this information is used to guide
-            subsequent logic in determining the cell boundaries
-            """
-
-        def de_nipple(sequence):
-            """ change sequences that jiggle up/down to flat,
-                if sequence N-1 == N+1 then set N to N-1,
-                returns the de-nippled sequence
-                """
-
-            return sequence
-
-            max_x = len(sequence)
-            for x in range(max_x):
-                prev = sequence[(x - 1) % max_x]
-                next = sequence[(x + 1) % max_x]
-                if prev == next:
-                    sequence[x] = prev
-            return sequence
-
-        def get_slope(sequence, threshold=0):
-            """ get_slope the given sequence, threshold determines the threshold to trigger a 'change',
-                None values are ignored
-                """
-
-            max_x = len(sequence)
-            delta_threshold = threshold * threshold  # square it to remove sign consideration
-
-            slope = [0 for _ in range(max_x)]
-            for x in range(max_x):
-                prev_x = (x - 2) % max_x
-                left_x = (x - 1) % max_x
-                this_x = x
-                right_x = (x + 1) % max_x
-                next_x = (x + 2) % max_x
-                behind = (sequence[prev_x] + sequence[left_x]) / 2
-                ahead = (sequence[right_x] + sequence[next_x]) / 2
-                delta = behind - ahead
-                if (delta * delta) > delta_threshold:
-                    slope[this_x] = delta
-
-            return slope
-
-        def find_knees(sequence, threshold=0):
-            """ given a list of values that represent some sort of sequence find the changes in its slope,
-                threshold is the value change required to qualify as a significant slope change,
-                returns a list of co-ordinates into the sequence that represent the knees
-                """
-
-            slope = get_slope(sequence, threshold)
-            slope_slope = get_slope(slope, threshold*2)
-
-            max_x = len(sequence)
-
-            # the knees are +ve to -ve or -ve to +ve or 0 to not-0 or not-0 to 0 slope changes
-            # however the slope may be 'noisy' so we ignore single 0's
-            knees = []
-            for x in range(max_x):
-                prev_x = (x - 1) % max_x
-                this_x = x
-                next_x = (x + 1) % max_x
-                prev_sample = sequence[prev_x]
-                this_sample = sequence[this_x]
-                next_sample = sequence[next_x]
-                if this_sample < 100 and prev_sample == 100:
-                    # this is a zero edge for a lead or a tail
-                    knees.append(this_x)
-                    continue
-                if this_sample < 100 and next_sample == 100:
-                    # this is a zero edge for a lead or a tail
-                    knees.append(this_x)
-                    continue
-                if this_sample > 0 and prev_sample == 0:
-                    # this is a zero edge for a head
-                    knees.append(this_x)
-                    continue
-                if this_sample > 0 and next_sample == 0:
-                    # this is a zero edge for a head
-                    knees.append(this_x)
-                    continue
-                if this_sample == 100 or this_sample == 0:
-                    # ignore zeroes
-                    continue
-                # prev_slope_slope = slope_slope[prev_x]
-                # this_slope_slope = slope_slope[this_x]
-                # next_slope_slope = slope_slope[next_x]
-                # if this_slope_slope == 0 and next_slope_slope != 0:
-                #     knees.append(x)
-                #     continue
-                # if this_slope_slope == 0 and prev_slope_slope != 0:
-                #     knees.append(x)
-                #     continue
-                # if this_slope_slope != 0 and next_slope_slope != 0:
-                #     if this_slope_slope * next_slope_slope < 0:
-                #         knees.append(x)
-                #         continue
-                # if this_slope_slope != 0 and prev_slope_slope != 0:
-                #     if this_slope_slope * prev_slope_slope < 0:
-                #         knees.append(x)
-                #         continue
-                prev_slope = slope[prev_x]
-                this_slope = slope[this_x]
-                next_slope = slope[next_x]
-                if this_slope == 0 and next_slope != 0:
-                    # becoming flat
-                    knees.append(next_x)
-                    continue
-                if this_slope == 0 and prev_slope != 0:
-                    # leaving flat
-                    knees.append(prev_x)
-                    continue
-                if this_slope != 0 and next_slope != 0:
-                    if this_slope * next_slope < 0:
-                        # at a peak
-                        knees.append(this_x)
-                        continue
-            return knees, slope, slope_slope
-
-        inner = extent.inner
-        outer = extent.outer
-        slices = extent.slices  # the ratio elements in each slice contains the lead/head/tail lengths
-
-        leads = [None for _ in range(len(slices))]
-        heads = [None for _ in range(len(slices))]
-        tails = [None for _ in range(len(slices))]
-        for x, (ratio, _) in enumerate(slices):
-            leads[x] = int(round(ratio.lead_ratio() * 100))
-            heads[x] = int(round(ratio.head_ratio() * 100))
-            tails[x] = int(round(ratio.tail_ratio() * 100))
-        lead_knees, lead_knees_slope, lead_knees_slope_slope = find_knees(de_nipple(leads), 10)
-        head_knees, head_knees_slope, head_knees_slope_slope = find_knees(de_nipple(heads), 10)
-        tail_knees, tail_knees_slope, tail_knees_slope_slope = find_knees(de_nipple(tails), 10)
-
-        if self.save_images:
-            buckets = extent.buckets
-            lead_lines = []
-            head_lines = []
-            tail_lines = []
-            for x in lead_knees:
-                lead_lines.append([x, inner[x], x, outer[x]])
-            for x in head_knees:
-                head_lines.append([x, inner[x], x, outer[x]])
-            for x in tail_knees:
-                tail_lines.append([x, inner[x], x, outer[x]])
-            plot = self._draw_lines(buckets, lead_lines, colour=Scan.GREEN)
-            plot = self._draw_lines(buckets, head_lines, colour=Scan.RED)
-            plot = self._draw_lines(plot, tail_lines, colour=Scan.BLUE)
-            self._unload(plot, '06-knees')
-
-        if self.logging:
-            self._log('find_boundaries: leads:{}'.format(leads))
-            self._log('find_boundaries:     slope:{}'.format(lead_knees_slope))
-            self._log('find_boundaries:     slope slope:{}'.format(lead_knees_slope_slope))
-            self._log('find_boundaries:     knees:{}'.format(lead_knees))
-            self._log('find_boundaries: heads:{}'.format(heads))
-            self._log('find_boundaries:     slope:{}'.format(head_knees_slope))
-            self._log('find_boundaries:     slope slope:{}'.format(head_knees_slope_slope))
-            self._log('find_boundaries:     knees:{}'.format(head_knees))
-            self._log('find_boundaries: tails:{}'.format(tails))
-            self._log('find_boundaries:     slope:{}'.format(tail_knees_slope))
-            self._log('find_boundaries:     slope slope:{}'.format(tail_knees_slope_slope))
-            self._log('find_boundaries:     knees:{}'.format(tail_knees))
-
-    def _find_data_boxes(self, extent: Extent, digits: [Digit], zeroes: [[int]]) -> ([Box], str):
-        """ find the boundaries for all the data boxes given an extent a digit list and zero positions,
-            returns a box list and None if OK, or a partial list and a fail reason if not,
-            the y co-ords of the edges are exclusive
-            """
-
-        # ToDo: move this to a Scan constant
-        MIN_VERTICAL_EDGE_LENGTH = 2  # vertical edges of less than this many pixels are ignored
-        MAX_VERT_X_GAP = 2.5  # max x pixel gap between neighbour vertical edges where merging is allowed
-        MAX_VERT_Y_GAP = 1  # max y pixel gap between neighbour vertical edges where merging is allowed
-        MIN_HORIZONTAL_EDGE_LENGTH = 2  # horizontal edges of less than this many pixels are ignored
-        HORIZONTAL_Y_OFFSETS = [0]  # ToDo: HACK-->[0, -1, +1]  # y offsets used for following horizontal edges
-        MAX_HORIZ_Y_GAP = 2.5  # max y pixel gap between neighbour horizontal edge points where merging is allowed
-        EXTENT_BORDER = 2  # pixels at inner/outer extent that are considered to be black
-
-        inner = extent.inner
-        outer = extent.outer
-        buckets = extent.buckets
-        max_x, max_y = buckets.size()
-
-        def merge_y_edges(digit_edges, this_idx, next_idx):
-            """ given two sets of vertical edges, merge those of the same type,
-                digit_edges is the complete digit edge list, this_idx and next_idx are an index pair of edge sets in x,
-                returns True iff at least one merge took place, result is reflected in digit_edges
-                """
-
-            def merge_y_spans(this_start_y, this_end_y, that_start_y, that_end_y, this_x, that_x):
-                """ given two y spans, merge them if they (nearly) abutt or overlap,
-                    this_x and that_x must also be sufficiently close to each,
-                    returns None iff they do not merge or a (merged_x, merged_start_y, merged_end_y) tuple iff they do
-                    """
-                x_gap = wrapped_gap(that_x, this_x, max_x)
-                if x_gap < 0:
-                    x_gap = 0 - x_gap  # we've wrapped
-                if x_gap > MAX_VERT_X_GAP:
-                    # too far way to merge
-                    return None
-                if (this_end_y + MAX_VERT_Y_GAP) < that_start_y or (that_end_y + MAX_VERT_Y_GAP) < this_start_y:
-                    # they do not overlap or (nearly) abutt
-                    return None
-                # merge these
-                # the merged x is this_x plus the weighted difference between this_x and that_x
-                # the weighted difference is based on the edge lengths, longer edges have more weight
-                this_size = this_end_y - this_start_y
-                that_size = that_end_y - that_start_y
-                this_weight = 1 - (this_size / (this_size + that_size))  # 0..1, 0==this_x, 1==that_x
-                merged_x = int(round(this_x + (this_weight * x_gap))) % max_x
-                merged_start = min(this_start_y, that_start_y)
-                merged_end = max(this_end_y, that_end_y)
-                return merged_x, merged_start, merged_end
-
-            # allow for wrapping
-            this_idx = this_idx % len(digit_edges)
-            next_idx = next_idx % len(digit_edges)
-
-            this_x, this_edges = digit_edges[this_idx]
-            next_x, next_edges = digit_edges[next_idx]
-
-            for this_edge, (this_type, this_start_y, this_end_y) in enumerate(this_edges):
-                for next_edge, (next_type, next_start_y, next_end_y) in enumerate(next_edges):
-                    if this_idx == next_idx and this_edge == next_edge:
-                        # ignore self
-                        continue
-                    if this_type != next_type:
-                        # not same type
-                        continue
-                    merged = merge_y_spans(this_start_y, this_end_y, next_start_y, next_end_y, this_x, next_x)
-                    if merged is None:
-                        # they do not overlap or abutt
-                        continue
-                    merged_x, merged_start_y, merged_end_y = merged
-                    if merged_x == this_x:
-                        # add merged to this_edges, remove next
-                        this_edges[this_edge] = (this_type, merged_start_y, merged_end_y)
-                        del next_edges[next_edge]
-                    elif merged_x == next_x:
-                        # add merged to next_edges, remove this
-                        next_edges[next_edge] = (this_type, merged_start_y, merged_end_y)
-                        del this_edges[this_edge]
-                    else:
-                        # not the simple cases, so...
-                        # remove both originals
-                        del this_edges[this_edge]
-                        del next_edges[next_edge]
-                        # merged_x may exist in digit_edges between this_idx and next_idx,
-                        # in which case we update it, otherwise we create a new x in digit_edges
-                        # find index in digit_edges to put this merged x
-                        target_idx = None
-                        for idx in range(this_idx, next_idx + 1):
-                            idx = idx % len(digit_edges)
-                            target_x, target_edges = digit_edges[idx]
-                            if target_x == merged_x:
-                                # found an existing list, extend it
-                                target_edges.append((this_type, merged_start_y, merged_end_y))
-                                target_idx = idx
-                                break
-                            elif target_x > merged_x:
-                                # we're guaranteed to get here if there is no exact match,
-                                # 'cos we know this_x <= merged_x <= next_x and digit_edges is in x order,
-                                # so insert a new entry here
-                                digit_edges.insert(idx, [merged_x, [(this_type, merged_start_y, merged_end_y)]])
-                                target_idx = idx
-                                break
-                            else:
-                                # carry on looking
-                                pass
-                        if target_idx is None:
-                            # eh?
-                            raise Exception('digit_edges between {} and {} does not cover {}'.
-                                            format(this_x, next_x, merged_x))
-                    # note change for caller
-                    return True
-
-            # nothing merged
-            return False
-
-        # region force black pixels at the inner and outer edges (provides a boundary extreme for edge detection)...
-        if EXTENT_BORDER > 0:
-            for x in range(max_x):
-                for dx in range(1, EXTENT_BORDER + 1):  # +1 'cos extents mark the white pixels, need to get past those
-                    buckets.putpixel(x, inner[x] + dx, MIN_LUMINANCE)
-                    buckets.putpixel(x, outer[x] - dx, MIN_LUMINANCE)
-            if self.save_images:
-                self._unload(buckets, '06-buckets-isolated')
-        # endregion
-
-        reason = None
-        if reason is None:
-            # region Phase 1 - find vertical edges...
-            # vertical edges represent potential digit boundaries
-            # we do two passes, treating gray as black in one pass and as white in the other
-            digit_edges = []  # vertical edges as [x, [type, start y, end y]]
-            for grey_as in [MIN_LUMINANCE, MAX_LUMINANCE]:
-                for x in range(max_x):
-                    good_edges = []  # edge at this x as [type, start y, end y]
-                    start_y = inner[x] + 1  # get into the first black pixel (inner edge is the last white pixel)
-                    end_y = outer[x]  # end_y is exclusive (outer edge is the first white pixel)
-                    # Don't do the below 2 lines, it obscures legitimate edges close to the extent edges
-                    # start_y += EXTENT_BORDER  # get over the no-go zone
-                    # end_y -= EXTENT_BORDER  # get over the no-go zone
-                    span_type = None
-                    span_start = None
-                    span_size = None
-                    for y in range(start_y, end_y):
-                        here_pixel = buckets.getpixel(x, y)
-                        if here_pixel == MID_LUMINANCE:
-                            # consider grey as directed
-                            here_pixel = grey_as
-                        left_pixel = buckets.getpixel((x - 1) % max_x, y)
-                        if left_pixel == MID_LUMINANCE:
-                            # consider grey as directed
-                            left_pixel = grey_as
-                        if left_pixel != here_pixel:
-                            # got the beginnings or continuation of a vertical edge
-                            if span_start is None:
-                                # its a new edge
-                                span_start = y
-                                span_size = 1
-                                if left_pixel > here_pixel:
-                                    span_type = Scan.FALLING
-                                else:
-                                    span_type = Scan.RISING
-                                continue
-                            if left_pixel > here_pixel and span_type == Scan.FALLING:
-                                # still in a falling edge
-                                span_size += 1
-                                continue
-                            if here_pixel > left_pixel and span_type == Scan.RISING:
-                                # still in a rising edge
-                                span_size += 1
-                                continue
-                        if span_start is None:  # and left_pixel == here_pixel:
-                            # we're nowhere (yet)
-                            continue
-                        # got end of a vertical edge, keep it if its long enough
-                        if span_size >= MIN_VERTICAL_EDGE_LENGTH:
-                            # qualifies
-                            good_edges.append((span_type, span_start, span_start + span_size))
-                        # look for next
-                        span_type = None
-                        span_start = None
-                        span_size = None
-                    if span_start is not None:
-                        # got end of a vertical edge at the end
-                        # does this qualify?
-                        if span_size >= MIN_VERTICAL_EDGE_LENGTH:
-                            # qualifies
-                            good_edges.append((span_type, span_start, span_start + span_size))
-                    if len(good_edges) > 0:
-                        digit_edges.append([x, good_edges])
-            # digit edges is now a list of all vertical edges
-            # put into x,y for merging purposes
-            digit_edges.sort(key=lambda e: (e[0], e[1][0][1]))
-            # region remove duplicates...
-            # if there are no greys we'll end of up with every edge duplicated, find and drop those
-            for edge in range(len(digit_edges) - 1, 0, -1):  # NB: stop 1 short 'cos we address -1
-                if digit_edges[edge] == digit_edges[edge - 1]:
-                    # got a dup
-                    del digit_edges[edge]
-            # endregion
-            if self.logging:
-                self._log('find_data_boxes: discovered digit_edges (before merging):')
-                for x, edges in digit_edges:
-                    msg = ''
-                    for edge_type, start_y, end_y in edges:
-                        msg = '{}, [{} {}..{} ({})]'.format(msg, edge_type, start_y, end_y - 1, end_y - start_y)
-                    self._log('    x={}: {}'.format(x, msg[2:]))
-            # endregion
-        if reason is None:
-            # region Phase 2 - merge neighbour vertical edges...
-            # any edges within some limit of each other are merged wrt their start and length
-            # digit_edges is a list of vertical edges in x order (each is a list of [type, start_y,end_y])
-            # this is a crude N*N algorithm, but N is small, so OK
-            changed = True
-            while changed:
-                changed = False
-                for this_idx in range(len(digit_edges)):
-                    if len(digit_edges[this_idx]) == 0:
-                        # ignore empty list
-                        continue
-                    for next_idx in range(len(digit_edges)):
-                        if len(digit_edges[next_idx]) == 0:
-                            # ignore empty list
-                            continue
-                        changed = merge_y_edges(digit_edges, this_idx, next_idx)
-                        if changed:
-                            break
-                    if changed:
-                        break
-            if self.logging:
-                self._log('find_data_boxes: discovered digit edges (after merging):')
-                for x, edges in digit_edges:
-                    msg = ''
-                    for edge_type, start_y, end_y in edges:
-                        msg = '{}, [{} {}..{} ({})]'.format(msg, edge_type, start_y, end_y - 1, end_y - start_y)
-                    self._log('    x={}: {}'.format(x, msg[2:]))
-            # endregion
-        if reason is None:
-            # region Phase 3 - find horizontal edges...
-            # horizontal edges represent potential ring boundaries
-            # we do two passes, treating gray as black in one pass and as white in the other
-            ring_edges = []  # discovered edges
-            for grey_as in [MIN_LUMINANCE, MAX_LUMINANCE]:
-                used = [[False for _ in range(max_y)] for _ in range(max_x)]  # been here before detector
-                if EXTENT_BORDER > 0:
-                    # region consider all extent border pixels to be 'used' to stop them being considered...
-                    for x in range(max_x):
-                        for y in range(max_y):
-                            if y <= inner[x] + (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
-                                used[x][y] = True
-                            if y >= outer[x] - (EXTENT_BORDER - 1):  # -1 so that one forced black is visible
-                                used[x][y] = True
-                    # endregion
-                # region find an initial x to scan from...
-                # this must be a place where there is no edge, i.e. within a zero,
-                # we look for 2 consecutive x's where there is nothing between the inner and outer edge,
-                # this is required to allow for edges that wrap, we must not start in the middle of a wrapped edge
-                start_x = None
-                for x in range(max_x):
-                    empty = True
-                    for dx in [0, 1]:
-                        try_x = (x + dx) % max_x
-                        for y in range(inner[try_x] + EXTENT_BORDER + 1, outer[try_x] - EXTENT_BORDER - 1):
-                            pixel = buckets.getpixel(x, y)
-                            if pixel == MID_LUMINANCE:
-                                # treat grey as directed
-                                pixel = grey_as
-                            if pixel != MIN_LUMINANCE:
-                                # something here, so look at next x
-                                empty = False
-                                break
-                        if not empty:
-                            break
-                    if empty:
-                        start_x = x
-                        break
-                if start_x is None:
-                    # this means there are no zeroes, so we're looking at junk
-                    reason = 'no zeroes'
-                # endregion
-                if reason is None:
-                    for dx in range(start_x, start_x + max_x):
-                        dx = dx % max_x
-                        start_y = inner[dx] + 1  # +1 to get past the inner edge white
-                        end_y = outer[dx]  # not +1 'cos want exclusive y range
-                        # look for a black to white or white to black transition in y at this x
-                        for y in range(start_y + 1, end_y):  # +1 'cos we look above
-                            edge_begin = x
-                            edge_points = []
-                            edge_type = None
-                            last_y = y  # note our starting point
-                            for x in range(dx, dx + max_x):
-                                x %= max_x
-                                use_y = None
-                                for dy in HORIZONTAL_Y_OFFSETS:
-                                    y = last_y + dy
-                                    above_pixel = buckets.getpixel(x, y - 1)
-                                    if above_pixel == MID_LUMINANCE:
-                                        # treat grey as directed
-                                        above_pixel = grey_as
-                                    here_pixel = buckets.getpixel(x, y)
-                                    if here_pixel == MID_LUMINANCE:
-                                        # treat grey as directed
-                                        here_pixel = grey_as
-                                    if here_pixel != above_pixel:
-                                        use_y = y  # note this candidate
-                                        break
-                                if use_y is None:
-                                    # no edge candidate here
-                                    break
-                                # found the next y for this edge
-                                if used[x][use_y]:
-                                    # been here before
-                                    break
-                                # region check/set edge type
-                                if above_pixel > here_pixel:
-                                    # falling edge
-                                    if edge_type is None:
-                                        # lock onto a falling edge
-                                        edge_type = Scan.FALLING
-                                    elif edge_type != Scan.FALLING:
-                                        # run into a different edge type
-                                        use_y = None
-                                        break
-                                else:
-                                    # rising edge
-                                    if edge_type is None:
-                                        # lock onto a rising edge
-                                        edge_type = Scan.RISING
-                                    elif edge_type != Scan.RISING:
-                                        # run into a different edge type
-                                        use_y = None
-                                        break
-                                # endregion
-                                edge_points.append(use_y)
-                                used[x][use_y] = True  # note been here, so we don't start a new edge from here again
-                                last_y = use_y  # note where we are for looking at the next y
-                            if len(edge_points) < MIN_HORIZONTAL_EDGE_LENGTH:
-                                # too small to consider
-                                pass
-                            else:
-                                # note this edge
-                                ring_edges.append([edge_type, edge_begin, edge_points])
-                            # carry on looking for more edges at this x
-                            continue
-                        # continue looking for edges at the next x
-                        continue
-            # region remove duplicates...
-            # if there are no greys we'll end of up with every edge duplicated, find and drop those
-            # sort into x order, so we can easily find dups
-            ring_edges.sort(key=lambda e: (e[1], e[2][0]))
-            for edge in range(len(ring_edges)-1, 0, -1):  # NB: stop 1 short 'cos we address -1
-                if ring_edges[edge] == ring_edges[edge-1]:
-                    # got a dup
-                    del ring_edges[edge]
-            # endregion
-            if self.logging:
-                self._log('find_data_boxes: discovered ring edges (before merging):')
-                for edge in ring_edges:
-                    self._log('    {}'.format(edge))
-            # endregion
-        if reason is None:
-            # region Phase 4 - merge neighbour horizontal edges...
-            # any edges within some limit of each other are merged wrt their start and points
-            # for each edge we search for an overlapping edge and try to merge it
-            # this is a crude N*N loop, but N is small so OK
-            passes = 0
-            changed = True
-            while changed:
-                passes += 1
-                changed = False
-                for edge_1 in range(len(ring_edges)):
-                    # get this edge stats
-                    edge_1_edge = ring_edges[edge_1]
-                    edge_1_type, edge_1_start, edge_1_points = edge_1_edge
-                    edge_1_size = len(edge_1_points)
-                    edge_1_end = edge_1_start + edge_1_size  # do not wrap this
-                    # look for another edge that overlaps this one in x
-                    for edge_2 in range((edge_1 + 1) % len(ring_edges), len(ring_edges) - 1):  # scan all but edge_1
-                        edge_2_edge = ring_edges[edge_2 % len(ring_edges)]
-                        edge_2_type, edge_2_start, edge_2_points = edge_2_edge
-                        edge_2_size = len(edge_2_points)
-                        edge_2_end = edge_2_start + edge_2_size  # do not wrap this
-                        # pre-filter for type
-                        if edge_1_type != edge_2_type:
-                            # different type
-                            continue
-                        # pre-filter for no overlap
-                        # if edge_1_end < edge_2_start:  # NB: edge_1_end == edge_2_start means they abutt, we want those
-                        #     # does not overlap
-                        #     continue
-                        # if edge_2_end < edge_1_start:  # NB: edge_2_end == edge_1_start means they abutt, we want those
-                        #     # does not overlap
-                        #     continue
-                        # got a potential overlap in x, try to merge
-                        # build combined points list
-                        line = [[None, None] for _ in range(max_x)]
-                        for dx in range(len(edge_1_points)):
-                            line[(edge_1_start + dx) % max_x][0] = edge_1_points[dx]
-                        for dx in range(len(edge_2_points)):
-                            line[(edge_2_start + dx) % max_x][1] = edge_2_points[dx]
-                        # merge overlapping 'close' points
-                        # find the start scan point (first None, None position)
-                        start_x = None
-                        for x, (y1, y2) in enumerate(line):
-                            if y1 is None and y2 is None:
-                                # found it
-                                start_x = x
-                                break
-                        if start_x is None:
-                            # got a full line!!
-                            start_x = 0
-                        # now scan for our points
-                        merged = 0
-                        for x in range(start_x, start_x + max_x):
-                            y1, y2 = line[x % max_x]
-                            # merge if y1 'close' to y2
-                            if y1 is None and y2 is None:
-                                # not in either edge
-                                continue
-                            prev_y1, prev_y2 = line[(x - 1) % max_x]
-                            if y1 is None:
-                                # propagate previous when run off the end
-                                y1 = prev_y1
-                            if y2 is None:
-                                # propagate previous when run off the end
-                                y2 = prev_y2
-                            if y1 is not None and y2 is not None:
-                                gap = max(y1, y2) - min(y1, y2)
-                                if gap > MAX_HORIZ_Y_GAP:
-                                    # points do not merge
-                                    continue
-                                # merge as the average
-                                merged_y = (y1 + y2) / 2
-                                # only merge if the merge point is not too far from its neighbours
-                                if prev_y1 is not None:
-                                    gap = max(merged_y, prev_y1) - min(merged_y, prev_y1)
-                                    if gap > MAX_HORIZ_Y_GAP:
-                                        # neighbour gap too big
-                                        continue
-                                if prev_y2 is not None:
-                                    gap = max(merged_y, prev_y2) - min(merged_y, prev_y2)
-                                    if gap > MAX_HORIZ_Y_GAP:
-                                        # neighbour gap too big
-                                        continue
-                                # merged point OK
-                                line[x % max_x] = [merged_y, merged_y]
-                                merged += 1
-                        if merged == 0:
-                            # edge does not merge
-                            continue
-                        # got a merged pair, keep longest, break up the other
-                        # we may have stretched one of the edges, so go count them again
-                        counts = [0, 0]
-                        for x, ys in enumerate(line):
-                            for y in [0, 1]:
-                                if ys[y] is not None:
-                                    counts[y] += 1
-                        # we haven't changed the start positions
-                        starts = [edge_1_start, edge_2_start]
-                        # find longest
-                        if counts[0] >= counts[1]:
-                            keep = 0
-                            break_up = 1
-                        else:
-                            keep = 1
-                            break_up = 0
-                        # get longest points as merged set
-                        merged_points = []
-                        for dx in range(counts[keep]):
-                            merged_points.append(line[(starts[keep] + dx) % max_x][keep])
-                        # replace edge_1 with merged, drop edge_2
-                        ring_edges[edge_1] = [edge_1_type, starts[keep], merged_points]
-                        del ring_edges[edge_2 % len(ring_edges)]
-                        # find leading and trailing points in the other edge
-                        leading_points = []
-                        trailing_points = []
-                        trailing_start = None
-                        for dx in range(counts[break_up]):
-                            x = (starts[break_up] + dx) % max_x
-                            ys = line[x]
-                            if ys[keep] is None:
-                                if trailing_start is None:
-                                    leading_points.append(ys[break_up])
-                                else:
-                                    trailing_points.append(ys[break_up])
-                            else:
-                                # found the merge point, switch ends
-                                trailing_start = x
-                        # insert edge residues if they are long enough
-                        if len(leading_points) >= MIN_HORIZONTAL_EDGE_LENGTH:
-                            # insert leading points
-                            ring_edges.append([edge_1_type, starts[break_up], leading_points])
-                        if len(trailing_points) > MIN_HORIZONTAL_EDGE_LENGTH:
-                            # insert trailing points
-                            ring_edges.append([edge_1_type, trailing_start, trailing_points])
-                        # go round again
-                        changed = True
-                        break
-                    if changed:
-                        break
-            if self.logging:
-                # sort into x,y to make looking at logs easier
-                ring_edges.sort(key=lambda e: (e[1], e[2][0]))
-                self._log('find_data_boxes: discovered ring edges (after merging):')
-                for edge in ring_edges:
-                    self._log('    {}'.format(edge))
-            # endregion
-        if reason is None:
-            # region Phase 5 - find likely digit edges
-            pass  # ToDo: find likely digit edges
-            # endregion
-        if reason is None:
-            # region Phase 6 - find likely ring edges
-            pass  # ToDo: find likely ring edges
-            # endregion
-        if self.save_images:
-            # show ideal boxes (as in blocks and ring_edge_estimates),
-            # and discovered boxes (as in digit_edges and ring_edges)
-            found_digits_rising = []
-            found_digits_falling = []
-            for x, edges in digit_edges:
-                for edge_type, start_y, end_y in edges:
-                    if edge_type == Scan.RISING:
-                        found_digits_rising.append((x, start_y, x, end_y - 1))
-                    else:
-                        found_digits_falling.append((x, start_y, x, end_y - 1))
-            found_rings_rising = []
-            found_rings_falling = []
-            for edge_type, edge_start, edge_points in ring_edges:
-                if edge_type == Scan.RISING:
-                    found_rings_rising.append((edge_start, edge_points))
-                else:
-                    found_rings_falling.append((edge_start, edge_points))
-            plot = self._draw_extent(extent, buckets)
-            plot = self._draw_lines(plot, found_digits_rising, Scan.BLUE, bleed=0.6)
-            plot = self._draw_lines(plot, found_digits_falling, Scan.GREEN, bleed=0.6)
-            plot = self._draw_plots(plot, plots_x=found_rings_rising, colour=Scan.BLUE, bleed=0.6)
-            plot = self._draw_plots(plot, plots_x=found_rings_falling, colour=Scan.GREEN, bleed=0.6)
-            self._unload(plot, '06-boxes-found')
-        ###############################################
-        # ToDo: HACK old scheme based on guessing
-        ###############################################
-        return self.__find_data_boxes(extent, digits, zeroes)
-
-    def __find_data_boxes(self, extent: Extent, digits: [Digit], zeroes: [[int]]) -> ([Box], str):
-        """ find the boundaries for all the data boxes given an extent a digit list and zero positions,
-            bit boxes are delineated horizontally by inner/outer edge divided by 5 (inner/outer black + 3 data rings)
-            and vertically by the zero gap divided by 4 (digits in a code less the zero) for each copy,
-            the horizontal edge is a y co-ord for each x co-ord, the vertical edge is an x co-ord for each digit,
-            each bit box is defined by a start x co-ord and a list of y edges for each ring,
-            returns a box list and None if OK, or a partial list and a fail reason if not,
-            the y co-ords of the edges are exclusive
-            """
-
-        # self._find_boundaries(extent)  # ToDo: HACK
-
-        inner = extent.inner
-        outer = extent.outer
-        buckets = extent.buckets
-        max_x, max_y = buckets.size()
-        reason = None
-        boxes = []
-        if reason is None:
-            # region Phase 1 - estimate where the bit boundaries should be based on the zero positions...
-            for z in range(len(zeroes)):
-                zero = digits[zeroes[z][0]]
-                digit_start = (zero.start + zero.samples) % max_x
-                last_digit = digits[zeroes[(z + 1) % len(zeroes)][0]]
-                if last_digit.start < digit_start:
-                    # we've wrapped
-                    digit_width = (last_digit.start + max_x) - digit_start
-                else:
-                    digit_width = last_digit.start - digit_start
-                digit_width /= (Scan.DIGITS_PER_NUM - 1)  # -1 'cos we're excluding the zero
-                if digit_width < 1:
-                    # not enough room for digits, so this is junk (it means the zeroes are too big)
-                    reason = 'zeroes too big'
-                    break
-                boxes.append(Scan.Box(zero.start, zero.samples))
-                edge = []
-                for _ in range(Scan.DIGITS_PER_NUM - 1):  # -1 'cos already done the zero
-                    edge.append(int(round(digit_start)))  # ignore wrapping for now
-                    digit_start += digit_width
-                edge.append(last_digit.start)  # so we can always use index+1 to calculate true width
-                for digit in range(Scan.DIGITS_PER_NUM - 1):  # -1 'cos already done the zero
-                    boxes.append(Scan.Box(edge[digit] % max_x, (edge[digit + 1] - edge[digit]) % max_x))
-            # endregion
-        if reason is None:
-            # region Phase 2 - estimate where the ring boundaries should be based on the inner and outer edge positions...
-            for box in boxes:
-                edges = [[] for _ in range(Scan.NUM_DATA_RINGS)]
-                for x in range(box.start, box.start + box.span):
-                    y_start = inner[x % max_x] + 1  # +1 to get into the black
-                    y_end = outer[x % max_x]
-                    ring_width = (y_end - y_start) / Scan.INNER_OUTER_SPAN_RINGS
-                    if ring_width < 1:
-                        # not enough room for rings, so this is junk
-                        reason = 'data too narrow'
-                        break
-                    edge = []
-                    for _ in range(Scan.INNER_BLACK_RINGS):  # skip inner black ring(s)
-                        y_start += ring_width
-                    for _ in range(Scan.NUM_DATA_RINGS + 1):  # +1 to get end of final ring
-                        edge.append(int(round(y_start)))  # leading edge
-                        y_start += ring_width
-                    for ring in range(Scan.NUM_DATA_RINGS):
-                        edges[ring].append([edge[ring], edge[ring + 1]])  # trailing edge
-                for edge in edges:
-                    box.add_edge(edge)
-            # endregion
-
-        if self.logging:
-            # put boxes into start order - makes matching diagnostic images with the logs easier
-            boxes.sort(key=lambda b: b.start)
-
-        if self.save_images:
-            # draw data boxes
-            plot = self._draw_edges((extent.falling_edges, extent.rising_edges), buckets, extent)
-            plot = self._draw_boxes(boxes, plot)
-            self._unload(plot, '06-boxes')
-
-        if self.logging:
-            if reason is not None:
-                self._log('find_data_boxes: failed: {}'.format(reason))
-
-        return boxes, reason
-
-    def _decode_data_boxes(self, boxes: [Box], extent: Extent):
-        """ given a set of data boxes, decode the bits they represent,
-            a data box is a '1' if it is mostly white or a '0' if it is mostly black,
-            however, due to 'smudging' effects what is considered 'mostly' is dependent
-            on the neighbour boxes, 'smudging' is white pixels bleeding into neighbouring
-            black pixels, each box is considered to consist of N x N blocks, in a 2D gird
-            like this:
-                  +-----+------+-...-+--------+
-                  |   0 |    1 | ... | N-1    |
-                  +-----+------+-...-+--------+
-                  |   N |  N+1 | ... | N+N-1  |
-                  +-----+---- -+-----+--------+
-                  |  2N | 2N+1 | ... | 2N+N-1 |
-                  +-----+------+-----+--------+
-                  |  .. | .... | ... | ...... |
-                  +-----+------+-----+--------+
-                  |  .. | .... | ... | N*N-1  |
-                  +-----+------+-----+--------+
-            and each box has 4 neighbours:
-                  | above |
-                --+-------+--
-                  |       |
-             left | self  | right
-                  |       |
-                --+-------+--
-                    below
-            left bleed source are all except left-most blocks
-            above bleed source blocks are all except top-most blocks
-            right bleed source blocks are all except right-most blocks
-            below bleed source blocks are all except bottom-most blocks
-            when there is a bleeding source that is white on two sides the intersecting corner is ignored in self
-            left plus above white ignores top-left corner
-            above plus right white ignores top-right corner
-            right plus below white ignores bottom-right corner
-            below plus left white ignores bottom-left corner
-            if all blocks are being ignored then self cell is white (as it implies both above and below are white)
-            if non-ignored blocks are white then self cell is white
-            if above bottom half and self top half are white then self is white if all self whiter than all above
-            if below top half and self bottom half are white then self is white if all self whiter than all below
-            otherwise self cell is black
-        """
-
-        buckets = extent.buckets
-        max_x, max_y = buckets.size()
-
-        # ToDo: move to Scan constants
-        NEIGHBOUR_WHITE_THRESHOLD = 0.7  # white ratio above which a neighbour block is considered to be white
-        SELF_WHITE_THRESHOLD = 0.45  # white ratio above which a self block is considered to be white
-        CELL_BOUNDARY_PIXELS = 1  # this many pixels around a cell boundary are ignored for determining a cell whiteness
-
-        class Ratios:
-            """ whiteness ratios for the blocks of a cell """
-
-            def __init__(self, blocks: [[int, int]]):
-                """ white coverage of the N blocks as white count and total count for each """
-                self.blocks = blocks
-                self.ratios = []
-                for block in self.blocks:
-                    self.ratios.append(self._get_ratio(block))
-
-            def __str__(self):
-                msg = ''
-                for x, ratio in enumerate(self.ratios):
-                    msg = '{} {:1X}={:02d} {}'.format(msg, x, int(round(ratio * 10)), self.blocks[x])
-                return '[{}]'.format(msg[1:])
-
-            def _get_ratio(self, parts: (int, int)) -> float:
-                if parts[1] == 0:
-                    return 0
-                else:
-                    return parts[0] / parts[1]
-
-            def get_whiteness(self, blocks: [int] = None) -> float:
-                """ get the average whiteness for the given blocks,
-                    the ratios are the white coverage in the range 0..1,
-                    if blocks is None all are considered,
-                    if blocks is empty 0 is returned
-                    """
-                if blocks is None:
-                    blocks = [block for block in range(len(self.ratios))]
-                if len(blocks) == 0:
-                    return 0
-                whiteness = 0
-                samples = 0
-                for block in blocks:
-                    whiteness += self.ratios[block]
-                    samples += 1
-                return whiteness / samples  # return average across the addressed quadrants
-
-        class Criterion:
-            """ criterion for a set of blocks to be considered white """
-
-            def __init__(self, address: (float, float), blocks: [int], threshold: float):
-                self.address   = address    # x,y co-ord offsets of the box the criterion applies to
-                self.blocks = blocks  # the blocks to check within that addressed box
-                self.threshold = threshold  # the block whiteness threshold for the criterion (0..1)
-
-            def satisfied(self, segments: [[Ratios]], x: int, y: int) -> bool:
-                """ test if the criterion is satisfied within the segments at x,y,
-                    x wraps, y does not
-                    to be satisfied the addressed blocks average must be at least the white threshold
-                    """
-                whiteness = self.get_whiteness(segments, x, y)
-                if whiteness is None:
-                    return None
-                if whiteness >= self.threshold:
-                    return True
-                else:
-                    return False
-
-            def get_whiteness(self, segments: [[Ratios]], x: int, y: int) -> float:
-                """ get the whiteness ratio for our criterion """
-                ratios = self.get_ratios(segments, x, y)
-                if ratios is None:
-                    return None
-                return ratios.get_whiteness(self.blocks)
-
-            def get_ratios(self, segments: [[Ratios]], x: int, y: int) -> Ratios:
-                """ get the whiteness ratios for our criterion,
-                    returns the Ratios or None if criterion address does not exist
-                    """
-                dy = y + self.address[1]
-                if dy < 0 or dy >= len(segments[0]):
-                    # y does not wrap
-                    return None
-                dx = (x + self.address[0]) % len(segments)  # x wraps
-                return segments[dx][dy]
-
-        # region criteria for black/white discrimination...
-        # blocks per cell
-        # BLOCKS_PER_ROW = 4
-        # BLOCKS_PER_COL = 4
-        # BLOCKS_PER_BOX = BLOCKS_PER_ROW * BLOCKS_PER_COL
-        # # criteria block sets
-        # TO_LEFT_BLOCKS  = {1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15}
-        # TO_BELOW_BLOCKS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
-        # TO_RIGHT_BLOCKS = {0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14}
-        # TO_ABOVE_BLOCKS = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-        # TOP_BLOCKS      = {0, 1, 2, 3, 4, 5, 6, 7}
-        # BOTTOM_BLOCKS   = {8, 9, 10, 11, 12, 13, 14, 15}
-        # ALL_BLOCKS      = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-        # # ignore block sets
-        # TOP_LEFT_CORNER     = {0, 1, 2, 4, 5, 8}
-        # TOP_RIGHT_CORNER    = {1, 2, 3, 6, 7, 11}
-        # BOTTOM_RIGHT_CORNER = {7, 10, 11, 13, 14, 15}
-        # BOTTOM_LEFT_CORNER  = {4, 8, 9, 12, 13, 14}
-        BLOCKS_PER_ROW = 3
-        BLOCKS_PER_COL = 3
-        BLOCKS_PER_BOX = BLOCKS_PER_ROW * BLOCKS_PER_COL
-        # criteria block sets
-        TO_LEFT_BLOCKS  = {1, 2, 4, 5, 7, 8}
-        TO_BELOW_BLOCKS = {0, 1, 2, 3, 4, 5}
-        TO_RIGHT_BLOCKS = {0, 1, 3, 4, 6, 7}
-        TO_ABOVE_BLOCKS = {3, 4, 5, 6, 7, 8}
-        TOP_BLOCKS      = {0, 1, 2, 3, 4, 5}
-        BOTTOM_BLOCKS   = {3, 4, 5, 6, 7, 8}
-        ALL_BLOCKS      = {0, 1, 2, 3, 4, 5, 6, 7, 8}
-        # ignore block sets
-        TOP_LEFT_CORNER     = {0, 1, 2, 3, 4, 6}
-        TOP_RIGHT_CORNER    = {0, 1, 2, 4, 5, 8}
-        BOTTOM_RIGHT_CORNER = {2, 4, 5, 6, 7, 8}
-        BOTTOM_LEFT_CORNER  = {0, 3, 4, 6, 7, 8}
-        # neighbour addresses
-        ABOVE = [0, -1]  # x,y co-ord offsets to get to the 'above' box
-        BELOW = [0, +1]  # x,y co-ord offsets to get to the 'below' box
-        HERE  = [0,  0]  # x,y co-ord offsets to get to the 'self' box
-        LEFT  = [-1, 0]  # x,y co-ord offsets to get to the 'left' box
-        RIGHT = [+1, 0]  # x,y co-ord offsets to get to the 'left' box
-        # neighbour criteria
-        TO_LEFT_IS_WHITE  = Criterion(LEFT , TO_LEFT_BLOCKS , NEIGHBOUR_WHITE_THRESHOLD)
-        TO_ABOVE_IS_WHITE = Criterion(ABOVE, TO_ABOVE_BLOCKS, NEIGHBOUR_WHITE_THRESHOLD)
-        TO_RIGHT_IS_WHITE = Criterion(RIGHT, TO_RIGHT_BLOCKS, NEIGHBOUR_WHITE_THRESHOLD)
-        TO_BELOW_IS_WHITE = Criterion(BELOW, TO_BELOW_BLOCKS, NEIGHBOUR_WHITE_THRESHOLD)
-        # self criteria
-        ABOVE_BOTTOM_IS_WHITE = Criterion(ABOVE, BOTTOM_BLOCKS, SELF_WHITE_THRESHOLD)
-        SELF_TOP_IS_WHITE     = Criterion(HERE , TOP_BLOCKS   , SELF_WHITE_THRESHOLD)
-        SELF_BOTTOM_IS_WHITE  = Criterion(HERE , BOTTOM_BLOCKS, SELF_WHITE_THRESHOLD)
-        BELOW_TOP_IS_WHITE    = Criterion(BELOW, TOP_BLOCKS   , SELF_WHITE_THRESHOLD)
-        # all blocks criteria
-        ALL_ABOVE = Criterion(ABOVE, ALL_BLOCKS, SELF_WHITE_THRESHOLD)
-        ALL_SELF  = Criterion(HERE , ALL_BLOCKS, SELF_WHITE_THRESHOLD)
-        ALL_BELOW = Criterion(BELOW, ALL_BLOCKS, SELF_WHITE_THRESHOLD)
-        # endregion
-
-        def get_box_white_ratios(ring, segment) -> Ratios:
-            """ get the white block coverage of the given box,
-                returns the ratio of white to black for each block,
-                all ratios are in the range 0..1,
-                to mitigate against off-by-one boundary estimate errors the boundary pixels
-                of each cell are ignored
-                """
-            blocks = [[0, 0] for _ in range(BLOCKS_PER_BOX)]  # white count, total count for each block
-            box = boxes[segment]
-            edge = box.edges[ring]
-            start_x = box.start
-            x_span = box.span - (2 * CELL_BOUNDARY_PIXELS)
-            for dx in range(CELL_BOUNDARY_PIXELS, len(edge) - CELL_BOUNDARY_PIXELS):
-                start_y, end_y = edge[dx]
-                start_y += CELL_BOUNDARY_PIXELS
-                end_y   -= CELL_BOUNDARY_PIXELS
-                y_span = end_y - start_y
-                for y in range(start_y, end_y):  # end_y is exclusive, so this range is correct
-                    # get the pixel colour
-                    pixel = buckets.getpixel((start_x + dx) % max_x, y)
-                    if pixel == MIN_LUMINANCE:
-                        white = 0
-                    else:
-                        white = 1
-                    # which block(s) are we in?
-                    x_here = ((dx - CELL_BOUNDARY_PIXELS) / x_span) * BLOCKS_PER_ROW  # range 0..BLOCKS_PER_ROW
-                    y_here = ((y - start_y) / y_span) * BLOCKS_PER_COL  # range 0..BLOCKS_PER_COL
-                    x_next = int(round(x_here))
-                    y_next = int(round(y_here))
-                    x_here = int(x_here)
-                    y_here = int(y_here)
-                    update_blocks = [(x_here, y_here)]  # always update x_here, y_here
-                    if x_here != x_next:
-                        # on an x pixel boundary
-                        update_blocks.append((x_next, y_here))
-                    if y_here != y_next:
-                        # on a y pixel boundary
-                        update_blocks.append((x_here, y_next))
-                    if x_here != x_next and y_here != y_next:
-                        # on both x and y pixel boundaries
-                        update_blocks.append((x_next, y_next))
-                    # update block counts
-                    for _x, _y in update_blocks:
-                        _x = min(_x, BLOCKS_PER_ROW - 1)
-                        _y = min(_y, BLOCKS_PER_COL - 1)
-                        block = (_y * BLOCKS_PER_ROW) + _x
-                        blocks[block][0] += white
-                        blocks[block][1] += 1
-            result = Ratios(blocks)
-            return result
-
-        def is_both_satisfied(segment: int, ring: int, criterion_1: Criterion, criterion_2: Criterion) -> bool:
-            """ determine if both the criterion given are satisfied """
-            is_satisfied_1 = criterion_1.satisfied(segments, segment, ring)
-            is_satisfied_2 = criterion_2.satisfied(segments, segment, ring)
-            if is_satisfied_1 is not None and is_satisfied_1 and is_satisfied_2 is not None and is_satisfied_2:
-                return True
-            else:
-                return False
-
-        def show_set(this_set):
-            """ format the given block set in a form suitable for logging """
-            blocks = ['_' for _ in range(BLOCKS_PER_BOX)]
-            for block in this_set:
-                blocks[block] = '{:1X}'.format(block)
-            return '[' + ''.join(blocks) + ']'
-
-        segments = [[None for _ in range(Scan.NUM_DATA_RINGS)] for _ in range(Scan.NUM_SEGMENTS)]
-        # region Phase 1 - get the black coverage of every quadrant of every box...
-        for segment in range(Scan.NUM_SEGMENTS):
-            for ring in range(Scan.NUM_DATA_RINGS):
-                segments[segment][ring] = get_box_white_ratios(ring, segment)
-        # endregion
-        # region Phase 2 - decode coverage...
-        bits    = [[None for _ in range(Scan.NUM_DATA_RINGS)] for _ in range(Scan.NUM_SEGMENTS)]
-        reasons = [[None for _ in range(Scan.NUM_DATA_RINGS)] for _ in range(Scan.NUM_SEGMENTS)]
-        for segment in range(Scan.NUM_SEGMENTS):
-            for ring in range(Scan.NUM_DATA_RINGS):
-                # region determine what to sample...
-                sample_set = {x for x in range(BLOCKS_PER_BOX)}
-                why = []
-                if is_both_satisfied(segment, ring, TO_LEFT_IS_WHITE, TO_BELOW_IS_WHITE):
-                    sample_set.difference_update(BOTTOM_LEFT_CORNER)
-                    why.append('ignore bottom left corner {}'.format(show_set(BOTTOM_LEFT_CORNER)))
-                if is_both_satisfied(segment, ring, TO_RIGHT_IS_WHITE, TO_BELOW_IS_WHITE):
-                    sample_set.difference_update(BOTTOM_RIGHT_CORNER)
-                    why.append('ignore bottom right corner {}'.format(show_set(BOTTOM_RIGHT_CORNER)))
-                if is_both_satisfied(segment, ring, TO_LEFT_IS_WHITE, TO_ABOVE_IS_WHITE):
-                    sample_set.difference_update(TOP_LEFT_CORNER)
-                    why.append('ignore top left corner {}'.format(show_set(TOP_LEFT_CORNER)))
-                if is_both_satisfied(segment, ring, TO_RIGHT_IS_WHITE, TO_ABOVE_IS_WHITE):
-                    sample_set.difference_update(TOP_RIGHT_CORNER)
-                    why.append('ignore top right corner {}'.format(show_set(TOP_RIGHT_CORNER)))
-                # endregion
-                # region determine what the bit should be...
-                bit = None
-                if len(sample_set) == 0:
-                    # if all blocks are being ignored then self cell is white
-                    bit = 1
-                    why.append('all ignored so white')
-                if bit is None:
-                    here_is_white = Criterion(HERE, sample_set, SELF_WHITE_THRESHOLD)
-                    if here_is_white.satisfied(segments, segment, ring):
-                        # if non-ignored blocks are white then self cell is white
-                        bit = 1
-                        why.append('non-ignored white {}'.format(show_set(sample_set)))
-                if bit is None:
-                    if is_both_satisfied(segment, ring, ABOVE_BOTTOM_IS_WHITE, SELF_TOP_IS_WHITE):
-                        above_whiteness = ALL_ABOVE.get_whiteness(segments, segment, ring)
-                        self_whiteness  = ALL_SELF.get_whiteness(segments, segment, ring)
-                        if self_whiteness > above_whiteness:
-                            # if above bottom and self top then self is white if all self whiter than all above
-                            bit = 1
-                            why.append('above bottom {} and self top {} white'.
-                                    format(show_set(BOTTOM_BLOCKS), show_set(TOP_BLOCKS)))
-                if bit is None:
-                    if is_both_satisfied(segment, ring,BELOW_TOP_IS_WHITE, SELF_BOTTOM_IS_WHITE):
-                        below_whiteness = ALL_BELOW.get_whiteness(segments, segment, ring)
-                        self_whiteness = ALL_SELF.get_whiteness(segments, segment, ring)
-                        if self_whiteness >= below_whiteness:  # NB: condition must be exclusive with above
-                            # if below top and self bottom then self is white if all self whiter than all below
-                            bit = 1
-                            why.append('self bottom {} and below top {} white'.
-                                    format(show_set(BOTTOM_BLOCKS), show_set(TOP_BLOCKS)))
-                if bit is None:
-                    # otherwise self cell is black
-                    bit = 0
-                    why.append('non-ignored black {}'.format(show_set(sample_set)))
-                bits[segment][ring] = bit
-                reasons[segment][ring] = why
-                # endregion
-        # endregion
-        # region Phase 3 - translate bits to digits...
-        digits = []
-        for segment in bits:
-            digits.append(self.decoder.digit(segment))
-        # endregion
-        # region diagnostics...
-        if self.save_images:
-            plot = self._draw_bits(bits, boxes, buckets)
-            self._unload(plot, '07-bits')
-
-        if self.logging:
-            self._log('decode_data_boxes:')
-            for segment in range(Scan.NUM_SEGMENTS):
-                self._log('    segment {}'.format(segment))
-                for ring in range(Scan.NUM_DATA_RINGS):
-                    ratios = segments[segment][ring]
-                    bit = bits[segment][ring]
-                    why = reasons[segment][ring]
-                    self._log('        ring {}: {} <--{}--> {}'.format(ring, bit, ratios, why))
-            self._log('    digits: {}'.format(digits))
-            code, doubt = self.decoder.unbuild(digits)
-            num = self.decoder.decode(code)
-            self._log('    num: {}, doubt: {}, code:{}'.format(num, doubt, code))
-        # endregion
-
-        return digits
 
     def _decode_digits(self, digits: [Digit]) -> [Result]:
         """ decode the digits into their corresponding code and doubt """
@@ -3490,8 +2494,8 @@ class Scan:
             msg = ''
             for digit in digits:
                 msg = '{}, {}'.format(msg, digit)
-            self._log('decode_digits: num:{}, doubt:{}, code:{}, error:{:.3f} from: {}'.
-                      format(number, doubt, code, error, msg[2:]))
+            self._log('decode_digits: num:{}, code:{}, doubt:{}, error:{:.3f} from: {}'.
+                      format(number, code, doubt, error, msg[2:]))
         return Scan.Result(number, doubt + error, code, digits)
 
     def _find_codes(self) -> ([Target], frame.Frame):
@@ -3858,53 +2862,6 @@ class Scan:
             # mark the image area outside the inner and outer extent
             plot = self._draw_extent(extent, plot, bleed=0.8)
 
-        return plot
-
-    def _draw_boxes(self, boxes: [Box], target: frame.Frame):
-        """ draw the data box boundaries on the given image """
-        box_sides = []
-        box_edges = []
-        for box in boxes:
-            if box.edges is None:
-                continue
-            else:
-                box_sides.append((box.start, box.edges[0][0][0], box.start, box.edges[-1][0][1]))
-                for edge in box.edges:
-                    box_top = []
-                    box_bottom = []
-                    for y_start, y_end in edge:
-                        box_top.append(y_start)
-                        box_bottom.append(y_end)
-                    box_edges.append([box.start, box_top])
-                    box_edges.append([box.start, box_bottom])
-        plot = self._draw_lines(target, box_sides, colour=Scan.RED)
-        plot = self._draw_plots(plot, plots_x=box_edges, colour=Scan.RED)
-        return plot
-
-    def _draw_bits(self, bits: [[int]], boxes: [Box], target: frame.Frame):
-        """ draw the given bits within the given boxes on the given image """
-        max_x, _ = target.size()
-        black_boxes = []
-        white_boxes = []
-        for segment, box in enumerate(boxes):
-            if box.edges is None:
-                continue
-            for ring, edge in enumerate(box.edges):
-                if bits[segment][ring] == 0:
-                    # got a black box
-                    fill = black_boxes
-                elif bits[segment][ring] == 1:
-                    # got a white box
-                    fill = white_boxes
-                else:
-                    # got crap
-                    continue
-                x = box.start
-                for y_start, y_end in edge:
-                    fill.append((x % max_x, y_start, x % max_x, y_end-1))
-                    x += 1
-        plot = self._draw_lines(target, black_boxes, colour=Scan.BLUE)
-        plot = self._draw_lines(plot, white_boxes, colour=Scan.GREEN)
         return plot
 
     # endregion

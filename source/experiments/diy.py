@@ -68,11 +68,11 @@ class Test:
             self.log_file.close()
             self.log_file = None
 
-    def encoder(self, min_num, max_num, base):
+    def encoder(self, min_num, max_num):
         """ create the coder/decoder and set its parameters """
         self.min_num = min_num
-        self.codec = codec.Codec(min_num, max_num, base)
-        self.base = self.codec.base
+        self.codec = codec.Codec(min_num, max_num)
+        self.base = self.codec.DIGIT_BASE
         if self.codec.num_limit is None:
             self.max_num = None
             self._log('Codec: available numbers are None!')
@@ -229,176 +229,266 @@ class Test:
         self._log('******************')
 
     def errors(self):
-        """ test the Codec ratio tolerance,
-            we use this to test different bit ratios to find those with the best error differential,
-            the differential is the minimum error difference between the best two digits for each ratio
-            """
+        """ test the Codec error tolerance, we do this by generating every possible digit slice """
+
+        # slice states
+        DISQUALIFIED = '0-disq'
+        INVALID      = '1-invd'
+        AMBIGUOUS    = '2-ambi'
+        VALID        = '3-good'
+
+        class Slice:
+            """ a test slice """
+            def __init__(self, width, size, bits):
+                self.width = width  # ring width for this slice
+                self.size = size  # pulse size for this slice
+                self.bits = bits.copy()  # bits of this slice
+                self.error = None  # classification best error
+                self.digit = None  # classification best digit
+                self.raw_digits = None  # classification raw digits
+                self.legal_digits = None  # after illegal digits removed
+                self.good_digits = None  # after bad digits removed
+                self.clean_digits = None  # after dodgy zeroes removed
+
+            def __str__(self):
+                return self.show_slice()
+
+            def set_digits(self, digits, raw=False, legal=False, good=False, clean=False):
+                if raw:
+                    self.raw_digits = digits.copy()
+                if legal:
+                    self.legal_digits = digits.copy()
+                if good:
+                    self.good_digits = digits.copy()
+                if clean:
+                    self.clean_digits = digits.copy()
+
+            def has_digits(self, raw=False, legal=False, good=False, clean=False):
+                digit_sets = 0
+                if raw:
+                    if self.raw_digits is not None:
+                        digit_sets += 1
+                if legal:
+                    if self.legal_digits is not None:
+                        digit_sets += 1
+                if good:
+                    if self.good_digits is not None:
+                        digit_sets += 1
+                if clean:
+                    if self.clean_digits is not None:
+                        digit_sets += 1
+                return digit_sets
+
+            def show_slice(self):
+                if self.error is None:
+                    err = 'None'
+                else:
+                    err = '{:.2f}'.format(self.error)
+                return '(width {}, bits {}, size {}, digit {}, error {})'.\
+                       format(self.width, len(self.bits), self.size, self.digit, err)
+
+            def show_bits(self):
+                return scanner.Scan.show_bits(self.bits)
+
+            def show_digits(self, raw=False, legal=False, good=False, clean=False):
+                if raw:
+                    digits = self.raw_digits
+                elif legal:
+                    digits = self.legal_digits
+                elif good:
+                    digits = self.good_digits
+                elif clean:
+                    digits = self.clean_digits
+                else:
+                    digits = []
+                return scanner.Scan.show_options(digits)
+
+        class Result:
+            """ a test result set """
+
+            def __init__(self, slice: Slice):
+                self.width = slice.width
+                self.size = slice.size
+                self.digit = slice.digit
+                self.state = slice.state
+                self.first_slice: Slice = slice
+                self.last_slice: Slice = slice
+                self.min_slice: Slice = slice
+                self.max_slice: Slice = slice
+                self.count = 1
+
+            def __str__(self):
+                return self.show_result()
+
+            def update(self, slice: Slice):
+                self.count += 1
+                if slice.error < self.min_slice.error:
+                    self.min_slice = slice
+                if slice.error > self.max_slice.error:
+                    self.max_slice = slice
+                self.last_slice = slice
+                # self.slices.append(slice)
+
+            def show_result(self):
+                min_err = '{:.2f}'.format(self.min_slice.error)
+                max_err = '{:.2f}'.format(self.max_slice.error)
+                return '(digit {}: state {}, width {}, bits {}, size {}, count {}, min err {}, max err {})'.\
+                       format(self.digit, self.state, self.width, len(self.last_slice.bits), self.size, self.count,
+                              min_err, max_err)
+
+            def has_digits(self, min=False, max=False, raw=False, legal=False, good=False, clean=False):
+                if min:
+                    return self.min_slice.has_digits(raw=raw, legal=legal, good=good, clean=clean)
+                if max:
+                    return self.max_slice.has_digits(raw=raw, legal=legal, good=good, clean=clean)
+                return 0
+
+            def show_digits(self, min=False, max=False, raw=False, legal=False, good=False, clean=False):
+                if min:
+                    return self.min_slice.show_digits(raw=raw, legal=legal, good=good, clean=clean)
+                if max:
+                    return self.max_slice.show_digits(raw=raw, legal=legal, good=good, clean=clean)
+                return '[]'
+
+            def show_bis(self, min=False, max=False, first=False, last=False):
+                if min:
+                    return self.min_slice.show_bits()
+                if max:
+                    return self.max_slice.show_bits()
+                if first:
+                    return self.first_slice.show_bits()
+                if last:
+                    return self.last_slice.show_bits()
+                return '[]'
+
+        def make_result_key(slice):
+            """ make the results dictionary key for the given slice """
+            key = 'W{}S{}D{}T{}'.format(slice.width, slice.size, slice.digit, slice.state)
+            return key
 
         self._log('')
         self._log('******************')
-        self._log('Check error tolerance on digit ratios (visual)')
-        # in a real target the radial cells can only be a few pixels high (self.cell[1])
-        # so a one pixel error can be significant, we test ratios for every possibility
-        # black/white lengths. The biggest length is cell-height * cells-in-radius
+        self._log('Check error tolerance on digit slices')
         try:
-            max_span = self.cells[1] * codec.Codec.SPAN
-            min_length = 1
-            max_length = max_span - min_length + 1
-            # generate all possible ratios (lead, head1, gap, head2, tail within max_length)
-            # all lengths must sum to max_length, lead cannot be 0, all others can
-            ratios = []
-            ratios.append(self.codec.make_ratio(max_length, 0, 0, 0))  # do 0 separately (all lengths are 0 except lead)
-            for lead_length in range(min_length, max_length):  # one short on max 'cos already done 0
-                lead_residue = max_length - lead_length
-                for head1_length in range(lead_residue):
-                    head1_residue = lead_residue - head1_length
-                    for gap_length in range(head1_residue):
-                        gap_residue = head1_residue - gap_length
-                        for head2_length in range(gap_residue):
-                            head2_residue = gap_residue - head2_length
-                            for tail_length in range(head2_residue):
-                                ratios.append(self.codec.make_ratio(lead_length, tail_length,
-                                                                    head1_length, head2_length,
-                                                                    max_length))
+            results = {}
+            # run the tests
+            for ring_width in range(1, self.cells[1] + 2):
+                # set pulse limits
+                slice_length = ring_width * codec.Codec.SPAN  # this is size the scanner creates
+                min_start = ring_width
+                max_start = slice_length - ring_width - 1
+                max_end = slice_length - ring_width
+                min_size = 0
+                max_size = slice_length - (2 * ring_width)
+                for size in range(min_size, max_size + 1):
+                    for start in range(min_start, max_start + 1):
+                        if start + size > max_end:
+                            # ran out of room, so that's it for this size
+                            break
+                        # set next slice
+                        digit_slice = [0 for _ in range(slice_length)]  # set initial empty slice
+                        if size > 0:
+                            for x in range(start, start + size):
+                                digit_slice[x] = 1
+                        # put a 'smudge' on the inner/outer edge
+                        for x in range(int(ring_width * 0.8)):  # almost the whole ring
+                            digit_slice[x] = 1
+                            digit_slice[(len(digit_slice) - 1) - x] = 1
+                        # note our first slice for testing
+                        holes = [digit_slice.copy()]
+                        if size < 3:
+                            # no room for a hole
+                            pass
+                        else:
+                            # make slices with ever-increasing holes starting at ever-increasing offsets
+                            max_hole_size = min(int(ring_width * 1.5), size - 2)
+                            for hole_size in range(1, max_hole_size + 1):
+                                for hole_start in range(start + 1, start + size - 1):
+                                    if (hole_start + hole_size) > (start + size - 1):
+                                        # ran out of room for this hole
+                                        break
+                                    noisy_pulse = digit_slice.copy()
+                                    for x in range(hole_start, hole_start + hole_size):
+                                        noisy_pulse[x] = 0
+                                    holes.append(noisy_pulse)
+                        # test these slices
+                        for hole in holes:
+                            slice = Slice(ring_width, size, hole)
+                            if not self.codec.qualify(slice.bits):
+                                slice.state = DISQUALIFIED
+                                slice.error = 1.0
+                            else:
+                                raw_digits = self.codec.classify(slice.bits)
+                                legal_digits, legal_dropped = scanner.Scan.drop_illegal_digits(raw_digits.copy())
+                                good_digits, good_dropped = scanner.Scan.drop_bad_digits(legal_digits.copy())
+                                clean_digits, clean_dropped = scanner.Scan.drop_bad_zero_digit(good_digits.copy())
+                                if len(clean_digits) > 0:
+                                    if scanner.Scan.is_ambiguous(clean_digits):
+                                        slice.state = AMBIGUOUS
+                                        slice.error = 1.0
+                                    else:
+                                        slice.state = VALID
+                                        slice.digit, slice.error = clean_digits[0]
+                                else:
+                                    slice.state = INVALID
+                                    slice.error = 1.0
+                                slice.set_digits(raw_digits, raw=True)
+                                if legal_dropped:
+                                    slice.set_digits(legal_digits, legal=True)
+                                if good_dropped:
+                                    slice.set_digits(good_digits, good=True)
+                                if clean_dropped:
+                                    slice.set_digits(clean_digits, clean=True)
+                            result_key = make_result_key(slice)
+                            if result_key in results:
+                                results[result_key].update(slice)
+                            else:
+                                # first time for this size, digit, state
+                                results[result_key] = Result(slice)
+                        if slice.size == 0:
+                            # no point moving the start for this
+                            break
+                    pass  # do next size
+                pass  # do next width
+            # log the results
+            result_list = list(results.values())  # convert to a list
+            result_list.sort(key=lambda r: (-1 if r.digit is None else r.digit, r.state, r.width, r.size))  # sort into a useful order
+            self._log('{} test results'.format(len(result_list)))
             digits = {}
-            for ratio in ratios:
-                candidates = self.codec.classify(ratio)
-                digit = candidates[0][0]
-                if digits.get(digit) is None:
-                    # new digit
-                    digits[digit] = [(ratio, candidates)]
-                else:
-                    digits[digit].append((ratio, candidates))
-            errors = []
-            for digit, options in digits.items():
-                # find the ratio span limits for each option
-                min_lead = None
-                max_lead = None
-                min_head1 = None
-                max_head1 = None
-                min_gap = None
-                max_gap = None
-                min_head2 = None
-                max_head2 = None
-                min_tail = None
-                max_tail = None
-                min_lead_digit = None
-                max_lead_digit = None
-                min_head1_digit = None
-                max_head1_digit = None
-                min_gap_digit = None
-                max_gap_digit = None
-                min_head2_digit = None
-                max_head2_digit = None
-                min_tail_digit = None
-                max_tail_digit = None
-                min_lead_err = None
-                max_lead_err = None
-                min_head1_err = None
-                max_head1_err = None
-                min_gap_err = None
-                max_gap_err = None
-                min_head2_err = None
-                max_head2_err = None
-                min_tail_err = None
-                max_tail_err = None
-                min_error = None
-                max_error = None
-                min_error_digit = None
-                max_error_digit = None
-                max_error_err = None
-                min_error_err = None
-                for ratio, candidates in options:
-                    if min_error is None or candidates[0][1].error < min_error_err.error:
-                        min_error_err = candidates[0][1]
-                        min_error_digit = candidates[0][0]
-                        min_error = ratio
-                    if max_error is None or candidates[0][1].error > max_error_err.error:
-                        max_error_err = candidates[0][1]
-                        max_error_digit = candidates[0][0]
-                        max_error = ratio
-                    if min_lead is None or ratio.lead_ratio() < min_lead.lead_ratio():
-                        min_lead = ratio
-                        min_lead_digit = candidates[1][0]
-                        min_lead_err = candidates[1][1]
-                    if max_lead is None or ratio.lead_ratio() > max_lead.lead_ratio():
-                        max_lead = ratio
-                        max_lead_digit = candidates[1][0]
-                        max_lead_err = candidates[1][1]
-                    if min_head1 is None or ratio.head1_ratio() < min_head1.head1_ratio():
-                        min_head1 = ratio
-                        min_head1_digit = candidates[1][0]
-                        min_head1_err = candidates[1][1]
-                    if max_head1 is None or ratio.head1_ratio() > max_head1.head1_ratio():
-                        max_head1 = ratio
-                        max_head1_digit = candidates[1][0]
-                        max_head1_err = candidates[1][1]
-                    if min_gap is None or ratio.gap_ratio() < min_gap.gap_ratio():
-                        min_gap = ratio
-                        min_gap_digit = candidates[1][0]
-                        min_gap_err = candidates[1][1]
-                    if max_gap is None or ratio.gap_ratio() > max_gap.gap_ratio():
-                        max_gap = ratio
-                        max_gap_digit = candidates[1][0]
-                        max_gap_err = candidates[1][1]
-                    if min_head2 is None or ratio.head2_ratio() < min_head2.head2_ratio():
-                        min_head2 = ratio
-                        min_head2_digit = candidates[1][0]
-                        min_head2_err = candidates[1][1]
-                    if max_head2 is None or ratio.head2_ratio() > max_head2.head2_ratio():
-                        max_head2 = ratio
-                        max_head2_digit = candidates[1][0]
-                        max_head2_err = candidates[1][1]
-                    if min_tail is None or ratio.tail_ratio() < min_tail.tail_ratio():
-                        min_tail = ratio
-                        min_tail_digit = candidates[1][0]
-                        min_tail_err = candidates[1][1]
-                    if max_tail is None or ratio.tail_ratio() > max_tail.tail_ratio():
-                        max_tail = ratio
-                        max_tail_digit = candidates[1][0]
-                        max_tail_err = candidates[1][1]
-                # set stats for this digit
-                errors.append((digit, len(options),
-                               ((min_lead, min_lead_digit, min_lead_err),
-                                (max_lead, max_lead_digit, max_lead_err),
-                                (min_head1, min_head1_digit, min_head1_err),
-                                (max_head1, max_head1_digit, max_head1_err),
-                                (min_gap, min_gap_digit, min_gap_err),
-                                (max_gap, max_gap_digit, max_gap_err),
-                                (min_head2, min_head2_digit, min_head2_err),
-                                (max_head2, max_head2_digit, max_head2_err),
-                                (min_tail, min_tail_digit, min_tail_err),
-                                (max_tail, max_tail_digit, max_tail_err),
-                                (min_error, min_error_digit, min_error_err),
-                                (max_error, max_error_digit, max_error_err))))
-            errors.sort(key=lambda e: e[0])  # put into digit order
-            # show digit stats
-            ideal_ratios_per_digit = len(ratios) / self.codec.base
-            self._log('Ratios: max span={}, max steps={}, ideal per digit={:.0f} ({:.2f}%)'.
-                      format(max_span, len(ratios),
-                             ideal_ratios_per_digit, (ideal_ratios_per_digit / len(ratios)) * 100))
-            for (digit, steps, stats) in errors:
-                ideal = self.codec.to_ratio(digit)
-                min_lead, max_lead, \
-                min_head1, max_head1, \
-                min_gap, max_gap, \
-                min_head2, max_head2, \
-                min_tail, max_tail,\
-                min_error, max_error = stats
-                self._log('Digit {} ideal={}: steps={} ({:.2f}%):'.format(digit, ideal, steps,
-                                                                          (steps/len(ratios))*100))
-                self._log('    min error:{}, digit={}, err={}'.format(min_error[0], min_error[1], min_error[2]))
-                self._log('    max error:{}, digit={}, err={}'.format(max_error[0], max_error[1], max_error[2]))
-                self._log('    min lead:{}, digit={}, err={}'.format(min_lead[0], min_lead[1], min_lead[2]))
-                self._log('    max lead:{}, digit={}, err={}'.format(max_lead[0], max_lead[1], max_lead[2]))
-                self._log('    min head1:{}, digit={}, err={}'.format(min_head1[0], min_head1[1], min_head1[2]))
-                self._log('    max head1:{}, digit={}, err={}'.format(max_head1[0], max_head1[1], max_head1[2]))
-                self._log('    min gap:{}, digit={}, err={}'.format(min_gap[0], min_gap[1], min_gap[2]))
-                self._log('    max gap:{}, digit={}, err={}'.format(max_gap[0], max_gap[1], max_gap[2]))
-                self._log('    min head2:{}, digit={}, err={}'.format(min_head2[0], min_head2[1], min_head2[2]))
-                self._log('    max head2:{}, digit={}, err={}'.format(max_head2[0], max_head2[1], max_head2[2]))
-                self._log('    min tail:{}, digit={}, err={}'.format(min_tail[0], min_tail[1], min_tail[2]))
-                self._log('    max tail:{}, digit={}, err={}'.format(max_tail[0], max_tail[1], max_tail[2]))
+            for result in result_list:
+                if result.digit not in digits:
+                    digits[result.digit] = {}
+                states = digits[result.digit]
+                if result.state not in states:
+                    states[result.state] = 0
+                states[result.state] += result.count
+                self._log(result)
+                self._log('    first bits: {}'.format(result.show_bis(first=True)))
+                self._log('     last bits: {}'.format(result.show_bis(last=True)))
+                self._log('      min bits: {}'.format(result.show_bis(min=True)))
+                self._log('      max bits: {}'.format(result.show_bis(max=True)))
+                self._log('    min raw digits: {}'.format(result.show_digits(min=True, raw=True)))
+                self._log('    max raw digits: {}'.format(result.show_digits(max=True, raw=True)))
+                if result.has_digits(min=True, legal=True) == 1:
+                    self._log('    min legal digits: {}'.format(result.show_digits(min=True, legal=True)))
+                if result.has_digits(max=True, legal=True) == 1:
+                    self._log('    max legal digits: {}'.format(result.show_digits(max=True, legal=True)))
+                if result.has_digits(min=True, good=True) == 1:
+                    self._log('    min good digits: {}'.format(result.show_digits(min=True, good=True)))
+                if result.has_digits(max=True, good=True) == 1:
+                    self._log('    max good digits: {}'.format(result.show_digits(max=True, good=True)))
+                if result.has_digits(min=True, clean=True) == 1:
+                    self._log('    min clean digits: {}'.format(result.show_digits(min=True, clean=True)))
+                if result.has_digits(max=True, clean=True) == 1:
+                    self._log('    max clean digits: {}'.format(result.show_digits(max=True, clean=True)))
+            self._log('Summary:')
+            total_slices = 0
+            for digit, states in digits.items():
+                for state, count in states.items():
+                    total_slices += count
+                    self._log('    digit {}, state {}, count {}'.format(digit, state, count))
+            self._log('Total slices {}'.format(total_slices))
+
         except:
             traceback.print_exc()
         self._log('******************')
@@ -538,19 +628,18 @@ class Test:
         try:
             x, y = self._make_image_buffer(width)
             ring = rings.Ring(x >> 1, y >> 1, width, self.frame)
-            bits = codec.Codec.ENCODING
             block = [0 for _ in range(codec.Codec.RINGS_PER_DIGIT)]
             digit = 0
             slice = -1
             while digit < codec.Codec.DIGITS:
                 slice += 1
-                bit = bits[slice % len(bits)]
-                if bit is None:
+                bits = self.codec.coding(slice % self.base)
+                if bits is None:
                     # illegal digit
                     continue
                 digit_mask = 1 << digit
                 for r in range(codec.Codec.RINGS_PER_DIGIT):
-                    if bit[r] == 1:
+                    if bits[r] == 1:
                         block[r] += digit_mask
                 digit += 1
             ring.code(000, block)
@@ -573,8 +662,9 @@ class Test:
                     continue
                 code_rings = self.codec.build(n)
                 if code_rings is None:
-                    self._log('{}: failed to generate the code rings'.format(n))
+                    self._log('  {}: failed to generate the code rings'.format(n))
                 else:
+                    self._log('  drawing rings for code {}'.format(n))
                     x, y = self._make_image_buffer(width)
                     ring = rings.Ring(x >> 1, y >> 1, width, self.frame)
                     ring.code(n, code_rings)
@@ -775,7 +865,7 @@ class Test:
             """
 
         image_width = int(round(width * rings.Ring.NUM_RINGS * 2))
-        self.frame.new(image_width, image_width, MID_LUMINANCE)
+        self.frame.new(image_width, image_width, MIN_LUMINANCE)  # NB: must be initialised to black
         x, y = self.frame.size()
 
         return x, y
@@ -818,16 +908,12 @@ def verify():
     # parameters
     min_num = 101  # min number we want
     max_num = 999  # max number we want (may not be achievable)
-    code_base = 8
 
-    test_codes_folder = 'codes'
-    test_media_folder = 'media'
-    test_log_folder = 'logs'
     test_ring_width = 34  # this makes a target that fits on A5
 
     # cell size is critical,
-    # going small in length creates edges that are steep vertically, going more takes too long
-    # going small in height creates edges that are too small and easily confused with noise
+    # too small and 1 pixel errors become significant,
+    # too big and takes too long and uses a lot of memory
     test_scan_cells = (8, 8)
 
     # reducing the resolution means targets have to be closer to be detected,
@@ -837,11 +923,16 @@ def verify():
     # test_debug_mode = scanner.Scan.DEBUG_IMAGE
     test_debug_mode = scanner.Scan.DEBUG_VERBOSE
 
+    # test log/image folders
+    test_log_folder = 'logs'
+    test_codes_folder = 'codes'
+    test_media_folder = 'media'
+
     try:
         test = None
         # setup test params
         test = Test(log=test_log_folder)
-        test.encoder(min_num, max_num, code_base)
+        test.encoder(min_num, max_num)
         test.options(cells=test_scan_cells,
                      mode=test_scan_video_mode,
                      debug=test_debug_mode)
@@ -849,14 +940,14 @@ def verify():
         # build a test code set
         test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
 
-        test.rand()
-        test.coding()
-        test.decoding()
+        # test.rand()
+        # test.coding()
+        # test.decoding()
         # test.errors()
         # test.circles()
-        test.code_words(test_num_set)
-        test.codes(test_codes_folder, test_num_set, test_ring_width)
-        test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
+        # test.code_words(test_num_set)
+        # test.codes(test_codes_folder, test_num_set, test_ring_width)
+        # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
         # test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
@@ -864,8 +955,8 @@ def verify():
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [222], 'test-code-222.png')
 
-        # test.scan(test_media_folder, [101,111,126,159,205,209,222,223,225,252,333,360,366,383,412,427,444,454,497,518],
-        #           'distant-101-111-126-159-205-209-222-223-225-252-333-360-366-383-412-427-444-454-497-518.jpg')
+        test.scan(test_media_folder, [101,111,126,159,205,209,222,223,225,252,333,360,366,383,412,427,444,454,497,518],
+                  'distant-101-111-126-159-205-209-222-223-225-252-333-360-366-383-412-427-444-454-497-518.jpg')
 
     except:
         traceback.print_exc()

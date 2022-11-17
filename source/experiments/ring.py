@@ -41,8 +41,63 @@ class Ring:
     def _point(self, x, y, bit):
         """ draw a point at offset x,y from our centre with the given bit (0 or 1) colour,
             bit can be 0 (draw 'black'), 1 (draw 'white'),
-            any other value (inc None) will draw 'grey' (mid luminance)
+            any other value (inc None) will draw 'grey' (mid luminance),
+            x,y can be fractional, in which case when drawing a white pixel we distribute
+            the luminance across its neighbours such that their sum is white,
             """
+
+        def put_pixel(cX: float, cY: float, pixel: int):
+            """ put the interpolated pixel value to x,y (pixel value is +ve to increase luminance and -ve to decrease),
+                x,y can be fractional so the pixel value is distributed to the 4 pixels around x,y
+                the mixture is based on the ratio of the neighbours to include, the ratio of all 4 is 1
+                see here: https://imagej.nih.gov/ij/plugins/download/Polar_Transformer.java for the inspiration
+                explanation:
+                x,y represent the top-left of a 1x1 pixel
+                if x or y are not whole numbers the 1x1 pixel area overlaps its neighbours,
+                the pixel value is distributed according to the overlap fractions of its neighbour
+                pixel squares, P is the fractional pixel address in its pixel, 1, 2 and 3 are
+                its neighbours, dotted area is distribution to neighbours:
+                    +------+------+
+                    |  P   |   1  |
+                    |  ....|....  |  Ax = 1 - (Px - int(Px) = 1 - Px + int(Px) = (int(Px) + 1) - Px
+                    |  . A | B .  |  Ay = 1 - (Py - int(Py) = 1 - Py + int(Py) = (int(Py) + 1) - Py
+                    +------+------+  et al for B, C, D
+                    |  . D | C .  |
+                    |  ....|....  |
+                    |  3   |   2  |
+                    +----- +------+
+                """
+
+            def update_pixel(x, y, value):
+                """ update the pixel value at x,y by adding value (value may be -ve) """
+                old_value = self.f.getpixel(x, y)
+                new_value = int(max(min(old_value + value, MAX_LUMINANCE), MIN_LUMINANCE))
+                self.f.putpixel(x, y, new_value, True)
+
+            xL: int = int(cX)
+            yL: int = int(cY)
+
+            if (cX - xL) < (1/255) and (cY - yL) < (1/255):
+                # short-cut when no/small neighbours involved ('cos Python is so slow!)
+                self.f.putpixel(xL, yL, min(pixel, MIN_LUMINANCE), True)
+                return
+
+            xH: int = xL + 1
+            yH: int = yL + 1
+            ratio_xLyL = (xH - cX) * (yH - cY)
+            ratio_xHyL = (cX - xL) * (yH - cY)
+            ratio_xLyH = (xH - cX) * (cY - yL)
+            ratio_xHyH = (cX - xL) * (cY - yL)
+            part_xLyL = pixel * ratio_xLyL
+            part_xHyL = pixel * ratio_xHyL
+            part_xLyH = pixel * ratio_xLyH
+            part_xHyH = pixel * ratio_xHyH
+
+            update_pixel(xL, yL, part_xLyL)
+            update_pixel(xL, yH, part_xLyH)
+            update_pixel(xH, yL, part_xHyL)
+            update_pixel(xH, yH, part_xHyH)
+
         if bit is None:
             colour = MID_LUMINANCE
         elif bit == 0:
@@ -52,9 +107,11 @@ class Ring:
         else:
             colour = MID_LUMINANCE
 
-        dx = int(round(self.x + x))
-        dy = int(round(self.y + y))
-        self.f.putpixel(dx, dy, colour, True)
+        if colour == MIN_LUMINANCE:
+            # set to reduce the luminance
+            colour = int(0 - MAX_LUMINANCE)
+
+        put_pixel(self.x + x, self.y + y, colour)
 
     def _draw(self, radius, bits):
         """ draw a ring at radius of bits, a 1-bit is white, 0 black,
