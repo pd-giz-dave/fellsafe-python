@@ -95,15 +95,15 @@ class Scan:
     MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.15  # minimum luminance variation of a valid blob projection relative to the max luminance
-    THRESHOLD_WIDTH = 6  # the fraction of the projected image width to use as the integration area when binarizing
-    THRESHOLD_HEIGHT = 2  # the fraction of the projected image height to use as the integration area (None=as width)
+    THRESHOLD_WIDTH = 8  # ToDo: HACK-->6  # the fraction of the projected image width to use as the integration area when binarizing
+    THRESHOLD_HEIGHT = 3.5  # ToDo: HACK-->2  # the fraction of the projected image height to use as the integration area (None=as width)
     THRESHOLD_BLACK = 10  # the % below the average luminance in a projected image that is considered to be black
     THRESHOLD_WHITE = 0  # the % above the average luminance in a projected image that is considered to be white
     MIN_EDGE_SAMPLES = 2  # minimum samples in an edge to be considered a valid edge
+    INNER_EDGE_GAP = 1.0  # fraction of inner edge y co-ord to add to inner edge when looking for the outer edge
     MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments
-    MAX_NEIGHBOUR_ANGLE_OUTER = 0.6  # ~=31 degrees, tan of the max acceptable angle when joining outer edge fragments
+    MAX_NEIGHBOUR_ANGLE_OUTER = 0.9  # ~=42 degrees, tan of the max acceptable angle when joining outer edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max x or y jump allowed when following an edge
-    MAX_NEIGHBOUR_HEIGHT_GAP_SQUARED = MAX_NEIGHBOUR_HEIGHT_GAP * MAX_NEIGHBOUR_HEIGHT_GAP
     MAX_NEIGHBOUR_LENGTH_JUMP = 10  # max x jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
@@ -855,7 +855,7 @@ class Scan:
                             min_gap = gap
                             min_y = step.where
 
-                if min_gap > Scan.MAX_NEIGHBOUR_HEIGHT_GAP_SQUARED:
+                if min_gap > (Scan.MAX_NEIGHBOUR_HEIGHT_GAP * Scan.MAX_NEIGHBOUR_HEIGHT_GAP):
                     min_y = None
 
                 return min_y
@@ -1465,7 +1465,8 @@ class Scan:
             falling_edges = self._edges(slices, Scan.FALLING, max_y)
             inner, inner_fail = self._extent(max_x, falling_edges)
             if inner_fail is None:
-                rising_edges = self._edges(slices, Scan.RISING, max_y, from_y=inner)
+                from_y = [y + (y * Scan.INNER_EDGE_GAP) for y in inner]
+                rising_edges = self._edges(slices, Scan.RISING, max_y, from_y=from_y)
                 outer, outer_fail = self._extent(max_x, rising_edges)
             else:
                 rising_edges = None

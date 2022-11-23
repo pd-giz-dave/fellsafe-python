@@ -21,18 +21,20 @@ dx = [1, 1, 0, -1, -1, -1,  0,  1]       # x-offset
 dy = [0, 1, 1,  1,  0, -1, -1, -1]       # .. y-offset
 
 # Reject codes for blobs being ignored
-REJECT_NONE        = 'accepted'
-REJECT_UNKNOWN     = 'unknown'
-REJECT_TOO_SMALL   = 'area below minimum'
-REJECT_TOO_BIG     = 'area above maximum'
-REJECT_ROUNDNESS   = 'not round enough'
-REJECT_RADIUS      = 'radius too small'
-REJECT_MARGIN      = 'margin to image edge too small'
-REJECT_INTERNALS   = 'too many internal contours'
-REJECT_WHITENESS   = 'not enough white'
-REJECT_SQUARENESS  = 'not square enough'
-REJECT_WAVYNESS    = 'perimeter too wavy'
-REJECT_QUALITY     = 'quality too low'
+REJECT_NONE            = 'accepted'
+REJECT_UNKNOWN         = 'unknown'
+REJECT_TOO_FEW_POINTS  = 'too few contour points'
+REJECT_TOO_MANY_POINTS = 'too many contour points'
+REJECT_TOO_SMALL       = 'area below minimum'
+REJECT_TOO_BIG         = 'area above maximum'
+REJECT_ROUNDNESS       = 'not round enough'
+REJECT_RADIUS          = 'radius too small'
+REJECT_MARGIN          = 'margin to image edge too small'
+REJECT_INTERNALS       = 'too many internal contours'
+REJECT_WHITENESS       = 'not enough white'
+REJECT_SQUARENESS      = 'not square enough'
+REJECT_WAVYNESS        = 'perimeter too wavy'
+REJECT_QUALITY         = 'quality too low'
 
 BLACK: int = 0
 WHITE: int = 255
@@ -239,14 +241,26 @@ class Contour:
             samples += count
         centre_y /= samples
         # the centre is the top left of a 1x1 pixel square, an accurate centre is critical
-        # calculate the radius as the average distance of the centre to the contour extremities
-        # the radius is used for filtering (in here) and scaling (in the scanner)
-        # an accurate radius is not critical
-        cx2lx = centre_x - self.top_left.x
-        cx2rx = (self.bottom_right.x + 1) - centre_x
-        cy2ly = centre_y - self.top_left.y
-        cy2ry = (self.bottom_right.y + 1) - centre_y
-        r = (cx2lx + cx2rx + cy2ly + cy2ry) / 4
+        # the radius is calculated as the mean distance from the centre to the perimeter points
+        # the centre is the top-left of a 1x1 pixel square, so the actual centre is +0.5 on this
+        # we want the distance to the *outside* of the perimeter, so when the perimeter is ahead
+        # of the centre we add the pixel width, i.e. 1, when the perimeter is behind its as is
+        perimeter = self.get_perimeter()
+        mean_distance_squared = 0
+        for x, y in perimeter:
+            if x < centre_x:
+                x_distance = (centre_x + 0.5) - x
+            else:
+                x_distance = (x + 1) - (centre_x + 0.5)
+            x_distance *= x_distance
+            if y < centre_y:
+                y_distance = (centre_y + 0.5) - y
+            else:
+                y_distance = (y + 1) - (centre_y + 0.5)
+            y_distance *= y_distance
+            mean_distance_squared += (x_distance + y_distance)
+        mean_distance_squared /= len(perimeter)
+        r = math.sqrt(mean_distance_squared)
         # make the circle
         self.circle = Circle(Point(centre_x, centre_y), r)
         return self.circle
@@ -414,7 +428,9 @@ class Targets:
                                          # NB: Make a small +ve number to ensure totally white stays white
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
-    min_area: float = 3 * 3              # this should be small to detect far away targets
+    min_points: int = 12                 # minimum points in the contour (around a 3x4 rectangle)
+    max_points: int = 1600               # maximum points in the contour (should be > pi*2R, R=sqrt(max_area/pi))
+    min_area: float = 3 * 4              # this should be small to detect far away targets
     min_small_area: float = 5 * 5        # area below which thresholds change to the 'small' values
     max_area: float = 200000             # this has to be big to cater for testing drawn targets (rather than photos)
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
@@ -630,9 +646,15 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
     for blob in blobs:
         while True:
             quality = None  # range 0..1, 0=perfect, >0=less perfect
-            # check internals early as it's cheap and gets rid of a lot of junk
+            # check internals and points early as it's cheap and gets rid of a lot of junk
             if len(blob.internal) > params.max_internals:
                 reason_code = REJECT_INTERNALS
+                break
+            if len(blob.external.points) < params.min_points:
+                reason_code = REJECT_TOO_FEW_POINTS
+                break
+            if len(blob.external.points) > params.max_points:
+                reason_code = REJECT_TOO_MANY_POINTS
                 break
             area = blob.get_area()
             if area < params.min_area:
@@ -794,18 +816,20 @@ def _test(src):
     draw_bad = cv2.merge([shrunk, shrunk, shrunk])
     draw_good = cv2.merge([shrunk, shrunk, shrunk])
     # NB: cv2 colour order is BGR not RGB
-    colours = {REJECT_NONE:       ((0, 255, 0),    'green'),
-               REJECT_UNKNOWN:    ((0, 0, 255),    'red'),
-               REJECT_TOO_SMALL:  ((0, 255, 255),  'yellow'),
-               REJECT_TOO_BIG:    ((0, 255, 255),  'yellow'),
-               REJECT_ROUNDNESS:  ((255, 0, 0),    'blue'),
-               REJECT_RADIUS:     ((255, 255, 0),  'cyan'),
-               REJECT_MARGIN:     ((0, 0, 128),    'maroon'),
-               REJECT_INTERNALS:  ((0, 128, 128),  'olive'),
-               REJECT_WHITENESS:  ((128, 128, 0),  'teal'),
-               REJECT_SQUARENESS: ((128, 0, 0),    'navy'),
-               REJECT_WAVYNESS:   ((255, 0, 255),  'magenta'),
-               REJECT_QUALITY:    ((128, 0, 128),  'purple'),
+    colours = {REJECT_NONE:            ((0, 255, 0),    'green'),
+               REJECT_UNKNOWN:         ((0, 0, 255),    'red'),
+               REJECT_TOO_FEW_POINTS:  ((80, 127, 255), 'orange'),
+               REJECT_TOO_MANY_POINTS: ((80, 127, 255), 'orange'),
+               REJECT_TOO_SMALL:       ((0, 255, 255),  'yellow'),
+               REJECT_TOO_BIG:         ((0, 255, 255),  'yellow'),
+               REJECT_ROUNDNESS:       ((255, 0, 0),    'blue'),
+               REJECT_RADIUS:          ((255, 255, 0),  'cyan'),
+               REJECT_MARGIN:          ((0, 0, 128),    'maroon'),
+               REJECT_INTERNALS:       ((0, 128, 128),  'olive'),
+               REJECT_WHITENESS:       ((128, 128, 0),  'teal'),
+               REJECT_SQUARENESS:      ((128, 0, 0),    'navy'),
+               REJECT_WAVYNESS:        ((255, 0, 255),  'magenta'),
+               REJECT_QUALITY:         ((128, 0, 128),  'purple'),
                }
     for x in range(max_x):
         for y in range(max_y):
