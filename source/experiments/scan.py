@@ -95,8 +95,8 @@ class Scan:
     MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.15  # minimum luminance variation of a valid blob projection relative to the max luminance
-    THRESHOLD_WIDTH = 8  # ToDo: HACK-->6  # the fraction of the projected image width to use as the integration area when binarizing
-    THRESHOLD_HEIGHT = 3.5  # ToDo: HACK-->2  # the fraction of the projected image height to use as the integration area (None=as width)
+    THRESHOLD_WIDTH = 8  # the fraction of the projected image width to use as the integration area when binarizing
+    THRESHOLD_HEIGHT = 3.5  # the fraction of the projected image height to use as the integration area (None=as width)
     THRESHOLD_BLACK = 10  # the % below the average luminance in a projected image that is considered to be black
     THRESHOLD_WHITE = 0  # the % above the average luminance in a projected image that is considered to be white
     MIN_EDGE_SAMPLES = 2  # minimum samples in an edge to be considered a valid edge
