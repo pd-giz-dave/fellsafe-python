@@ -94,7 +94,7 @@ class Scan:
     MIN_BLOB_AREA = 10  # min area of a blob we want (in pixels) (default 9)
     MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
-    MIN_CONTRAST = 0.15  # minimum luminance variation of a valid blob projection relative to the max luminance
+    MIN_CONTRAST = 0.35  # minimum luminance variation of a valid blob projection relative to the max luminance
     THRESHOLD_WIDTH = 8  # the fraction of the projected image width to use as the integration area when binarizing
     THRESHOLD_HEIGHT = 3.5  # the fraction of the projected image height to use as the integration area (None=as width)
     THRESHOLD_BLACK = 10  # the % below the average luminance in a projected image that is considered to be black
@@ -524,8 +524,8 @@ class Scan:
             stretch_factor = 1
 
         if self.logging:
-            self._log('project: projected image size {}x {}y (stretch factor {:.2f})'.
-                      format(max_x, max_y, stretch_factor))
+            self._log('project: projected image size {}x {}y (stretch factor {:.2f}, contrast {:.2f})'.
+                      format(max_x, max_y, stretch_factor, contrast))
 
         if self.save_images:
             # draw cropped binary image of just this blob
