@@ -938,7 +938,7 @@ def verify():
                      debug=test_debug_mode)
 
         # build a test code set
-        test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
+        # test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
 
         # test.rand()
         # test.coding()
@@ -949,14 +949,14 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        # test.scan_codes(test_codes_folder)
+        test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [222], 'test-code-222.png')
 
-        test.scan(test_media_folder, [101,111,126,159,205,209,222,223,225,252,333,360,366,383,412,427,444,454,497,518],
-                  'distant-101-111-126-159-205-209-222-223-225-252-333-360-366-383-412-427-444-454-497-518.jpg')
+        # test.scan(test_media_folder, [101,102,111,116,222,298,333,387,401,444,555,666,673,732,746,756,777,888,892,999],
+        #           'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg')
 
     except:
         traceback.print_exc()

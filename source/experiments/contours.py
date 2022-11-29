@@ -5,7 +5,7 @@
         "A linear-time component-labeling algorithm using contour tracing technique"
         by Fu Chang, Chun-Jen Chen, and Chi-Jen Lu.
     It has been tweaked to reduce the connectivity searched from 8 to 4 (i.e. direct neighbours only).
-    It is also extended to compute the area of the components found.
+    It is also extended to compute the area of the components found and various other properties.
     Blame the original for any weird looking logic in here!
 """
 
@@ -34,7 +34,7 @@ REJECT_INTERNALS       = 'too many internal contours'
 REJECT_WHITENESS       = 'not enough white'
 REJECT_SQUARENESS      = 'not square enough'
 REJECT_WAVYNESS        = 'perimeter too wavy'
-REJECT_QUALITY         = 'quality too low'
+REJECT_OFFSETNESS      = 'circle centre too offset'
 
 BLACK: int = 0
 WHITE: int = 255
@@ -71,6 +71,7 @@ class Circle:
     def __init__(self, centre: Point, radius: float):
         self.centre = centre
         self.radius = radius
+        self.points = None  # will become perimeter points on-demand
 
     def __str__(self):
         return "(centre:{}, radius:{:.2f}, area:{:.2f})".format(self.centre, self.radius, self.area())
@@ -78,14 +79,57 @@ class Circle:
     def area(self):
         return math.pi * self.radius * self.radius
 
+    def perimeter(self):
+        """ get the x,y co-ordinates of the perimeter of the circle,
+            the co-ords are returned as a list of triplets
+            where each triplet is the x co-ord and its two y co-ords,
+            this format is compatible with count_black()
+            """
+        if self.points is not None:
+            # already done it
+            return self.points
+        # this is expensive, so only do it once
+        points = circumference(self.centre.x, self.centre.y, self.radius)
+        # we want a min_y/max_y value pair for every x
+        y_limits = {}
+        min_x = None
+        max_x = None
+        for x, y in points:
+            if min_x is None or x < min_x:
+                min_x = x
+            if max_x is None or x > max_x:
+                max_x = x
+            if y_limits.get(x) is None:
+                y_limits[x] = [y, y]
+            elif y < y_limits[x][0]:
+                y_limits[x][0] = y
+            elif y > y_limits[x][1]:
+                y_limits[x][1] = y
+        # build our tuple set
+        self.points = []
+        for x in range(min_x, max_x + 1):
+            limits = y_limits.get(x)
+            if limits is None:
+                raise Exception('perimeter does not include x of {} when range is {}..{}'.format(x, min_x, max_x))
+            min_y, max_y = limits
+            min_y += 1  # we want exclusive co-ords
+            max_y -= 1  # ..
+            # NB: min_y > max_y can happen at the x extremes, but we chuck those, so we don't care
+            self.points.append((x, min_y, max_y))
+        # we want exclusive x co-ords, so knock the first and last out (there should be at least 3 entries)
+        if len(self.points) < 3:
+            raise Exception('perimeter has less than 3 x co-ords')
+        del self.points[0]
+        del self.points[-1]
+        return self.points
+
 
 class Contour:
     """ properties of a contour and methods to create/access them,
         NB: most of the metrics of a contour are in the range 0..1 where 0 is good and 1 is very bad
         """
 
-    def __init__(self, external: bool = True):
-        self.external: bool = external
+    def __init__(self):
         self.points: [Point] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
         self.top_left: Point = None
         self.bottom_right: Point = None
@@ -96,7 +140,7 @@ class Contour:
 
     def reset(self):
         """ reset the cached stuff """
-        self.perimeter: {Point} = None
+        self.blob_perimeter: {Point} = None
         self.x_slices: [tuple] = None
         self.y_slices: [tuple] = None
         self.area: float = None
@@ -130,15 +174,34 @@ class Contour:
             """
         if self.points is None:
             return "None"
-        first_line = 'box:{}..{}, size:{}, area:{:.2f}, wavyness:{:.2f}, external:{}'.\
-                     format(self.top_left, self.bottom_right, self.get_size(),
-                            self.get_area(), self.get_wavyness(), self.external)
+        first_line = 'start:{}, box:{}..{}, size:{}, points:{}, area:{:.2f}'.\
+                     format(self.points[0], self.top_left, self.bottom_right,
+                            self.get_size(), len(self.points), self.get_blob_area())
         if not verbose:
             return first_line
-        second_line = 'start:{}, points:{}, perimeter:{}, squareness:{:.2f}, roundness:{:.2f}, circle:{}'.\
-                      format(self.points[0], len(self.points), len(self.get_perimeter()), self.get_squareness(),
-                             self.get_roundness(), self.get_enclosing_circle())
+        second_line = 'perimeter:{}, circle:{}, squareness:{:.2f}, wavyness:{:.2f}, offsetness:{:.2f}'.\
+                      format(len(self.get_blob_perimeter()), self.get_enclosing_circle(),
+                             self.get_squareness(), self.get_wavyness(), self.get_offsetness())
         return '{}\n{}{}'.format(first_line, prefix, second_line)
+
+    def get_squareness(self) -> float:
+        """ squareness is a measure of how square the enclosing box is,
+            result is in range 0..1, where 0 is perfect square, 1 is very thin rectangle,
+            this is a very cheap metric that can be used as a pre-filter to quickly drop junk
+            """
+        size = self.get_size()
+        ratio = min(size.x, size.y) / max(size.x, size.y)  # in range 0..1, 0=bad, 1=good
+        return 1 - ratio  # in range 0..1, 0=square, 1=very thin rectangle
+
+    def get_wavyness(self):
+        """ wavyness is a measure of how different the length of the perimeter is to the number of contour points,
+            result is in range 0..1, where 0 is not wavy and 1 is very wavy,
+            this is a very cheap metric that can be used to quickly drop junk
+            """
+        if self.points is None:
+            return 1.0
+        # NB: number of points is always more than the perimeter length
+        return 1 - (len(self.get_blob_perimeter()) / len(self.points))
 
     def get_size(self) -> Point:
         """ the size is the maximum width and height of the contour """
@@ -196,21 +259,23 @@ class Contour:
             self.y_slices.append((y, min_x, max_x))
         return self.y_slices
 
-    def get_perimeter(self):
+    def get_blob_perimeter(self):
         """ get the unique contour perimeter points,
             this function is lazy
             """
-        if self.perimeter is not None:
-            return self.perimeter
-        self.perimeter = {}
+        if self.blob_perimeter is not None:
+            return self.blob_perimeter
+        self.blob_perimeter = {}
         for point in self.points:
-            self.perimeter[(point.x, point.y)] = True  # NB: do NOT use point as the key, its an object not a tuple
-        return self.perimeter
+            self.blob_perimeter[(point.x, point.y)] = True  # NB: do NOT use point as the key, its an object not a tuple
+        return self.blob_perimeter
 
-    def get_circle_area(self):
-        """ get the area of the enclosing circle """
+    def get_circle_perimeter(self):
+        """ get the perimeter of the enclosing circle,
+            NB: the circle perimeter is expected to be cached by the Circle instance
+            """
         circle = self.get_enclosing_circle()
-        return circle.area()
+        return circle.perimeter()
 
     def get_enclosing_circle(self) -> Circle:
         """ the enclosing circle of a contour is the centre and the radius required to cover (most of) it,
@@ -245,7 +310,7 @@ class Contour:
         # the centre is the top-left of a 1x1 pixel square, so the actual centre is +0.5 on this
         # we want the distance to the *outside* of the perimeter, so when the perimeter is ahead
         # of the centre we add the pixel width, i.e. 1, when the perimeter is behind its as is
-        perimeter = self.get_perimeter()
+        perimeter = self.get_blob_perimeter()
         mean_distance_squared = 0
         for x, y in perimeter:
             if x < centre_x:
@@ -265,11 +330,8 @@ class Contour:
         self.circle = Circle(Point(centre_x, centre_y), r)
         return self.circle
 
-    def get_area(self) -> float:
-        """ an area is a 'count' of the pixels enclosed by the contour
-            when external is True the area includes the perimeter
-            when external is False the area excludes the perimeter
-            """
+    def get_blob_area(self) -> float:
+        """ the area is the 'count' of all pixels (black or white) enclosed by the contour """
         if self.area is not None:
             return self.area
         if self.points is None:
@@ -278,50 +340,23 @@ class Contour:
         self.area = 0
         for x, min_y, max_y in x_slices:
             self.area += (max_y - min_y + 1)
-        if not self.external:
-            # exclude the perimeter
-            perimeter = len(self.get_perimeter())
-            self.area -= perimeter
-            if self.area < 1:
-                raise Exception('internal area {} too small (points={}, perimeter={})'.
-                                format(self.area, len(self.points), perimeter))
         return self.area
 
-    def get_squareness(self) -> float:
-        """ squareness is a measure of how square the enclosing box is,
-            result is in range 0..1, where 0 is perfect square, 1 is very thin rectangle
-            """
-        size = self.get_size()
-        ratio = min(size.x, size.y) / max(size.x, size.y)  # in range 0..1, 0=bad, 1=good
-        return 1 - ratio  # in range 0..1, 0=square, 1=very thin rectangle
-
-    def get_roundness(self) -> float:
-        """ roundness is a measure of how close to a circle the contour is,
-            result is in range 0..1, where 0 is a perfect circle and 1 is not at all circular
-            """
-        # NB: the enclosing circle area could be bigger or smaller than the contour area
-        contour_area = self.get_area()
-        circle_area = self.get_circle_area()
-        max_area = max(contour_area, circle_area)
-        if max_area < 1:
-            # not a circle if got no area
-            return 0.0
-        min_area = min(contour_area, circle_area)
-        if min_area < 1:
-            # not a circle if got no area
-            return 0.0
-        delta = max_area - min_area  # range 0..max_area
-        ratio = delta / max_area  # range 0..1, 0=good, 1=bad
-        return ratio
-
-    def get_wavyness(self):
-        """ wavyness is a measure of how different the length of the perimeter is to the number of contour points,
-            result is in range 0..1, where 0 is not wavy and 1 is very wavy
+    def get_offsetness(self):
+        """ offsetness is a measure of the distance from the enclosing box centre to the enclosing circle centre,
+            result is in range 0..1, where 0 is exact coincidence and 1 is no overlap
             """
         if self.points is None:
             return 1.0
-        # NB: number of points is always more than the perimeter length
-        return 1 - (len(self.get_perimeter()) / len(self.points))
+        circle = self.get_enclosing_circle()
+        size = self.get_size()
+        box_centre = Point(self.top_left.x + (size.x / 2), self.top_left.y + (size.y / 2))
+        dx = circle.centre.x - box_centre.x
+        dy = circle.centre.y - box_centre.y
+        distance_squared = dx*dx + dy*dy
+        limit_squared = circle.radius * circle.radius
+        offset = min(distance_squared / limit_squared, 1.0)
+        return offset
 
 
 class Blob:
@@ -333,7 +368,6 @@ class Blob:
         self.external: Contour = None
         self.internal: List[Contour] = []
         self.rejected = REJECT_UNKNOWN
-        self.quality = None
         self.reset()
 
     def __str__(self):
@@ -341,7 +375,11 @@ class Blob:
 
     def reset(self):
         """ reset all the cached stuff """
-        self.holes = None
+        self.blob_black = None
+        self.blob_white = None
+        self.circle_black = None
+        self.circle_white = None
+        self.margin = None
 
     def add_contour(self, contour: Contour):
         """ add a contour to the blob, the first contour is the external one,
@@ -351,6 +389,13 @@ class Blob:
             self.external = contour
         else:
             self.internal.append(contour)
+
+    @staticmethod
+    def format_float(value):
+        """ produce a formatted float that may be None """
+        if value is None:
+            return 'None'
+        return '{:.2f}'.format(value)
 
     def show(self, verbose: bool = False, prefix: str = '    '):
         """ describe the blob for printing purposes,
@@ -362,44 +407,103 @@ class Blob:
             return header
         body = '{}, {}'.format(header, self.external.show(verbose, prefix))
         if verbose:
-            body = '{}\n{}internals:{}, holes:{}, whiteness:{:.2f}, quality:{}'.\
-                   format(body, prefix, len(self.internal), self.get_holes(), self.get_whiteness(), self.quality)
+            body = '{}\n{}internals:{}, blob_pixels:{}, circle_pixels:{}, ' \
+                   'roundness:{}, whiteness:{}, margin:{}'.\
+                   format(body, prefix, len(self.internal), self.get_blob_pixels(), self.get_circle_pixels(),
+                          self.format_float(self.get_roundness()),
+                          self.format_float(self.get_whiteness()),
+                          self.format_float(self.get_margin()))
         return body
 
-    def get_holes(self):
+    def get_quality_stats(self):
+        """ get all the 'quality' statistics for a blob """
+        return self.get_squareness(), self.get_wavyness(), \
+               self.get_offsetness(), self.get_whiteness(), self.get_roundness(), self.quality
+
+    def get_blob_pixels(self):
         """ get the total holes area within the perimeter of the blob """
         if self.external is None:
             return None
-        if self.holes is not None:
-            return self.holes
-        self.holes = count_black(self.image, self.external.get_x_slices())
-        return self.holes
+        if self.blob_black is not None:
+            return self.blob_black, self.blob_white
+        self.blob_black, self.blob_white = count_pixels(self.image, self.external.get_x_slices())
+        return self.blob_black, self.blob_white
 
-    def get_area(self) -> float:
-        return self.external.get_area()
-
-    def get_whiteness(self) -> float:
-        """ whiteness is a measure of how 'white' the area of the contour is,
-            result is in range 0..1, where 0 is all white and 1 is all black
-            """
+    def get_circle_pixels(self):
+        """ get the total holes area within the enclosing circle """
         if self.external is None:
             return None
-        return self.get_holes() / self.get_area()
+        if self.circle_black is not None:
+            return self.circle_black, self.circle_white
+        self.circle_black, self.circle_white = count_pixels(self.image, self.external.get_circle_perimeter())
+        return self.circle_black, self.circle_white
+
+    def get_blob_area(self) -> float:
+        if self.external is None:
+            return None
+        # NB: not using get_blob_pixels 'cos its slower and this function is very busy
+        return self.external.get_blob_area()
 
     def get_squareness(self) -> float:
         if self.external is None:
             return None
         return self.external.get_squareness()
 
-    def get_roundness(self) -> float:
+    def get_radius(self):
         if self.external is None:
             return None
-        return self.external.get_roundness()
+        return self.external.get_enclosing_circle().radius
 
     def get_wavyness(self) -> float:
         if self.external is None:
             return None
         return self.external.get_wavyness()
+
+    def get_margin(self):
+        """ get the distance of the blob centre from the image edge in terms of radius multiples """
+        if self.external is None:
+            return None
+        if self.margin is not None:
+            return self.margin
+        max_y = self.image.shape[0]
+        max_x = self.image.shape[1]
+        circle = self.external.get_enclosing_circle()
+        margin_x_max = (max_x - circle.centre.x) / circle.radius
+        margin_x_min = circle.centre.x / circle.radius
+        margin_x = min(margin_x_max, margin_x_min)
+        margin_y_max = (max_y - circle.centre.y) / circle.radius
+        margin_y_min = circle.centre.y / circle.radius
+        margin_y = min(margin_y_max, margin_y_min)
+        self.margin = min(margin_x, margin_y)
+        return self.margin
+
+    def get_roundness(self):
+        """ roundness is a measure of blob white pixels outside the enclosing circle,
+            result is in the range 0..1, where 0 is no white pixels outside, and 1 is 100%
+            """
+        if self.external is None:
+            return None
+
+        blob_black, blob_white = self.get_blob_pixels()
+        circle_black, circle_white = self.get_circle_pixels()
+        outside_pixels = max(blob_white - circle_white, 0)  # in range 0..blob-white
+
+        roundness = outside_pixels / blob_white  # in range 0..1, 0=0% white (good), 1=100% (bad)
+        return roundness
+
+    def get_whiteness(self) -> float:
+        """ whiteness is a measure of how 'white' the area of the enclosing circle is,
+            result is in range 0..1, where 0 is all white and 1 is all black
+            """
+        if self.external is None:
+            return None
+        circle_black, circle_white = self.get_circle_pixels()
+        return circle_black / (circle_black + circle_white)
+
+    def get_offsetness(self) -> float:
+        if self.external is None:
+            return None
+        return self.external.get_offsetness()
 
 
 class Labels:
@@ -428,18 +532,19 @@ class Targets:
                                          # NB: Make a small +ve number to ensure totally white stays white
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
-    min_points: int = 12                 # minimum points in the contour (around a 3x4 rectangle)
+    min_points: int = 10                 # minimum points in the contour (around a 3x4 rectangle)
     max_points: int = 1600               # maximum points in the contour (should be > pi*2R, R=sqrt(max_area/pi))
     min_area: float = 3 * 4              # this should be small to detect far away targets
     min_small_area: float = 5 * 5        # area below which thresholds change to the 'small' values
     max_area: float = 200000             # this has to be big to cater for testing drawn targets (rather than photos)
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
-    max_wavyness: float = (0.2, 0.2)     # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
-    max_whiteness: float = (0.1, 0.1)    # how close to fully white a blob has to be, 0=all white, >0=less white
-    max_roundness: float = (0.3, 0.1)    # how close to circular a blob has to be, 0=perfect, >0=less perfect
-    max_squareness: float = (0.25, 0.25) # how close to square the bounding box has to be, 0=perfect, >0=less perfect
-    max_quality: float = (0.65, 0.5)     # how close to perfect quality a blob has to be, 0=perfect, >0=less perfect
-    min_radius: float = 2.0              # less than this and we're into less than 1 pixel per ring!
+    # all these 'ness' thresholds are a tuple of small area threshold and big area threshold
+    max_squareness = (0.4 , 0.3 )        # how close to square the bounding box has to be, 0=perfect, >0=less perfect
+    max_wavyness   = (0.2 , 0.2 )        # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
+    max_whiteness  = (0.1 , 0.1 )        # how close to fully white a blob has to be, 0=all white, >0=less white
+    max_roundness  = (0.5 , 0.2 )        # how close to circular a blob has to be, 0=perfect, >0=less perfect
+    max_offsetness = (0.2 , 0.1 )        # how close the box centre has to be to the circle centre, 0=exact, >0=worse
+    min_radius: float = 2.1              # less than this and we're into less than 1 pixel per ring!
     min_margin: float = 4.0              # min margin to image edge of target in units of target radius
     targets: List[tuple] = None          # the result
 
@@ -447,7 +552,7 @@ class Targets:
 def make_binary(source, width: float=8, height: float=None, black: float=15, white: float=None):
     """ create a binary (or tertiary) image of source using an adaptive threshold,
         width is the fraction of the image width to use as the integration area,
-        width is the fraction of the image height to use as the integration area (None==same as width)
+        height is the fraction of the image height to use as the integration area (None==same as width in pixels)
         black is the % below the average that is considered to be the black/grey boundary,
         white is the % above the average that is considered to be the grey/white boundary,
         white of None means same as black and will yield a binary image,
@@ -462,8 +567,9 @@ def make_binary(source, width: float=8, height: float=None, black: float=15, whi
     width_plus = max(width_pixels >> 1, 2)  # offset for going forward
     width_minus = width_plus - 1  # offset for going backward
     if height is None:
-        height = width
-    height_pixels = int(max_y / height)  # we want this to be odd so that there is a centre
+        height_pixels = width_pixels  # make it square
+    else:
+        height_pixels = int(max_y / height)  # we want this to be odd so that there is a centre
     height_plus = max(height_pixels >> 1, 2)  # offset for going forward
     height_minus = height_plus - 1  # offset for going backward
 
@@ -529,7 +635,7 @@ def contour_trace(image, buffer, label: int, x: int, y: int, external: bool = Tr
     xx: int = -1  # 2nd white pixel visited is saved here
     yy: int = -1  # ..
     buffer[y, x] = label
-    contour: Contour = Contour(external)
+    contour: Contour = Contour()
     done: bool = False
     while not done:
         contour.add_point(Point(x0, y0))
@@ -563,16 +669,127 @@ def contour_trace(image, buffer, label: int, x: int, y: int, external: bool = Tr
     return contour
 
 
-def count_black(image, perimeter):
-    """ count how many pixels in the area bounded by perimeter within image are black,
-        perimeter is a list of x co-ords and the max/min y at that x
+def count_pixels(image, perimeter):
+    """ count how many pixels in the area bounded by perimeter within image are black and how many are white,
+        perimeter is a list of x co-ords and the max/min y at that x,
+        co-ords outside the image bounds are considered to be black
         """
+    limit_y = image.shape[0]
+    limit_x = image.shape[1]
     black = 0
+    white = 0
     for x, min_y, max_y in perimeter:
         for y in range(min_y, max_y + 1):
-            if image[y, x] == BLACK:
+            if y >= limit_y or y < 0:
                 black += 1
-    return black
+            elif x >= limit_x or x < 0:
+                black += 1
+            elif image[y, x] == BLACK:
+                black += 1
+            else:
+                white += 1
+    return black, white
+
+
+def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
+    """ return a list of co-ordinates of a circle centred on x,y of radius r,
+        x,y,r do not need to be integer but the returned co-ordinates will be integers,
+        the co-ordinates returned are suitable for drawing the circle,
+        co-ordinates returned are unique but in a random order,
+        the algorithm here was inspired by: https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
+        """
+
+    centre_x: int = int(round(centre_x))
+    centre_y: int = int(round(centre_y))
+
+    points = []  # list of x,y tuples for a circle of radius r centred on centre_x,centre_y
+
+    def circle_points(x: int, y: int):
+        """ make all 8 quadrant points from the one point given
+            from https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
+                Procedure Circle_Points(x,y: Integer);
+                Begin
+                    Plot(x,y);
+                    Plot(y,x);
+                    Plot(y,-x);
+                    Plot(x,-y);
+                    Plot(-x,-y);
+                    Plot(-y,-x);
+                    Plot(-y,x);
+                    Plot(-x,y)
+                End;
+        """
+
+        def plot(x_offset: int, y_offset: int):
+            """ add the circle point for the given x,y offsets from the centre """
+            points.append((centre_x + x_offset, centre_y + y_offset))
+
+        # NB: when a co-ord is 0, x and -x are the same, ditto for y
+
+        if x == 0 and y == 0:
+            plot(0, 0)
+        elif x == 0:
+            plot(0, y)
+            plot(y, 0)
+            plot(0, -y)
+            plot(-y, 0)
+        elif y == 0:
+            plot(x, 0)
+            plot(0, x)
+            plot(0, -x)
+            plot(-x, 0)
+        elif x == y:
+            plot(x, x)
+            plot(x, -x)
+            plot(-x, -x)
+            plot(-x, x)
+        elif x == -y:
+            plot(x, -x)
+            plot(-x, x)
+            plot(-x, -x)
+            plot(x, x)
+        else:
+            plot(x, y)
+            plot(y, x)
+            plot(y, -x)
+            plot(x, -y)
+            plot(-x, -y)
+            plot(-y, -x)
+            plot(-y, x)
+            plot(-x, y)
+
+    """ from https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
+        Begin {Circle}
+        x := r;
+        y := 0;
+        d := 1 - r;
+        Repeat
+            Circle_Points(x,y);
+            y := y + 1;
+            if d < 0 Then
+                d := d + 2*y + 1
+            Else Begin
+                x := x - 1;
+                d := d + 2*(y-x) + 1
+            End
+        Until x < y
+        End; {Circle}
+    """
+    x = int(round(r))
+    y = 0
+    d = 1 - x
+    while True:
+        circle_points(x, y)
+        y += 1
+        if d < 0:
+            d += (2 * y + 1)
+        else:
+            x -= 1
+            d += (2 * (y - x) + 1)
+        if x < y:
+            break
+
+    return points
 
 
 def find_blobs(image, direct: bool = True, debug: bool = False) -> List[Blob]:
@@ -645,8 +862,9 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
     good_blobs = []                      # good blobs are accumulated in here
     for blob in blobs:
         while True:
+            threshold = None  # we do not know yet
             quality = None  # range 0..1, 0=perfect, >0=less perfect
-            # check internals and points early as it's cheap and gets rid of a lot of junk
+            # do the cheap checks first
             if len(blob.internal) > params.max_internals:
                 reason_code = REJECT_INTERNALS
                 break
@@ -656,22 +874,40 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
             if len(blob.external.points) > params.max_points:
                 reason_code = REJECT_TOO_MANY_POINTS
                 break
-            area = blob.get_area()
+            squareness = blob.get_squareness()
+            if squareness > max(params.max_squareness[0], params.max_squareness[1]):
+                # worse than both, we do this early 'cos its cheap and effective
+                reason_code = REJECT_SQUARENESS
+                break
+            wavyness = blob.get_wavyness()
+            if wavyness > max(params.max_wavyness[0], params.max_wavyness[1]):
+                # worse than both, we do this early 'cos its cheap and effective
+                reason_code = REJECT_WAVYNESS
+                break
+            # now do the expensive checks, in cheapest first order
+            radius = blob.get_radius()
+            if radius < params.min_radius:
+                reason_code = REJECT_RADIUS
+                break
+            margin = blob.get_margin()
+            if margin < params.min_margin:
+                reason_code = REJECT_MARGIN
+                break
+            area = blob.get_blob_area()
             if area < params.min_area:
                 reason_code = REJECT_TOO_SMALL
                 break
             if area > params.max_area:
                 reason_code = REJECT_TOO_BIG
                 break
+            # setup which threshold to apply to subsequent checks (area dependant)
             if area > params.min_small_area:
                 threshold = 1  # index into the threshold tuples for a big blob
             else:
                 threshold = 0  # index into the threshold tuples for a small blob
-            squareness = blob.get_squareness()
             if squareness > params.max_squareness[threshold]:
                 reason_code = REJECT_SQUARENESS
                 break
-            wavyness = blob.get_wavyness()
             if wavyness > params.max_wavyness[threshold]:
                 reason_code = REJECT_WAVYNESS
                 break
@@ -679,20 +915,14 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
             if roundness > params.max_roundness[threshold]:
                 reason_code = REJECT_ROUNDNESS
                 break
+            offsetness = blob.get_offsetness()
+            if offsetness > params.max_offsetness[threshold]:
+                reason_code = REJECT_OFFSETNESS
+                break
             # this one is really expensive, so do it last
             whiteness = blob.get_whiteness()
             if whiteness > params.max_whiteness[threshold]:
                 reason_code = REJECT_WHITENESS
-                break
-            # calculate a 'quality' of our 'ness' measures scaled to their threshold
-            squareness /= params.max_squareness[threshold]  # now in range 0..1
-            wavyness   /= params.max_wavyness[threshold]    # ..
-            roundness  /= params.max_roundness[threshold]   # ....
-            whiteness  /= params.max_whiteness[threshold]   # ......
-            # quality = squareness * wavyness * roundness * whiteness  # still in range 0..1, 0=perfect, >0=less so
-            quality = (squareness + wavyness + roundness + whiteness) / 4
-            if quality > params.max_quality[threshold]:
-                reason_code = REJECT_QUALITY
                 break
             # all filters passed
             reason_code = REJECT_NONE
@@ -701,7 +931,13 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
         blob.quality = quality
         blob.rejected = reason_code
         if logger is not None and reason_code != REJECT_NONE:
-            logger.log("Rejected:{}, {}".format(reason_code, blob.show(verbose=True)))
+            if threshold is None:
+                size = ''
+            elif threshold == 0:
+                size = '(small)'
+            else:
+                size = '(big)'
+            logger.log("Rejected:{}{}, {}".format(reason_code, size, blob.show(verbose=True)))
     if logger is not None:
         logger.log("Accepted blobs: {}, rejected {} of {}".
                    format(len(good_blobs), len(blobs) - len(good_blobs), len(blobs)))
@@ -730,31 +966,10 @@ def find_targets(source, params: Targets, logger=None):
     else:
         blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours, debug=True)
     passed = filter_blobs(blobs, params, logger=logger)
-    max_x = params.source.shape[1]
-    max_y = params.source.shape[0]
     params.targets = []
     for blob in passed:
         circle = blob.external.get_enclosing_circle()
-        if circle.radius < params.min_radius:
-            blob.rejected = REJECT_RADIUS
-            if logger is not None:
-                reason = "radius {:.2f} below minimum {:.2f}".format(circle.radius, params.min_radius)
-                logger.log("Rejected:{}, {}".format(reason, blob))
-            continue
-        margin_x_max = (max_x - circle.centre.x) / circle.radius
-        margin_x_min = circle.centre.x / circle.radius
-        margin_x = min(margin_x_max, margin_x_min)
-        margin_y_max = (max_y - circle.centre.y) / circle.radius
-        margin_y_min = circle.centre.y / circle.radius
-        margin_y = min(margin_y_max, margin_y_min)
-        margin = min(margin_x, margin_y)
-        if margin < params.min_margin:
-            blob.rejected = REJECT_MARGIN
-            if logger is not None:
-                reason = "margin {:.2f} below minimum {:.2f}".format(margin, params.min_margin)
-                logger.log("Rejected:{}, {}".format(reason, blob))
-            continue
-        params.targets.append([circle.centre.x, circle.centre.y, circle.radius, blob.label, blob.quality])
+        params.targets.append([circle.centre.x, circle.centre.y, circle.radius, blob.label])
     if logger is None:
         return params.targets
     else:
@@ -816,7 +1031,7 @@ def _test(src):
     draw_bad = cv2.merge([shrunk, shrunk, shrunk])
     draw_good = cv2.merge([shrunk, shrunk, shrunk])
     # NB: cv2 colour order is BGR not RGB
-    colours = {REJECT_NONE:            ((0, 255, 0),    'green'),
+    colours = {REJECT_NONE:            ((0, 255, 0),    'lime'),
                REJECT_UNKNOWN:         ((0, 0, 255),    'red'),
                REJECT_TOO_FEW_POINTS:  ((80, 127, 255), 'orange'),
                REJECT_TOO_MANY_POINTS: ((80, 127, 255), 'orange'),
@@ -829,7 +1044,7 @@ def _test(src):
                REJECT_WHITENESS:       ((128, 128, 0),  'teal'),
                REJECT_SQUARENESS:      ((128, 0, 0),    'navy'),
                REJECT_WAVYNESS:        ((255, 0, 255),  'magenta'),
-               REJECT_QUALITY:         ((128, 0, 128),  'purple'),
+               REJECT_OFFSETNESS:      ((0, 128, 0),    'green'),
                }
     for x in range(max_x):
         for y in range(max_y):
@@ -842,20 +1057,25 @@ def _test(src):
                 else:
                     draw_bad[y, x] = colour
 
+    def plot(buffer, points, colour):
+        for x, y in points:
+            if x < 0 or x >= max_x or y < 0 or y >= max_y:
+                continue
+            buffer[y, x] = colour  # NB: cv2 x, y are reversed
+        return buffer
+
     # draw enclosing circles in blue and bounding boxes in red on the detected targets
     for blob in blobs:
         if blob.rejected != REJECT_NONE:
             continue
-        circle = blob.external.get_enclosing_circle()
-        centre_x = int(round(circle.centre.x))
-        centre_y = int(round(circle.centre.y))
-        radius = int(round(circle.radius))
-        draw_good = cv2.circle(draw_good, (centre_x, centre_y), radius, (255, 0, 0))
         top_left = blob.external.top_left
         bottom_right = blob.external.bottom_right
         start = (int(round(top_left.x)), int(round(top_left.y)))
         end = (int(round(bottom_right.x)), int(round(bottom_right.y)))
         draw_good = cv2.rectangle(draw_good, start, end, (0, 0, 255), 1)
+        circle = blob.external.get_enclosing_circle()
+        points = circumference(circle.centre.x, circle.centre.y, circle.radius)
+        draw_good = plot(draw_good, points, (255, 0, 0))
 
     cv2.imwrite("contours_accepted.png", draw_good)
     logger.log("accepted contours shown in contours_accepted.png")
@@ -869,18 +1089,86 @@ def _test(src):
     logger.log("\n")
 
     logger.log("\nAll accepted blobs:")
+    stats_range = 10
+    all_squareness_stats = [0 for _ in range(stats_range + 1)]
+    all_wavyness_stats = [0 for _ in range(stats_range + 1)]
+    all_offsetness_stats = [0 for _ in range(stats_range + 1)]
+    all_whiteness_stats = [0 for _ in range(stats_range + 1)]
+    all_roundness_stats = [0 for _ in range(stats_range + 1)]
+    squareness_stats = [0 for _ in range(stats_range + 1)]
+    wavyness_stats = [0 for _ in range(stats_range + 1)]
+    offsetness_stats = [0 for _ in range(stats_range + 1)]
+    whiteness_stats = [0 for _ in range(stats_range + 1)]
+    roundness_stats = [0 for _ in range(stats_range + 1)]
+    all_size_stats = [0, 0]
+    size_stats = [0, 0]
+    reject_stats = {}
+    good_blobs = 0
     blobs.sort(key=lambda k: (k.external.top_left.x, k.external.top_left.y))
+
+    def update_count(stats, value):
+        if value is None:
+            return
+        stats[int(value * stats_range)] += 1
+
+    ignore_codes = [REJECT_TOO_FEW_POINTS, REJECT_SQUARENESS, REJECT_WAVYNESS]
     for b, blob in enumerate(blobs):
+        if reject_stats.get(blob.rejected) is None:
+            reject_stats[blob.rejected] = 1
+        else:
+            reject_stats[blob.rejected] += 1
+        if blob.rejected in ignore_codes:
+            # don't count these
+            continue
+        area = blob.get_blob_area()
+        if area > params.min_small_area:
+            all_size_stats[1] += 1
+        else:
+            all_size_stats[0] += 1
+        squareness, wavyness, offsetness, whiteness, roundness, quality = blob.get_quality_stats()
+        update_count(all_squareness_stats, squareness)
+        update_count(all_wavyness_stats, wavyness)
+        update_count(all_offsetness_stats, offsetness)
+        update_count(all_whiteness_stats, whiteness)
+        update_count(all_roundness_stats, roundness)
         if blob.rejected != REJECT_NONE:
             continue
+        good_blobs += 1
+        if area > params.min_small_area:
+            size_stats[1] += 1
+        else:
+            size_stats[0] += 1
+        update_count(squareness_stats, squareness)
+        update_count(wavyness_stats, wavyness)
+        update_count(offsetness_stats, offsetness)
+        update_count(whiteness_stats, whiteness)
+        update_count(roundness_stats, roundness)
         logger.log("  {}: {}".format(b, blob.show(verbose=True)))
-        for i, contour in enumerate(blob.internal):
-            logger.log("    {}: {}".format(i, contour.show(verbose=True)))
+    # show stats
+    logger.log("\nAll reject frequencies (across {} blobs):".format(len(blobs)))
+    for reason, count in reject_stats.items():
+        logger.log("  {}: {} ({:.2f}%)".format(reason, count, (count/len(blobs))*100))
+    logger.log("\nAll blobs stats (across {} blobs):".format(len(blobs)))
+    logger.log("  squareness:{}".format(all_squareness_stats))
+    logger.log("  wavyness:{}".format(all_wavyness_stats))
+    logger.log("  offsetness:{}".format(all_offsetness_stats))
+    logger.log("  whiteness:{}".format(all_whiteness_stats))
+    logger.log("  roundness:{}".format(all_roundness_stats))
+    logger.log("  sizes:{}".format(all_size_stats))
+
+    logger.log("\nAll accepted blobs stats (across {} blobs):".format(good_blobs))
+    logger.log("  squareness:{}".format(squareness_stats))
+    logger.log("  wavyness:{}".format(wavyness_stats))
+    logger.log("  offsetness:{}".format(offsetness_stats))
+    logger.log("  whiteness:{}".format(whiteness_stats))
+    logger.log("  roundness:{}".format(roundness_stats))
+    logger.log("  sizes:{}".format(size_stats))
+
     logger.log("\nAll detected targets:")
     params.targets.sort(key=lambda k: (k[0], k[1]))
     for t, target in enumerate(params.targets):
-        logger.log("  {}: centre: {:.2f}, {:.2f}  radius: {:.2f}  label: {}, quality: {}".
-                   format(t, target[0], target[1], target[2], target[3], target[4]))
+        logger.log("  {}: centre: {:.2f}, {:.2f}  radius: {:.2f}  label: {}".
+                   format(t, target[0], target[1], target[2], target[3]))
 
     logger.log("\nBlob colours:")
     for reason, (_, name) in colours.items():
@@ -896,7 +1184,7 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
     src = '/home/dave/precious/fellsafe/fellsafe-image/media/' \
-          'distant-101-111-126-159-205-209-222-223-225-252-333-360-366-383-412-427-444-454-497-518.jpg'
+          'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"

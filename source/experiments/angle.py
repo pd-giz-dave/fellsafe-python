@@ -4,19 +4,42 @@ import math
 
 class Angle:
     """ a fast mapping (i.e. uses lookup tables and not math functions) from angles to co-ordinates
-        and co-ordinates to angles for a circle, also for the arc length of an ellipsis
+        and co-ordinates to angles for a circle
         """
+    # Parameters for ratios[] for each octant:
+    #   edge angle, offset, 'a' multiplier', reverse x/y, x multiplier, y multiplier
+    #                                                             -Y
+    OCTANTS = [[45 , 0   , +1, 0, +1, +1],  # octant 0         \ 7 | 0 /
+               [90 , +90 , -1, 1, -1, -1],  # octant 1       6  \  |  /  1
+               [135, -90 , +1, 1, -1, +1],  # octant 2           \ | /
+               [180, +180, -1, 0, +1, -1],  # octant 3    -X ------+------ +X
+               [225, -180, +1, 0, -1, -1],  # octant 4           / | \
+               [270, +270, -1, 1, +1, +1],  # octant 5       5  /  |  \  2
+               [315, -270, +1, 1, +1, -1],  # octant 6         / 4 | 3 \
+               [360, +360, -1, 0, -1, +1]]  # octant 7            +Y
 
-    def __init__(self, scale, radius):
+    # these octants describe the parameters to this equation:
+    #  x = ratios[offset + angle*signa][0+reversed] * signx * radius
+    #  y = ratios[offset + angle*signa][1-reversed] * signy * radius
+    # octant 0 is the native values from self.ratios
+    # octant[0] is the angle threshold
+    # octant[1] is the offset to rotate the octant
+    # octant[2] is the sign of a
+    # octant[3] is the reversed signal, 0 == not reversed, 1 == reversed
+    # octant[4] is the sign of x
+    # octant[5] is the sign of y
+
+    def __init__(self, scale, radius=None):
         """ build the lookup tables with the resolution required for a single octant, from this octant
-            the entire circle can be calculated by rotation and reflection (see angle() and ratio()),
-            scale defines the angle accuracy required, the bigger the more accurate, it must be a +ve integer,
-            radius defines the maximum radius that cartToPolar has to cater for
+            the entire circle can be calculated by rotation and reflection (see octants description),
+            scale defines the angle accuracy required (steps per circle), the bigger the more accurate,
+            radius defines the maximum radius that cartToPolar has to cater for, None=not required
             """
         # NB: This code is only executed once so clarity over performance is preferred
 
         # generate polar to cartesian lookup table
-        self.ratio_scale = int(round(scale))
+        self.ratio_scale = max(int(round(scale/(len(Angle.OCTANTS)))), 1)  # ratio_scale must be >0
+        self.step_angle = 45 / self.ratio_scale  # the angle represented by each step in the lookup tables
         self.angles = [None for _ in range(self.ratio_scale + 1)]
         self.angles[0] = 0
         for step in range(1, len(self.angles)):
@@ -26,7 +49,6 @@ class Angle:
 
         # generate cartesian to polar lookup table
         self.ratios = [[None, None] for _ in range(self.ratio_scale + 1)]
-        self.step_angle = 45 / self.ratio_scale  # the angle represented by each step in the lookup table
         for step in range(len(self.ratios)):
             # each octant here consists of scale steps,
             # the index is an angle 0..45, the result is the x,y co-ordinates for a circle of radius 1,
@@ -36,34 +58,16 @@ class Angle:
             # reversals and sign reversals
             self.ratios[step][0] = 0.0 + math.sin(math.radians(step * self.step_angle))  # NB: x,y reversed
             self.ratios[step][1] = 0.0 - math.cos(math.radians(step * self.step_angle))  # ..
-        # Parameters for ratio() for each octant:
-        #   edge angle, offset, 'a' multiplier', reverse x/y, x multiplier, y multiplier
-        #                                            #                     -Y
-        self.octants = [[45, 0, +1, 0, +1, +1],      # octant 0         \ 7 | 0 /
-                        [90, +90, -1, 1, -1, -1],    # octant 1       6  \  |  /  1
-                        [135, -90, +1, 1, -1, +1],   # octant 2           \ | /
-                        [180, +180, -1, 0, +1, -1],  # octant 3    -X ------+------ +X
-                        [225, -180, +1, 0, -1, -1],  # octant 4           / | \
-                        [270, +270, -1, 1, +1, +1],  # octant 5       5  /  |  \  2
-                        [315, -270, +1, 1, +1, -1],  # octant 6         / 4 | 3 \
-                        [360, +360, -1, 0, -1, +1]]  # octant 7            +Y
-        # these octants describe the parameters to this equation:
-        #  x = ratios[offset + angle*signa][0+reversed] * signx * radius
-        #  y = ratios[offset + angle*signa][1-reversed] * signy * radius
-        # octant 0 is the native values from self.ratios
-        # octant[0] is the angle threshold
-        # octant[1] is the offset to rotate the octant
-        # octant[2] is the sign of a
-        # octant[3] is the reversed signal, 0 == not reversed, 1 == reversed
-        # octant[4] is the sign of x
-        # octant[5] is the sign of y
 
-        # generate radius look-up table (r = sqrt(x*x + y*y) for x,y in range 0..255)
-        self.max_radius = int(radius + 1.5)
-        self.radii = [[0 for _ in range(self.max_radius)] for _ in range(self.max_radius)]
-        for x in range(self.max_radius):
-            for y in range(self.max_radius):
-                self.radii[x][y] = math.sqrt(x * x + y * y)
+        if radius is not None:
+            # generate radius look-up table (r = sqrt(x*x + y*y) for x,y in range 0..255)
+            self.max_radius = int(radius + 1.5)
+            self.radii = [[0 for _ in range(self.max_radius)] for _ in range(self.max_radius)]
+            for x in range(self.max_radius):
+                for y in range(self.max_radius):
+                    self.radii[x][y] = math.sqrt(x * x + y * y)
+        else:
+            self.max_radius = None  # note we're not doing cartesian to polar
 
 
     def polarToCart(self, a, r):
@@ -78,7 +82,7 @@ class Angle:
             a += 360
         while a > 360:
             a -= 360
-        for octant in self.octants:
+        for octant in Angle.OCTANTS:
             if a <= octant[0]:
                 ratio = self.ratios[int(round((octant[1] + (a * octant[2])) / self.step_angle))]
                 x = ratio[0 + octant[3]] * octant[4] * r
@@ -103,7 +107,11 @@ class Angle:
                 x = 0, y > 0 --> 180         edge 2
                 x < 0, y = 0 --> 270         edge 3
                 x = 0, y < 0 --> 0 (or 360)  edge 4
+            if no radius was given for the instance, calls to this raise an exception
         """
+
+        if self.max_radius is None:
+            raise Exception('attempt to use cartToPolar when instance max radius not set')
 
         def _ratio2angle(offset, sign, ratio):
             """ do a lookup on the given ratio, changes its sign (+1 or -1) and add the offset (degrees)
@@ -172,44 +180,3 @@ class Angle:
                 else:
                     # octant 7
                     return _ratio2angle(360, -1, -x / -y), _xy2r(x, y)
-
-    def arcLength(self, major_axis, minor_axis, angle):
-        """ determine the approximate length for an arc of 1 degree at the given angle
-            on an ellipse with major_axis and minor_axis
-            """
-        # do it the long way to see if it works, the long way is this (see https://en.wikipedia.org/wiki/Ellipse):
-        #  co-ords of a point on the circumference of an ellipse with major-axis a and minor-axis b at angle t:
-        #   x,y = a*cos(t), b*sin(t)
-        #  and for t+dt:
-        #   x',y' = a*cos(t+dt), b*sin(t+dt)
-        #  if dt is small, the arc length can be considered a straight line, so the arc length d is:
-        #   sqrt((x-x')**2 + (y-y')**2)
-        #  which reduces to:
-        #   sqrt((a*(sin(t)-sin(t+dt)))**2 + (b*(cos(t)-cos(t+dt)))**2)
-        #  sin(t)-sin(t+dt) and cos(t)-cos(t+dt) can be looked up
-        #  due to ellipse symmetry we only need consider angles 0..90
-        #  angle 0 is x=major_axis, y=0, angle 90 is x=0, y=minor_axis, going anti-clockwise
-        if angle < 90:
-            # q1 - as is
-            pass
-        elif angle < 180:
-            # q2 - reversed
-            angle = 90 - (angle - 90)
-        elif angle < 270:
-            # q3 - offset by 180
-            angle = angle - 180
-        else:
-            # q4 - reversed
-            angle = 90 - (angle - 270)
-        if angle < 45:
-            delta = +1
-        else:
-            delta = -1
-        t = math.radians(angle)
-        dt = math.radians(angle + delta)
-        sint = math.sin(t) - math.sin(dt)
-        cost = math.cos(t) - math.cos(dt)
-        a = minor_axis * sint
-        b = major_axis * cost
-        d = math.sqrt(a * a + b * b)
-        return d

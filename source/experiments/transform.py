@@ -209,7 +209,6 @@ class Transform:
                     image = cv2.line(image, _int(start1), _int(end1), obj["colour"], 1)
                 image = cv2.line(image, _int(start), _int(end), obj["colour"], 1)
             elif obj["type"] == self.CIRCLE:
-                # ToDo: allow for centre not being on a pixel boundary?
                 image = cv2.circle(image, _int(obj["centre"]), int(round(obj["radius"])), obj["colour"], 1)
             elif obj["type"] == self.RECTANGLE:
                 image = cv2.rectangle(image, _int(obj["start"]), _int(obj["end"]), obj["colour"], 1)
