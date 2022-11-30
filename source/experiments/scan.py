@@ -91,8 +91,6 @@ class Scan:
     MIN_PIXELS_PER_RING = 4  # min pixels making up a ring width
 
     # region Tuning constants...
-    MIN_BLOB_AREA = 10  # min area of a blob we want (in pixels) (default 9)
-    MIN_BLOB_RADIUS = 2  # min radius of a blob we want (in pixels) (default 2.0)
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.35  # minimum luminance variation of a valid blob projection relative to the max luminance
     THRESHOLD_WIDTH = 8  # the fraction of the projected image width to use as the integration area when binarizing
@@ -363,16 +361,13 @@ class Scan:
             logger = None
         params = contours.Targets()
         params.integration_width = self.proximity
-        # params.min_area = Scan.MIN_BLOB_AREA
-        # params.min_radius = Scan.MIN_BLOB_RADIUS
         blobs, binary = contours.get_targets(self.image.buffer, params=params, logger=logger)
         self.binary = self.image.instance()
         self.binary.set(binary)
 
-        # just so the processing order is deterministic (helps debugging)
-        blobs.sort(key=lambda e: (int(round(e[0])), int(round(e[1]))))
-
         if self.logging:
+            # just so the processing order is deterministic (helps when viewing logs)
+            blobs.sort(key=lambda e: (int(round(e[0])), int(round(e[1]))))
             self._log('blob-detect: found {} blobs'.format(len(blobs)), 0, 0)
             for blob in blobs:
                 self._log("    x:{:.2f}, y:{:.2f}, size:{:.2f}".format(blob[0], blob[1], blob[2]))
@@ -1589,6 +1584,7 @@ class Scan:
             returns the modified digits list and a count of digits dropped,
             this is public to allow test harnesses access
             """
+        return digits, 0  # ToDo: HACK this is dodgy
         dropped = 0
         if len(digits) > 1:
             # there is a choice, check if first is a 0 with a 'close' choice
@@ -1755,7 +1751,7 @@ class Scan:
                         first_white = 0
                         last_white = len(pixels) - 1
                     else:
-                        # there is no white
+                        # this means its all black or grey
                         # set an out of range value, so we do not have to check for None in our later loops
                         first_white = len(pixels) + 1
                         last_white = first_white

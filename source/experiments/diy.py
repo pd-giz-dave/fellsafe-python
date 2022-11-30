@@ -918,7 +918,7 @@ def verify():
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
-    test_scan_video_mode = scanner.Scan.VIDEO_2K
+    test_scan_video_mode = scanner.Scan.VIDEO_4K
 
     # test_debug_mode = scanner.Scan.DEBUG_IMAGE
     test_debug_mode = scanner.Scan.DEBUG_VERBOSE
@@ -949,14 +949,14 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        test.scan_codes(test_codes_folder)
+        # test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
         # test.scan(test_codes_folder, [222], 'test-code-222.png')
 
-        # test.scan(test_media_folder, [101,102,111,116,222,298,333,387,401,444,555,666,673,732,746,756,777,888,892,999],
-        #           'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg')
+        test.scan(test_media_folder, [101,102,111,116,222,298,333,387,401,444,555,666,673,732,746,756,777,888,892,999],
+                  'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg')
 
     except:
         traceback.print_exc()
