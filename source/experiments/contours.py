@@ -34,7 +34,6 @@ REJECT_INTERNALS       = 'too many internal contours'
 REJECT_WHITENESS       = 'not enough white'
 REJECT_SQUARENESS      = 'not square enough'
 REJECT_WAVYNESS        = 'perimeter too wavy'
-REJECT_OFFSETNESS      = 'circle centre too offset'
 
 BLACK: int = 0
 WHITE: int = 255
@@ -179,9 +178,9 @@ class Contour:
                             self.get_size(), len(self.points), self.get_blob_area())
         if not verbose:
             return first_line
-        second_line = 'perimeter:{}, circle:{}, squareness:{:.2f}, wavyness:{:.2f}, offsetness:{:.2f}'.\
+        second_line = 'perimeter:{}, circle:{}, squareness:{:.2f}, wavyness:{:.2f}'.\
                       format(len(self.get_blob_perimeter()), self.get_enclosing_circle(),
-                             self.get_squareness(), self.get_wavyness(), self.get_offsetness())
+                             self.get_squareness(), self.get_wavyness())
         return '{}\n{}{}'.format(first_line, prefix, second_line)
 
     def get_squareness(self) -> float:
@@ -210,17 +209,17 @@ class Contour:
         return Point(width, height)
 
     def get_x_slices(self):
-        """ get the slices in x array,
+        """ get the slices in x,
             for every x co-ord find the y extent at that x,
             this function is lazy
             """
         if self.x_slices is not None:
             # already been done
             return self.x_slices
-        x_slices = dict()
+        x_slices = {}
         for point in self.points:
             if x_slices.get(point.x) is None:
-                x_slices[point.x] = dict()
+                x_slices[point.x] = {}
             x_slices[point.x][point.y] = True
         self.x_slices = []
         for x in x_slices:
@@ -342,22 +341,6 @@ class Contour:
             self.area += (max_y - min_y + 1)
         return self.area
 
-    def get_offsetness(self):
-        """ offsetness is a measure of the distance from the enclosing box centre to the enclosing circle centre,
-            result is in range 0..1, where 0 is exact coincidence and 1 is no overlap
-            """
-        if self.points is None:
-            return 1.0
-        circle = self.get_enclosing_circle()
-        size = self.get_size()
-        box_centre = Point(self.top_left.x + (size.x / 2), self.top_left.y + (size.y / 2))
-        dx = circle.centre.x - box_centre.x
-        dy = circle.centre.y - box_centre.y
-        distance_squared = dx*dx + dy*dy
-        limit_squared = circle.radius * circle.radius
-        offset = min(distance_squared / limit_squared, 1.0)
-        return offset
-
 
 class Blob:
     """ a blob is an external contour and its properties """
@@ -417,8 +400,7 @@ class Blob:
 
     def get_quality_stats(self):
         """ get all the 'quality' statistics for a blob """
-        return self.get_squareness(), self.get_wavyness(), \
-               self.get_offsetness(), self.get_whiteness(), self.get_roundness(), self.quality
+        return self.get_squareness(), self.get_wavyness(), self.get_whiteness(), self.get_roundness()
 
     def get_blob_pixels(self):
         """ get the total holes area within the perimeter of the blob """
@@ -478,18 +460,30 @@ class Blob:
         return self.margin
 
     def get_roundness(self):
-        """ roundness is a measure of blob white pixels outside the enclosing circle,
-            result is in the range 0..1, where 0 is no white pixels outside, and 1 is 100%
+        """ roundness is a measure of how circular the blob is,
+            result is in the range 0..1, where 0 is a perfect circle and >0 is less so
             """
         if self.external is None:
             return None
 
-        blob_black, blob_white = self.get_blob_pixels()
-        circle_black, circle_white = self.get_circle_pixels()
-        outside_pixels = max(blob_white - circle_white, 0)  # in range 0..blob-white
-
-        roundness = outside_pixels / blob_white  # in range 0..1, 0=0% white (good), 1=100% (bad)
-        return roundness
+        # for a perfect circle circumference/area is 2/radius and 2/radius is the minimum possible,
+        # area=pi*r*r, circumference=2*pi*r, (2*pi*r)/(pi*r*r)==2/r
+        # circumference is the length of the blob perimeter, area is the blob area, radius is enclosing circle radius
+        circumference = len(self.external.get_blob_perimeter())
+        area = self.external.get_blob_area()
+        radius = int(round(self.get_radius() + 0.5))  # +0.5 to allow for quantisation effects
+        if radius < 2:
+            # too small to be meaningful, treat as circular
+            circularity = 0.0
+        else:
+            circularity = (circumference / area) - (2 / radius)  # range -?..+?
+        if circularity < -0.3:
+            # this should not happen!
+            raise Exception('circularity ({:.2f}) < 0 when circumference {}, area {}, radius {}'.
+                            format(circularity, circumference, area, radius))
+        else:
+            circularity = max(circularity, 0.0)  # ignore small error (can happen due to quantisation effects)
+        return circularity
 
     def get_whiteness(self) -> float:
         """ whiteness is a measure of how 'white' the area of the enclosing circle is,
@@ -499,11 +493,6 @@ class Blob:
             return None
         circle_black, circle_white = self.get_circle_pixels()
         return circle_black / (circle_black + circle_white)
-
-    def get_offsetness(self) -> float:
-        if self.external is None:
-            return None
-        return self.external.get_offsetness()
 
 
 class Labels:
@@ -535,15 +524,14 @@ class Targets:
     min_points: int = 10                 # minimum points in the contour (around a 3x4 rectangle)
     max_points: int = 1600               # maximum points in the contour (should be > pi*2R, R=sqrt(max_area/pi))
     min_area: float = 3 * 4              # this should be small to detect far away targets
-    min_small_area: float = 5 * 5        # area below which thresholds change to the 'small' values
+    min_small_area: float = 6 * 6        # area below which thresholds change to the 'small' values
     max_area: float = 200000             # this has to be big to cater for testing drawn targets (rather than photos)
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
     # all these 'ness' thresholds are a tuple of small area threshold and big area threshold
     max_squareness = (0.4 , 0.3 )        # how close to square the bounding box has to be, 0=perfect, >0=less perfect
-    max_wavyness   = (0.2 , 0.2 )        # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
-    max_whiteness  = (0.1 , 0.1 )        # how close to fully white a blob has to be, 0=all white, >0=less white
-    max_roundness  = (0.5 , 0.2 )        # how close to circular a blob has to be, 0=perfect, >0=less perfect
-    max_offsetness = (0.2 , 0.1 )        # how close the box centre has to be to the circle centre, 0=exact, >0=worse
+    max_wavyness   = (0.2 , 0.15)        # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
+    max_whiteness  = (0.2 , 0.15)        # how close to fully white a blob has to be, 0=all white, >0=less white
+    max_roundness  = (0.3 , 0.18)        # how close to circular a blob has to be, 0=perfect, >0=less perfect
     min_radius: float = 2.1              # less than this and we're into less than 1 pixel per ring!
     min_margin: float = 4.0              # min margin to image edge of target in units of target radius
     targets: List[tuple] = None          # the result
@@ -556,7 +544,6 @@ def make_binary(source, width: float=8, height: float=None, black: float=15, whi
         black is the % below the average that is considered to be the black/grey boundary,
         white is the % above the average that is considered to be the grey/white boundary,
         white of None means same as black and will yield a binary image,
-        the s fraction applies to the minimum of the image width or height.
         See the adaptive-threshold-algorithm.pdf paper for algorithm details.
         """
 
@@ -915,10 +902,6 @@ def filter_blobs(blobs: List[Blob], params: Targets, logger=None) -> List[Blob]:
             if roundness > params.max_roundness[threshold]:
                 reason_code = REJECT_ROUNDNESS
                 break
-            offsetness = blob.get_offsetness()
-            if offsetness > params.max_offsetness[threshold]:
-                reason_code = REJECT_OFFSETNESS
-                break
             # this one is really expensive, so do it last
             whiteness = blob.get_whiteness()
             if whiteness > params.max_whiteness[threshold]:
@@ -985,7 +968,7 @@ def get_targets(source, params=None, logger=None) -> List[tuple]:
     return params.targets, params.binary
 
 
-def _test(src):
+def _test(src, size, proximity, black):
     """ ************** TEST **************** """
     import cv2
 
@@ -1010,15 +993,14 @@ def _test(src):
 
     logger = Logger("_test")
 
-    logger.log("\nPreparing image:")
+    logger.log("\nPreparing image: size={}, proximity={}".format(size, proximity))
     source = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
     # Downsize it
-    shrunk = downsize(source, 1152)
+    shrunk = downsize(source, size)
     logger.log("\nDetecting blobs")
     params = Targets()
-    # params.integration_width = 48  # Scan.PROXIMITY_FAR
-    # params.min_area = 10  # Scan.MIN_BLOB_AREA
-    # params.min_radius = 2  # Scan.MIN_BLOB_RADIUS
+    params.integration_width = proximity
+    params.black_threshold = black
     # do the actual detection
     image, blobs, buffer, labels, _ = find_targets(shrunk, params, logger=logger)
     # show what happenned
@@ -1044,7 +1026,6 @@ def _test(src):
                REJECT_WHITENESS:       ((128, 128, 0),  'teal'),
                REJECT_SQUARENESS:      ((128, 0, 0),    'navy'),
                REJECT_WAVYNESS:        ((255, 0, 255),  'magenta'),
-               REJECT_OFFSETNESS:      ((0, 128, 0),    'green'),
                }
     for x in range(max_x):
         for y in range(max_y):
@@ -1068,11 +1049,11 @@ def _test(src):
     for blob in blobs:
         if blob.rejected != REJECT_NONE:
             continue
-        top_left = blob.external.top_left
-        bottom_right = blob.external.bottom_right
-        start = (int(round(top_left.x)), int(round(top_left.y)))
-        end = (int(round(bottom_right.x)), int(round(bottom_right.y)))
-        draw_good = cv2.rectangle(draw_good, start, end, (0, 0, 255), 1)
+        # top_left = blob.external.top_left
+        # bottom_right = blob.external.bottom_right
+        # start = (int(round(top_left.x)), int(round(top_left.y)))
+        # end = (int(round(bottom_right.x)), int(round(bottom_right.y)))
+        # draw_good = cv2.rectangle(draw_good, start, end, (0, 0, 255), 1)
         circle = blob.external.get_enclosing_circle()
         points = circumference(circle.centre.x, circle.centre.y, circle.radius)
         draw_good = plot(draw_good, points, (255, 0, 0))
@@ -1089,79 +1070,78 @@ def _test(src):
     logger.log("\n")
 
     logger.log("\nAll accepted blobs:")
-    stats_range = 10
-    all_squareness_stats = [0 for _ in range(stats_range + 1)]
-    all_wavyness_stats = [0 for _ in range(stats_range + 1)]
-    all_offsetness_stats = [0 for _ in range(stats_range + 1)]
-    all_whiteness_stats = [0 for _ in range(stats_range + 1)]
-    all_roundness_stats = [0 for _ in range(stats_range + 1)]
-    squareness_stats = [0 for _ in range(stats_range + 1)]
-    wavyness_stats = [0 for _ in range(stats_range + 1)]
-    offsetness_stats = [0 for _ in range(stats_range + 1)]
-    whiteness_stats = [0 for _ in range(stats_range + 1)]
-    roundness_stats = [0 for _ in range(stats_range + 1)]
+    stats_range = 20
+    stats_span = 100/stats_range/100
+    all_squareness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    all_wavyness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    all_whiteness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    all_roundness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    squareness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    wavyness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    whiteness_stats = [[0, 0] for _ in range(stats_range + 1)]
+    roundness_stats = [[0, 0] for _ in range(stats_range + 1)]
     all_size_stats = [0, 0]
     size_stats = [0, 0]
     reject_stats = {}
     good_blobs = 0
     blobs.sort(key=lambda k: (k.external.top_left.x, k.external.top_left.y))
 
-    def update_count(stats, value):
+    def update_count(stats, size, value):
         if value is None:
             return
-        stats[int(value * stats_range)] += 1
+        stats[int(value * stats_range)][size] += 1
 
-    ignore_codes = [REJECT_TOO_FEW_POINTS, REJECT_SQUARENESS, REJECT_WAVYNESS]
+    def log_stats(name, stats):
+        for size in range(len(stats[0])):
+            msg = ''
+            for i, stat in enumerate(stats):
+                num = stat[size]
+                if num == 0:
+                    continue
+                msg = '{}, {:.2f}-{}'.format(msg, i*stats_span, num)
+            logger.log('  {:10}({}): {}'.format(name, size, msg[2:]))
+
     for b, blob in enumerate(blobs):
         if reject_stats.get(blob.rejected) is None:
             reject_stats[blob.rejected] = 1
         else:
             reject_stats[blob.rejected] += 1
-        if blob.rejected in ignore_codes:
-            # don't count these
-            continue
         area = blob.get_blob_area()
         if area > params.min_small_area:
-            all_size_stats[1] += 1
+            size = 1
         else:
-            all_size_stats[0] += 1
-        squareness, wavyness, offsetness, whiteness, roundness, quality = blob.get_quality_stats()
-        update_count(all_squareness_stats, squareness)
-        update_count(all_wavyness_stats, wavyness)
-        update_count(all_offsetness_stats, offsetness)
-        update_count(all_whiteness_stats, whiteness)
-        update_count(all_roundness_stats, roundness)
+            size = 0
+        all_size_stats[size] += 1
+        squareness, wavyness, whiteness, roundness = blob.get_quality_stats()
+        update_count(all_squareness_stats, size, squareness)
+        update_count(all_wavyness_stats, size, wavyness)
+        update_count(all_whiteness_stats, size, whiteness)
+        update_count(all_roundness_stats, size, roundness)
         if blob.rejected != REJECT_NONE:
             continue
         good_blobs += 1
-        if area > params.min_small_area:
-            size_stats[1] += 1
-        else:
-            size_stats[0] += 1
-        update_count(squareness_stats, squareness)
-        update_count(wavyness_stats, wavyness)
-        update_count(offsetness_stats, offsetness)
-        update_count(whiteness_stats, whiteness)
-        update_count(roundness_stats, roundness)
+        size_stats[size] += 1
+        update_count(squareness_stats, size, squareness)
+        update_count(wavyness_stats, size, wavyness)
+        update_count(whiteness_stats, size, whiteness)
+        update_count(roundness_stats, size, roundness)
         logger.log("  {}: {}".format(b, blob.show(verbose=True)))
     # show stats
     logger.log("\nAll reject frequencies (across {} blobs):".format(len(blobs)))
     for reason, count in reject_stats.items():
         logger.log("  {}: {} ({:.2f}%)".format(reason, count, (count/len(blobs))*100))
     logger.log("\nAll blobs stats (across {} blobs):".format(len(blobs)))
-    logger.log("  squareness:{}".format(all_squareness_stats))
-    logger.log("  wavyness:{}".format(all_wavyness_stats))
-    logger.log("  offsetness:{}".format(all_offsetness_stats))
-    logger.log("  whiteness:{}".format(all_whiteness_stats))
-    logger.log("  roundness:{}".format(all_roundness_stats))
+    log_stats("squareness", all_squareness_stats)
+    log_stats("wavyness", all_wavyness_stats)
+    log_stats("whiteness", all_whiteness_stats)
+    log_stats("roundness", all_roundness_stats)
     logger.log("  sizes:{}".format(all_size_stats))
 
     logger.log("\nAll accepted blobs stats (across {} blobs):".format(good_blobs))
-    logger.log("  squareness:{}".format(squareness_stats))
-    logger.log("  wavyness:{}".format(wavyness_stats))
-    logger.log("  offsetness:{}".format(offsetness_stats))
-    logger.log("  whiteness:{}".format(whiteness_stats))
-    logger.log("  roundness:{}".format(roundness_stats))
+    log_stats("squareness", squareness_stats)
+    log_stats("wavyness", wavyness_stats)
+    log_stats("whiteness", whiteness_stats)
+    log_stats("roundness", roundness_stats)
     logger.log("  sizes:{}".format(size_stats))
 
     logger.log("\nAll detected targets:")
@@ -1182,9 +1162,9 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/labyrinth.png"
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/' \
-          'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg'
+    src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
+    # src = '/home/dave/precious/fellsafe/fellsafe-image/media/' \
+    #       'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"
@@ -1197,6 +1177,7 @@ if __name__ == "__main__":
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/photo-332-222-555-800-574-371-757-611-620-132-near-blurry.jpg"
     # src = "targets.jpg"
 
+    # region test shape...
     # shape = [[0,0,0,0,0,0,0,0,0,0],
     #          [0,0,0,0,0,0,0,0,0,0],
     #          [0,1,1,0,0,0,0,1,1,0],
@@ -1212,5 +1193,7 @@ if __name__ == "__main__":
     #     for x, pixel in enumerate(row):
     #         image[y, x] = pixel * 255
     # blobs, buffer, labels = find_blobs(image)
+    # endregion
 
-    _test(src)
+    # size 1152 is 2K, 2160 is 4K, proximity 16 is close, 48 is far, black=-5 for far, 0.01 for close
+    _test(src, size=1152, proximity=16, black=0.01)
