@@ -70,6 +70,16 @@ class Scan:
         """
 
     # region Constants...
+
+    # region Proximity options
+    # these control the contour detection, for big targets that cover the whole image a bigger
+    # integration area is required (i.e. smaller image fraction), this is used for testing
+    # print images
+    PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
+    PROXIMITY_CLOSE = 16  # suitable for print images
+    BLACK_LEVEL = {PROXIMITY_FAR: -5, PROXIMITY_CLOSE: 0.01}  # black threshold for binarising contours
+    # end region
+
     # our target shape
     NUM_RINGS = ring.Ring.NUM_RINGS  # total number of rings in the whole code (ring==cell in height)
     BULLSEYE_RINGS = ring.Ring.BULLSEYE_RINGS  # number of rings inside the inner edge
@@ -102,18 +112,18 @@ class Scan:
     MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments
     MAX_NEIGHBOUR_ANGLE_OUTER = 0.9  # ~=42 degrees, tan of the max acceptable angle when joining outer edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max x or y jump allowed when following an edge
-    MAX_NEIGHBOUR_LENGTH_JUMP = 10  # max x jump, in pixels, between edge fragments when joining
-    MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining
-    MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining
+    MAX_NEIGHBOUR_LENGTH_JUMP = 10  # max x jump, in pixels, between edge fragments when joining (arbitrary)
+    MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining (arbitrary)
+    MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining (arbitrary)
     MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
-    MAX_EDGE_HEIGHT_JUMP = 8  # max jump in y, in pixels, allowed along an edge, more than this is an edge 'failure'
+    SMOOTHING_WINDOW = 8  # samples in the moving average (we average the centre, so the full window is +/- this)
     MAX_NOT_ALLOWED_ERROR_DIFF = 0.15  # a not-allowed choice error within this of its neighbour is noise, else junk
-    MAX_DIGIT_ERROR = 0.6  # digits with an error of more than this are dropped
+    MAX_DIGIT_ERROR = 0.5  # digits with an error of more than this are dropped
     MAX_ZERO_ERROR_DIFF = 0.25  # a zero with a choice with a smaller error difference than this is dropped
     MAX_DIGIT_ERROR_DIFF = 0.05  # if two digit choices have an error difference less than this its ambiguous
     MAX_DIGIT_WIDTH = 2.0  # maximum width of a keep-able digit relative to the nominal digit width
-    MIN_DIGIT_WIDTH = 0.5  # minimum width of a keep-able digit relative to the nominal digit width
-    MIN_DROPPABLE_WIDTH = MIN_DIGIT_WIDTH * 1  # minimum width of a droppable digit
+    MIN_DIGIT_WIDTH = 0.3  # minimum width of a keep-able digit relative to the nominal digit width
+    MIN_DROPPABLE_WIDTH = MIN_DIGIT_WIDTH * 3  # minimum width of a droppable digit
     MIN_SPLITTABLE_DIGIT_WIDTH = MIN_DIGIT_WIDTH * 2  # minimum width of a splittable digit (/2 must be >=1)
     # endregion
 
@@ -125,13 +135,6 @@ class Scan:
     VIDEO_4K = 2160
     # endregion
 
-    # region Proximity options
-    # these control the contour detection, for big targets that cover the whole image a bigger
-    # integration area is required (i.e. smaller image fraction), this is used for testing
-    # print images
-    PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
-    PROXIMITY_CLOSE = 16  # suitable for print images
-    # end region
     # region Debug options...
     DEBUG_NONE = 0  # no debug output
     DEBUG_IMAGE = 1  # just write debug annotated image files
@@ -183,10 +186,11 @@ class Scan:
     class Edge:
         """ an Edge is a sequence of joined steps """
 
-        def __init__(self, where, type, samples):
+        def __init__(self, where, type, samples, grey_as):
             self.where = where  # the x co-ord of the start of this edge
             self.type = type  # the type of the edge, falling or rising
             self.samples = samples  # the list of connected y's making up this edge
+            self.grey_as = grey_as
 
         def __str__(self):
             self.show()
@@ -208,8 +212,8 @@ class Scan:
                 to_x %= max_x
             from_y = self.samples[0]
             to_y = self.samples[-1]
-            return '{} at ({},{}) to ({},{}) for {}{}'.\
-                   format(self.type, from_x, from_y, to_x, to_y, len(self.samples), samples)
+            return '{}(grey={}) at ({},{}) to ({},{}) for {}{}'.\
+                   format(self.type, self.grey_as, from_x, from_y, to_x, to_y, len(self.samples), samples)
 
     class Extent:
         """ an Extent is the inner edge co-ordinates of a projected image along with
@@ -361,6 +365,7 @@ class Scan:
             logger = None
         params = contours.Targets()
         params.integration_width = self.proximity
+        params.black_threshold = Scan.BLACK_LEVEL[self.proximity]
         blobs, binary = contours.get_targets(self.image.buffer, params=params, logger=logger)
         self.binary = self.image.instance()
         self.binary.set(binary)
@@ -874,16 +879,16 @@ class Scan:
                 # make the Edge instance
                 if start_x is None:
                     # this means this edge goes all the way around
-                    return Scan.Edge(0, edge_type, sequence)
+                    return Scan.Edge(0, edge_type, sequence, treat_grey_as)
                 elif end_x is None:
                     # this means the edge ends at the end
-                    return Scan.Edge(start_x, edge_type, sequence[start_x:max_x])
+                    return Scan.Edge(start_x, edge_type, sequence[start_x:max_x], treat_grey_as)
                 elif end_x < start_x:  # NB: end cannot be < start unless wrapping is allowed
                     # this means the edge wraps
-                    return Scan.Edge(start_x, edge_type, sequence[start_x:max_x] + sequence[0:end_x+1])
+                    return Scan.Edge(start_x, edge_type, sequence[start_x:max_x] + sequence[0:end_x+1], treat_grey_as)
                 else:
                     # normal edge away from either extreme
-                    return Scan.Edge(start_x, edge_type, sequence[start_x:end_x+1])
+                    return Scan.Edge(start_x, edge_type, sequence[start_x:end_x+1], treat_grey_as)
 
             # follow the edge as far as we can (in both directions)
             backwards = [None for _ in range(max_x)]
@@ -1008,6 +1013,7 @@ class Scan:
 
         def merge(full_edge, edge):
             """ merge the given edge into full_edge, its assumed it will 'fit' """
+
             for dx, y in enumerate(edge.samples):
                 if y is not None:
                     x = (edge.where + dx) % max_x
@@ -1016,9 +1022,10 @@ class Scan:
 
         def delta(this_xy, that_xy):
             """ calculate the x and y difference between this_xy and that_xy,
-                x' is this x - that x and y' is this y - that y, x' cannot be zero,
-                this x and that x may also wrap (ie. that < this),
+                x' is this_x - that_x and y' is this_y - that_y, x' cannot be zero,
+                this_x and that_x may also wrap (ie. that < this),
                 this_xy must precede that_xy in x, if not a wrap is assumed,
+                the resultant x,y are always +ve
                 """
             if that_xy[0] < this_xy[0]:
                 # wraps in x
@@ -1029,39 +1036,43 @@ class Scan:
                 y_dash = this_xy[1] - that_xy[1]
             else:
                 y_dash = that_xy[1] - this_xy[1]
+            if x_dash == 0:
+                raise Exception('delta x is 0 between {} and {}'.format(this_xy, that_xy))
             return x_dash, y_dash
 
-        def distance_OK(this_xy, that_xy, max_distance):
-            """ check the distance between this_xy and that_xy is acceptable,
-                this_xy must precede that_xy in x, if not a wrap is assumed,
-                """
-            xy_dash = delta(this_xy, that_xy)
-            if xy_dash[0] > max_distance:
-                return False
-            return True
-
-        def angle_OK(this_xy, that_xy, max_angle):
-            """ check the angle of the slope between this_xy and that_xy is acceptable,
+        def gap_OK(this_xy, that_xy, max_angle=None, max_x_distance=None, max_y_distance=None):
+            """ check the angle of the slope and the distance between this_xy and that_xy are acceptable,
                 an approximate tan of the angle is calculated as y'/x' with a few special cases,
-                the special cases are when y' is within Scan.MAX_NEIGHBOUR_HEIGHT_GAP,
-                these are all considered OK,
                 this_xy must precede that_xy in x, if not a wrap is assumed,
+                angle 0 is considered to be along the x-axis, 90 degrees is straight up/down the y-axis,
+                max_angle of None means do not check the angle,
+                max_x/y_distance of None means do not check that distance.
+                if all are None (silly) returns True
                 """
             xy_dash = delta(this_xy, that_xy)
-            if xy_dash[1] <= Scan.MAX_NEIGHBOUR_HEIGHT_JUMP:
-                # always OK
-                return True
-            if xy_dash[0] == 0:
-                # this is angle 0, which is OK
-                return True
-            angle = xy_dash[1] / xy_dash[0]  # 1==45 degrees, 0.6==30, 1.2==50, 1.7==60, 2.7==70
-            if angle > max_angle:
-                # too steep
-                return False
+            if max_x_distance is not None:
+                if xy_dash[0] > max_x_distance:
+                    # too far apart
+                    return False
+            if max_y_distance is not None:
+                if xy_dash[1] > max_y_distance:
+                    # too far apart
+                    return False
+            if max_angle is not None:
+                if xy_dash[1] <= Scan.MAX_NEIGHBOUR_HEIGHT_JUMP:
+                    # always OK
+                    return True
+                if xy_dash[1] == 0:
+                    # no difference in y, this is angle 0, which is OK
+                    return True
+                angle = xy_dash[1] / xy_dash[0]  # 1==45 degrees, 0.6==30, 1.2==50, 1.7==60, 2.7==70
+                if angle > max_angle:
+                    # too steep
+                    return False
             return True
 
         def find_nearest_y(full_edge, start_x, direction):
-            """ find the nearest y, and its position, in full_edge from x, in the given direction,
+            """ find the nearest y, and its position, in full_edge from start_x, in the given direction,
                 direction is +1 to look forward in full_edge, or -1 to look backward
                 we assume full_edge at start_x is empty
                 """
@@ -1112,7 +1123,7 @@ class Scan:
             # close is in terms of the slope angle across the gap and the width of the gap,
             edge_start = edge.where
             edge_end = edge_start + len(edge.samples) - 1
-            nearest_back_xy = find_nearest_y(full_edge, edge_start, -1)  # backwards form our start
+            nearest_back_xy = find_nearest_y(full_edge, edge_start, -1)  # backwards from our start
             nearest_next_xy = find_nearest_y(full_edge, edge_end, +1)  # forwards from our end
             if nearest_back_xy is None or nearest_next_xy is None:
                 # means full_edge is empty - always OK
@@ -1120,14 +1131,36 @@ class Scan:
 
             our_start_xy = (edge.where, edge.samples[0])
             our_end_xy = (edge_end, edge.samples[-1])
-            if angle_OK(nearest_back_xy, our_start_xy, max_angle) \
-                    and distance_OK(nearest_back_xy, our_start_xy, max_distance):
+
+            if gap_OK(nearest_back_xy, our_start_xy, max_angle, max_distance, max_distance):
                 # angle and distance OK from our start to end of full
-                return True
-            if angle_OK(our_end_xy, nearest_next_xy, max_angle) \
-                    and distance_OK(our_end_xy, nearest_next_xy, max_distance):
+                # need to check the other end too, if our end is within max distance of next it must OK too
+                if gap_OK(our_end_xy, nearest_next_xy, None, max_distance, None):
+                    # other end is reachable in x, so its angle must be OK too
+                    if gap_OK(our_end_xy, nearest_next_xy, max_angle, max_distance, max_distance):
+                        # its OK
+                        return True
+                    else:
+                        # other end no good
+                        return False
+                else:
+                    # other end too far away, so OK
+                    return True
+
+            if gap_OK(our_end_xy, nearest_next_xy, max_angle, max_distance, max_distance):
                 # angle and distance OK from our end to start of full
-                return True
+                # need to check the other end too, if our start is within max distance of back it must OK too
+                if gap_OK(nearest_back_xy, our_start_xy, None, max_distance, None):
+                    # other end is reachable in x, so its angle must be OK too
+                    if gap_OK(nearest_back_xy, our_start_xy, max_angle, max_distance, max_distance):
+                        # its OK
+                        return True
+                    else:
+                        # other end no good
+                        return False
+                else:
+                    # other end too far away, so OK
+                    return True
 
             # too far away and/or too steep, so not allowed
             return False
@@ -1140,7 +1173,9 @@ class Scan:
                 has collided with a data edge,
                 when the overlap is 'small' we either take it out of full_edge or edge,
                 which is taken out is controlled by the direction param, if its FALLING the
-                edge lower in the image (i.e. higher y) is taken out, otherwise higher is removed
+                edge lower in the image (i.e. higher y) is taken out, otherwise higher is removed,
+                if a residue of less than MIN_EDGE_SAMPLES remains, that is removed too,
+                if the resulting edge is empty the trim fails, an empty full_edge is acceptable
                 """
 
             def remove_sample(x, trimmed_edge):
@@ -1173,7 +1208,7 @@ class Scan:
                 return full_edge, edge
 
             trimmed_full_edge = full_edge.copy()
-            trimmed_edge = Scan.Edge(edge.where, edge.type, edge.samples.copy())
+            trimmed_edge = Scan.Edge(edge.where, edge.type, edge.samples.copy(), edge.grey_as)
             for x, samples in enumerate(overlaps):
                 if samples is None:
                     continue
@@ -1198,79 +1233,56 @@ class Scan:
                     # do nothing
                     continue
 
+            if len(trimmed_edge.samples) < Scan.MIN_EDGE_SAMPLES:
+                # edge residue too small
+                return None
+
+            # remove small residue in trimmed_full_edge (the residue can only be at the trimmed_edge boundaries)
+            def clean(x, dx):
+                residue = []
+                for _ in range(max_x):
+                    x = (x + dx) % max_x
+                    if trimmed_full_edge[x] is None:
+                        break
+                    residue.append(x)
+                    if len(residue) > Scan.MIN_EDGE_SAMPLES:
+                        # got more than enough, so look no further
+                        break
+                if len(residue) < Scan.MIN_EDGE_SAMPLES:
+                    # got a small residue, drop it
+                    for x in residue:
+                        trimmed_full_edge[x] = None
+
+            clean(trimmed_edge.where, -1)  # do full->edge boundary
+            clean(trimmed_edge.where + len(trimmed_edge.samples) - 1, +1)  # do edge->full boundary
+
             return trimmed_full_edge, trimmed_edge
 
-        def smooth(edge, direction):
-            """ smooth out any excessive y 'steps',
-                direction RISING when doing an outer edge or FALLING when doing an inner,
-                when joining edges we only check one end is close to another, the other end
-                may be a long way off (due to overlaps caused by messy edges merging in the image),
-                we detect these and 'smooth' them out, we detect them by finding successive y's
-                with a difference of more than two, on detection the correction is to move the two y's
-                such that the y gaps' equally span the gap, e.g.:
-                ---------1.           ---------..
-                         ..                    ..
-                         ..                    1.
-                (A)      ..       -->          ..
-                         ..                    .2
-                         ..                    ..
-                         .2---------           ..--------
-                or
-                         .2---------           ..--------
-                         ..                    ..
-                         ..                    .2
-                (B)      ..       -->          ..
-                         ..                    1.
-                         ..                    ..
-                ---------1.           ---------..
-                we also remove 'nipples', this is an 'x' where its left and right neighbours have
-                the same 'y', we make 'x' the same as its neighbours,
-                returns the smoothed edge and None if OK or partially smoothed and a reason if failed
+        def smooth(edge):
+            """ smooth the edge using a "simple moving average" - see https://en.wikipedia.org/wiki/Moving_average
+                returns the smoothed edge
                 """
 
-            # phase 1 - smooth jumps in y
-            reason = None
-            max_edge_jump = Scan.MAX_EDGE_HEIGHT_JUMP * Scan.MAX_EDGE_HEIGHT_JUMP
             max_x = len(edge)
-            for this_x in range(max_x):
-                last_x = (this_x - 1) % max_x
-                next_x = (this_x + 1) % max_x
-                last_y = edge[last_x]
-                this_y = edge[this_x]
-                next_y = edge[next_x]
-                diff_y = this_y - last_y
-                jump = diff_y * diff_y  # get rid of the sign
-                if jump > max_edge_jump:
-                    # too big a jump to tolerate
-                    return edge, 'edge broken'
-                elif jump > 4:  # i.e. diff_y > 2
-                    # 'smooth' this small jump
-                    gap = int(round(diff_y / 3))
-                    last_y += gap
-                    this_y -= gap
-                elif jump > 1:  # i.e. diff_y == 2
-                    # we move one end by 1, which end?
-                    gap = int(round(diff_y / 2))  # we do this to propagate the sign of diff_y
-                    this_y -= gap  # arbitrarily choosing this end
-                else:
-                    # no smoothing required
-                    continue
-                edge[last_x] = last_y
-                edge[this_x] = this_y
-            # phase 2 - remove 'nipples'
-            for this_x in range(max_x):
-                last_x = (this_x - 1) % max_x
-                next_x = (this_x + 1) % max_x
-                last_y = edge[last_x]
-                next_y = edge[next_x]
-                if last_y == next_y:
-                    # got a 'nipple', remove it
-                    edge[this_x] = next_y
-                else:
-                    # no nipple
-                    continue
 
-            return edge, reason
+            # step 1 - integrate the edge (with overlap for x wrapping)
+            integrated  = edge[max_x - Scan.SMOOTHING_WINDOW:]
+            integrated += edge
+            integrated += edge[:Scan.SMOOTHING_WINDOW]
+            sum = 0
+            for x in range(len(integrated)):
+                sum += integrated[x]
+                integrated[x] = sum
+
+            # step 2 - generate the SMA
+            sma = [0 for _ in range(max_x)]
+            for x in range(max_x):
+                ix = x + Scan.SMOOTHING_WINDOW  # add the intgration offset (to allow for x wrapping)
+                ahead  = integrated[ix + Scan.SMOOTHING_WINDOW]
+                behind = integrated[ix - Scan.SMOOTHING_WINDOW]
+                sma[x] = int(round((ahead - behind) / (Scan.SMOOTHING_WINDOW * 2)))
+
+            return sma
 
         def extrapolate(edge):
             """ extrapolate across the gaps in the given edge,
@@ -1372,7 +1384,7 @@ class Scan:
                 full_edge = make_full(start_edge)
                 full_edge_samples = len(start_edge.samples)
                 full_edge_fragments = [start_idx]  # note edges we've used
-                for distance in distance_span:
+                for distance in distance_span:  # look for closest options first
                     if full_edge_samples == max_x:
                         # this is as big as its possible to get
                         break
@@ -1419,8 +1431,8 @@ class Scan:
                 # failed
                 return composed, reason
 
-            # remove y 'steps'
-            smoothed, reason = smooth(composed, direction)
+            # smooth y gradients
+            smoothed = smooth(composed)
 
             return smoothed, reason
         # endregion
@@ -1569,7 +1581,6 @@ class Scan:
             returns the modified digits list and a count of digits dropped,
             this is public to allow test harnesses access
             """
-        return digits, 0  # ToDo: HACK this is pointless
         dropped = 0
         for digit in range(len(digits) - 1, 0, -1):
             if digits[digit][1] > Scan.MAX_DIGIT_ERROR:
@@ -1584,7 +1595,6 @@ class Scan:
             returns the modified digits list and a count of digits dropped,
             this is public to allow test harnesses access
             """
-        return digits, 0  # ToDo: HACK this is dodgy
         dropped = 0
         if len(digits) > 1:
             # there is a choice, check if first is a 0 with a 'close' choice
@@ -1660,9 +1670,13 @@ class Scan:
         reason = None
 
         # a 0 in these bit positions mean treat grey as black, else treat as white
-        GREY_BEFORE = 1  # grey option bit mask to specify how to handle grey before the first white
-        GREY_CENTRE = 2  # grey option bit mask to specify how to handle grey between before and after white
-        GREY_AFTER  = 4  # grey option bit mask to specify how to handle grey after the last white
+        # these are AND masks, when we get a grey in the 'before', 'centre' or 'after' context in a slice
+        # the result of the AND on the option being performed is used to determine what to do,
+        # 0=treat as black, 1=treat as white
+        GREY_BEFORE = 0  # 1  # grey option bit mask to specify how to handle grey before the first white
+        GREY_CENTRE = 0  # 2  # grey option bit mask to specify how to handle grey between before and after white
+        GREY_AFTER  = 0  # 4  # grey option bit mask to specify how to handle grey after the last white
+        GREY_ONLY   = 0  # 8  # grey option bit mask to specify how to handle grey when there is no white
 
         def drop_dodgy_zero(x, option, digits, logging=False):
             nonlocal header
@@ -1708,7 +1722,11 @@ class Scan:
                 after = '0'
             else:
                 after = '1'
-            return '(grey {}{}{})'.format(before, centre, after)
+            if option & GREY_ONLY == 0:
+                only = '0'
+            else:
+                only = '1'
+            return '(grey {}{}{}{})'.format(before, centre, after, only)
 
         # region generate likely digit choices for each x...
         inner = extent.inner
@@ -1766,32 +1784,40 @@ class Scan:
             # the options are: grey before first white as black or white
             #                  grey after last white as black or white
             #                  grey between first and last white as black or white
+            #                  grey when no white
             # we classify the pixels adjusted for these options, then pick the best,
             # this has the effect of sliding the central pulse up/down around the grey boundaries
-            # there are 8 combinations of greys - before b/w * between b/w * after b/w
+            # there are 16 combinations of greys - before b/w * between b/w * after b/w * no white
             options = []
-            for option in range(8):
-                # option is a bit mask of 3 bits, bit 0 = before white, 1 = between, 2 = after
+            for option in range(16):
+                # option is a bit mask of 4 bits, bit 0 = before white, 1 = between, 2 = after, 3 = no white
                 # a 1 in that bit means treat grey as white and a 0 means treat grey as black
                 # NB: option 0 must be to consider *all* greys as black
                 slice = []
                 for y, pixel in enumerate(pixels):
                     if pixel == MID_LUMINANCE:
-                        if y < first_white:
+                        if has_white == 0:
+                            if option & GREY_ONLY == 0:
+                                # treat as black
+                                pixel = MIN_LUMINANCE
+                            else:
+                                # treat as white
+                                pixel = MAX_LUMINANCE
+                        elif y < first_white:
                             if option & GREY_BEFORE == 0:
                                 # treat before as black
                                 pixel = MIN_LUMINANCE
                             else:
                                 # treat before as white
                                 pixel = MAX_LUMINANCE
-                        if y > last_white:
+                        elif y > last_white:
                             if option & GREY_AFTER == 0:
                                 # treat after as black
                                 pixel = MIN_LUMINANCE
                             else:
                                 # treat after as white
                                 pixel = MAX_LUMINANCE
-                        if y > first_white and y < last_white:
+                        else:  # if y >= first_white and y <= last_white:
                             if option & GREY_CENTRE == 0:
                                 # treat between as black
                                 pixel = MIN_LUMINANCE
@@ -2420,9 +2446,13 @@ class Scan:
                     reason = 'digit too big'
                     break
                 elif digit.samples < min_digit_width:
-                    # too small
-                    reason = 'digit too small'
-                    break
+                    if self.decoder.is_sync_digit(digit.digit):
+                        # we tolerate small syncs
+                        pass
+                    else:
+                        # too small
+                        reason = 'digit too small'
+                        break
 
         if self.logging:
             if header is not None:

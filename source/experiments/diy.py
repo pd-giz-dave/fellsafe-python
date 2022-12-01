@@ -918,7 +918,7 @@ def verify():
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
-    test_scan_video_mode = scanner.Scan.VIDEO_4K
+    test_scan_video_mode = scanner.Scan.VIDEO_2K
 
     # test_debug_mode = scanner.Scan.DEBUG_IMAGE
     test_debug_mode = scanner.Scan.DEBUG_VERBOSE
