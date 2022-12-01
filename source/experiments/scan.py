@@ -1099,8 +1099,6 @@ class Scan:
                 full_edge_y = full_edge[x]
                 if full_edge_y is None:
                     continue
-                if edge_y == full_edge_y:
-                    continue
                 overlaps[x] = (full_edge_y, edge_y)
                 samples += 1
             return samples, overlaps
@@ -1209,6 +1207,7 @@ class Scan:
 
             trimmed_full_edge = full_edge.copy()
             trimmed_edge = Scan.Edge(edge.where, edge.type, edge.samples.copy(), edge.grey_as)
+            trimmed_at = []
             for x, samples in enumerate(overlaps):
                 if samples is None:
                     continue
@@ -1217,6 +1216,7 @@ class Scan:
                     if direction == Scan.RISING:
                         # take out the full_edge sample - easy case
                         trimmed_full_edge[x] = None
+                        trimmed_at.append(x)  # note where we changed it for clean-up later
                     else:
                         # take out the edge sample
                         if not remove_sample(x, trimmed_edge):
@@ -1225,20 +1225,28 @@ class Scan:
                     if direction == Scan.FALLING:
                         # take out the full_edge sample - easy case
                         trimmed_full_edge[x] = None
+                        trimmed_at.append(x)  # note where we changed it for clean-up later
                     else:
                         # take out the edge sample
                         if not remove_sample(x, trimmed_edge):
                             return None
                 else:  # edge_y == full_edge_y:
-                    # do nothing
+                    # do nothing - this is benign, the merge process will just put in there what is already there
                     continue
 
             if len(trimmed_edge.samples) < Scan.MIN_EDGE_SAMPLES:
                 # edge residue too small
                 return None
 
-            # remove small residue in trimmed_full_edge (the residue can only be at the trimmed_edge boundaries)
+            # remove small residue in trimmed_full_edge,
+            # these can only be around places we trimmed the full edge
             def clean(x, dx):
+                """ remove sequences that are below the minimum starting from x and going is direction dx,
+                    returns True if one was found and cleaned out
+                    """
+                if trimmed_full_edge[x % max_x] is not None:
+                    # full edge has not been tweaked here, so nothing to clean
+                    return False
                 residue = []
                 for _ in range(max_x):
                     x = (x + dx) % max_x
@@ -1252,9 +1260,12 @@ class Scan:
                     # got a small residue, drop it
                     for x in residue:
                         trimmed_full_edge[x] = None
+                    return True
+                return False
 
-            clean(trimmed_edge.where, -1)  # do full->edge boundary
-            clean(trimmed_edge.where + len(trimmed_edge.samples) - 1, +1)  # do edge->full boundary
+            for x in trimmed_at:
+                clean(x, -1)
+                clean(x, +1)
 
             return trimmed_full_edge, trimmed_edge
 
