@@ -71,16 +71,16 @@ class Scan:
 
     # region Constants...
 
-    # region Proximity options
+    # region Proximity options...
     # these control the contour detection, for big targets that cover the whole image a bigger
     # integration area is required (i.e. smaller image fraction), this is used for testing
     # print images
     PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
     PROXIMITY_CLOSE = 16  # suitable for print images
     BLACK_LEVEL = {PROXIMITY_FAR: -5, PROXIMITY_CLOSE: 0.01}  # black threshold for binarising contours
-    # end region
+    # endregion
 
-    # our target shape
+    # region our target shape...
     NUM_RINGS = ring.Ring.NUM_RINGS  # total number of rings in the whole code (ring==cell in height)
     BULLSEYE_RINGS = ring.Ring.BULLSEYE_RINGS  # number of rings inside the inner edge
     DIGIT_BASE = codec.Codec.DIGIT_BASE  # number base for our digits
@@ -91,14 +91,16 @@ class Scan:
     NUM_SEGMENTS = codec.Codec.DIGITS  # total number of segments in a ring (segment==cell in length)
     DIGITS_PER_NUM = codec.Codec.DIGITS_PER_WORD  # how many digits per encoded number
     COPIES = codec.Codec.COPIES_PER_BLOCK  # number of copies in a code-word
+    # endregion
 
-    # image 'segment' and 'ring' constraints,
+    # region image 'segment' and 'ring' constraints...
     # a 'segment' is the angular division in a ring,
     # a 'ring' is a radial division,
     # a 'cell' is the intersection of a segment and a ring
     # these constraints set minimums that override the cells() property given to Scan
     MIN_PIXELS_PER_CELL = 4  # min pixels making up a cell length
     MIN_PIXELS_PER_RING = 4  # min pixels making up a ring width
+    # endregion
 
     # region Tuning constants...
     BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
@@ -933,6 +935,7 @@ class Scan:
                     forward_tail = [None for _ in range(max_x)]
                     backward_tail = [None for _ in range(max_x)]
                     main_samples = 0
+                    tail_samples = 0
                     for x in range(max_x):
                         forward_sample = forwards[x]
                         backward_sample = backwards[x]
@@ -940,6 +943,7 @@ class Scan:
                             # got an overlap, add to tails
                             backward_tail[x] = backward_sample
                             forward_tail[x] = forward_sample
+                            tail_samples += 1
                         elif forward_sample is not None:
                             # no overlap, add to main sequence
                             main_sequence[x] = forward_sample
@@ -953,12 +957,17 @@ class Scan:
                             raise Exception('sample missing at {} in spiralled edge'.format(x))
                     if main_samples > 0:
                         # this means there is a separation between the tails
-                        edges.append(make_edge(main_sequence))
-                        edges.append(make_edge(forward_tail))
-                        edges.append(make_edge(backward_tail))
-                    else:
+                        if main_samples >= Scan.MIN_EDGE_SAMPLES:
+                            edges.append(make_edge(main_sequence))
+                        if tail_samples >= Scan.MIN_EDGE_SAMPLES:
+                            edges.append(make_edge(forward_tail))
+                            edges.append(make_edge(backward_tail))
+                    elif tail_samples >= Scan.MIN_EDGE_SAMPLES:  # and main_samples == 0
                         # this means both forwards and backwards go right round, they must be the same in this case
                         edges.append(make_edge(forward_tail))
+                    else:
+                        # fragments too small - is this possible?
+                        pass
                 else:
                     # no overlap, make a single candidate
                     candidate = backwards
@@ -1242,11 +1251,11 @@ class Scan:
             # these can only be around places we trimmed the full edge
             def clean(x, dx):
                 """ remove sequences that are below the minimum starting from x and going is direction dx,
-                    returns True if one was found and cleaned out
+                    returns a list of places (x co-ords) that was cleaned out
                     """
                 if trimmed_full_edge[x % max_x] is not None:
                     # full edge has not been tweaked here, so nothing to clean
-                    return False
+                    return []
                 residue = []
                 for _ in range(max_x):
                     x = (x + dx) % max_x
@@ -1260,8 +1269,8 @@ class Scan:
                     # got a small residue, drop it
                     for x in residue:
                         trimmed_full_edge[x] = None
-                    return True
-                return False
+                    return residue
+                return []
 
             for x in trimmed_at:
                 clean(x, -1)
