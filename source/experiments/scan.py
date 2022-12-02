@@ -103,21 +103,21 @@ class Scan:
     # endregion
 
     # region Tuning constants...
-    BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
+    BLOB_RADIUS_STRETCH = 1.2  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.35  # minimum luminance variation of a valid blob projection relative to the max luminance
     THRESHOLD_WIDTH = 8  # the fraction of the projected image width to use as the integration area when binarizing
     THRESHOLD_HEIGHT = 3.5  # the fraction of the projected image height to use as the integration area (None=as width)
-    THRESHOLD_BLACK = 10  # the % below the average luminance in a projected image that is considered to be black
-    THRESHOLD_WHITE = 0  # the % above the average luminance in a projected image that is considered to be white
-    MIN_EDGE_SAMPLES = 2  # minimum samples in an edge to be considered a valid edge
+    THRESHOLD_BLACK = 5  # the % below the average luminance in a projected image that is considered to be black
+    THRESHOLD_WHITE = 5  # the % above the average luminance in a projected image that is considered to be white
+    MIN_EDGE_SAMPLES = 3  # minimum samples in an edge to be considered a valid edge
     INNER_EDGE_GAP = 1.0  # fraction of inner edge y co-ord to add to inner edge when looking for the outer edge
     MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments
     MAX_NEIGHBOUR_ANGLE_OUTER = 0.9  # ~=42 degrees, tan of the max acceptable angle when joining outer edge fragments
     MAX_NEIGHBOUR_HEIGHT_GAP = 1  # max x or y jump allowed when following an edge
     MAX_NEIGHBOUR_LENGTH_JUMP = 10  # max x jump, in pixels, between edge fragments when joining (arbitrary)
-    MAX_NEIGHBOUR_HEIGHT_JUMP = 3  # max y jump, in pixels, between edge fragments when joining (arbitrary)
+    MAX_NEIGHBOUR_HEIGHT_JUMP = 4  # max y jump, in pixels, between edge fragments when joining (arbitrary)
     MAX_NEIGHBOUR_OVERLAP = 4  # max edge overlap, in pixels, between edge fragments when joining (arbitrary)
-    MAX_EDGE_GAP_SIZE = 3 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
+    MAX_EDGE_GAP_SIZE = 4 / NUM_SEGMENTS  # max gap tolerated between edge fragments (as fraction of image width)
     SMOOTHING_WINDOW = 8  # samples in the moving average (we average the centre, so the full window is +/- this)
     MAX_NOT_ALLOWED_ERROR_DIFF = 0.15  # a not-allowed choice error within this of its neighbour is noise, else junk
     MAX_DIGIT_ERROR = 0.5  # digits with an error of more than this are dropped
@@ -167,7 +167,7 @@ class Scan:
     PALE_BLUE = (128, 0, 0)
     PALE_GREEN = (0, 128, 0)
     # endregion
-    # endregion
+
     # endregion
 
     # region Structures...
@@ -1372,7 +1372,7 @@ class Scan:
                             # current gap getting bigger
                             gap_size += 1
                             if gap_size > max_gap:
-                                reason = 'edge gap: {}+'.format(gap_size)
+                                reason = 'edge gap: {}+'.format(max_gap)
                                 break
                         continue
                     if gap_start is not None:
