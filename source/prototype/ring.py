@@ -3,7 +3,6 @@ import codec
 import math
 import angle
 
-
 MAX_LUMINANCE = 255
 MIN_LUMINANCE = 0
 MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1

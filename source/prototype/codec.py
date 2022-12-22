@@ -280,12 +280,12 @@ class Codec:
         slice = prefix + bits + suffix
         virtual_slice = []
         for bit in slice:
-            virtual_slice += [bit for _ in range(Codec.VIRTUAL_RINGS_PER_RING)]
+            virtual_slice += [bit for _ in range(Codec.VIRTUAL_RINGS_PER_RING)]  # add bit copied N times
         return virtual_slice
 
     def _get_slice_scale(self, length):
         """ determine if a slice of the given length is eligible for classification,
-            if it is return the 'scale' for that length, else None
+            if it is, return the 'scale' for that length, else None
             the scale is used to map ideal slice bit indices to actual
             """
         bits = self._make_slice_bits(Codec.SYNC_DIGIT)  # only digit we can guarantee is valid
@@ -298,8 +298,6 @@ class Codec:
     def _make_slice_index(self, length):
         """ make a bit index of the given length,
             a bit index is the virtual bit number to associate with every offset into a slice of 'length'
-            edge_weight is how much weight to give the inner/outer edges, this affects how much 'smudging'
-            of the data rings into the edge rings is done, a weight of 1.0 is none, 0.0 is total,
             the indices generated here match the bits produced by _make_slice_bits
             """
 
@@ -517,9 +515,9 @@ class Codec:
             # not enough length
             return []
         bit_edges = [[None, None] for _ in range(len(ideals[Codec.SYNC_DIGIT]))]
-        for i, bit in enumerate(index):
-            start_bit_num = max(int(bit), 0)
-            end_bit_num = min(int(round(bit)), len(bit_edges) - 1)
+        for i, bit in enumerate(index):  # NB: bit index can be fractional
+            start_bit_num = max(int(bit), 0)  # truncate fractional for the start
+            end_bit_num = min(int(round(bit)), len(bit_edges) - 1)  # round for the end
             for edge_bit in [start_bit_num, end_bit_num]:
                 if bit_edges[edge_bit][0] is None:
                     bit_edges[edge_bit][0] = i  # set start edge for this bit

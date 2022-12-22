@@ -3,12 +3,14 @@ import glob
 import shutil
 
 import rand
+import const
 import codec
 import angle as angles
 import ring as rings
 import frame
 import transform
 import scan as scanner
+import cluster
 # import matplotlib.pyplot as plt
 import random
 import math
@@ -35,12 +37,6 @@ import traceback
 #       (mark CP's by runners running between two CP (n) targets)
 #       (record starters by placing start targets at several places near the race start)
 # ToDo: generate some test images in heavy rain (and snow?)
-
-# colours
-MAX_LUMINANCE = 255
-MIN_LUMINANCE = 0
-MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
-
 
 class Test:
     # exit codes from scan
@@ -288,7 +284,7 @@ class Test:
                        format(self.width, len(self.bits), self.size, self.digit, err)
 
             def show_bits(self):
-                return scanner.Scan.show_bits(self.bits)
+                return cluster.Cluster.show_bits(self.bits)
 
             def show_digits(self, raw=False, legal=False, good=False, clean=False):
                 if raw:
@@ -301,7 +297,7 @@ class Test:
                     digits = self.clean_digits
                 else:
                     digits = []
-                return scanner.Scan.show_options(digits)
+                return cluster.Cluster.show_options(digits)
 
         class Result:
             """ a test result set """
@@ -419,11 +415,11 @@ class Test:
                                 slice.error = 1.0
                             else:
                                 raw_digits = self.codec.classify(slice.bits)
-                                legal_digits, legal_dropped = scanner.Scan.drop_illegal_digits(raw_digits.copy())
-                                good_digits, good_dropped = scanner.Scan.drop_bad_digits(legal_digits.copy())
-                                clean_digits, clean_dropped = scanner.Scan.drop_bad_zero_digit(good_digits.copy())
+                                legal_digits, legal_dropped = cluster.Cluster.drop_illegal_digits(raw_digits.copy())
+                                good_digits, good_dropped = cluster.Cluster.drop_bad_digits(legal_digits.copy())
+                                clean_digits, clean_dropped = cluster.Cluster.drop_bad_zero_digit(good_digits.copy())
                                 if len(clean_digits) > 0:
-                                    if scanner.Scan.is_ambiguous(clean_digits):
+                                    if cluster.Cluster.is_ambiguous(clean_digits):
                                         slice.state = AMBIGUOUS
                                         slice.error = 1.0
                                     else:
@@ -688,7 +684,7 @@ class Test:
                 num = 0
             else:
                 num = int(num)
-            self.scan(folder, [num], f, scanner.Scan.PROXIMITY_CLOSE)
+            self.scan(folder, [num], f, const.PROXIMITY_CLOSE)
 
     def scan_media(self, folder):
         """ find all the media in the given folder and scan them,
@@ -715,9 +711,9 @@ class Test:
                 digits = digits[3:]
             if len(codes) == 0:
                 codes = [0]
-            self.scan(folder, codes, f, scanner.Scan.PROXIMITY_FAR)
+            self.scan(folder, codes, f, const.PROXIMITY_FAR)
 
-    def scan(self, folder, numbers, image, proximity=scanner.Scan.PROXIMITY_FAR):
+    def scan(self, folder, numbers, image, proximity=const.PROXIMITY_FAR):
         """ do a scan for the code set in image in the given folder and expect the number given,
             proximity specifies how close to the camera the targets can be, 'far' is suitable for
             normal video capture, 'close' is suitable for test images that consist of just a single
@@ -865,7 +861,7 @@ class Test:
             """
 
         image_width = int(round(width * rings.Ring.NUM_RINGS * 2))
-        self.frame.new(image_width, image_width, MIN_LUMINANCE)  # NB: must be initialised to black
+        self.frame.new(image_width, image_width, const.MIN_LUMINANCE)  # NB: must be initialised to black
         x, y = self.frame.size()
 
         return x, y
@@ -914,14 +910,14 @@ def verify():
     # cell size is critical,
     # too small and 1 pixel errors become significant,
     # too big and takes too long and uses a lot of memory
-    test_scan_cells = (8, 8)
+    test_scan_cells = (10, 6)  # experimentation determined this is best for 2K and 4K
 
     # reducing the resolution means targets have to be closer to be detected,
     # increasing it takes longer to process, most modern smartphones can do 4K at 30fps, 2K is good enough
-    test_scan_video_mode = scanner.Scan.VIDEO_2K
+    test_scan_video_mode = const.VIDEO_2K
 
     # test_debug_mode = scanner.Scan.DEBUG_IMAGE
-    test_debug_mode = scanner.Scan.DEBUG_VERBOSE
+    test_debug_mode = const.DEBUG_VERBOSE
 
     # test log/image folders
     test_log_folder = 'logs'
@@ -938,7 +934,7 @@ def verify():
                      debug=test_debug_mode)
 
         # build a test code set
-        # test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
+        test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
 
         # test.rand()
         # test.coding()
@@ -949,7 +945,7 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        # test.scan_codes(test_codes_folder)
+        test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
