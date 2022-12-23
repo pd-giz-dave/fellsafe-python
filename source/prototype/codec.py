@@ -68,15 +68,22 @@ class Codec:
     DOUBT_LIMIT = int(COPIES_PER_BLOCK / 2)  # we want the majority to agree, so doubt must not exceed half
     # endregion
     # region qualify/classify tuning constants
-    # error weights when classifying pixel slices across the ring SPAN (ie. including the edge rings),
+    # error weights when classifying pixel slices across the ring SPAN (i.e. including the edge rings),
     # all the weights should sum to 1, see classify() function for usage
-    VIRTUAL_RINGS_PER_RING = 3  # how many times to split a data ring for classification purposes
     # NB: if ENCODING changes, make appropriate changes here too (e.g. if change number of rings)
+    VIRTUAL_RINGS_PER_RING = 3  # how many times to split a data ring for classification purposes
     BIT_WEIGHTS = [0.00, 0.00, 0.00,  # rings are split into N 'virtual rings'
                    0.08, 0.16, 0.08,  # centre of bit has more weight
                    0.09, 0.18, 0.09,  # centre ring has more weight
                    0.08, 0.16, 0.08,
                    0.00, 0.00, 0.00]
+
+    # VIRTUAL_RINGS_PER_RING = 2
+    # BIT_WEIGHTS = [0.00, 0.00,
+    #                0.16, 0.17,
+    #                0.17, 0.17,
+    #                0.16, 0.17,
+    #                0.00, 0.00]
 
     # max proportion of the data portion of a slice that can be white (i.e. 1's),
     # more than this disqualifies the slice for digit classification (removes 7's)
@@ -288,6 +295,7 @@ class Codec:
             if it is, return the 'scale' for that length, else None
             the scale is used to map ideal slice bit indices to actual
             """
+        # ToDo: this is constant - move it to __init__
         bits = self._make_slice_bits(Codec.SYNC_DIGIT)  # only digit we can guarantee is valid
         scale = length / len(bits)
         if scale < 1.0:
@@ -503,6 +511,7 @@ class Codec:
             else:
                 return True
 
+        # ToDo: this is constant - move it to __init__
         # build the ideal pixel list for each digit possibility
         ideals = [None for _ in range(Codec.DIGIT_BASE)]
         for digit in range(Codec.DIGIT_BASE):

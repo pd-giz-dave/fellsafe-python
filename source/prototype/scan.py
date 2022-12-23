@@ -43,12 +43,12 @@ class Scan:
     # endregion
 
     # region Tuning constants...
-    BLOB_RADIUS_STRETCH = 1.2  # how much to stretch blob radius to ensure always cover everything when projecting
+    BLOB_RADIUS_STRETCH = 1.3  # how much to stretch blob radius to ensure always cover everything when projecting
     MIN_CONTRAST = 0.35  # minimum luminance variation of a valid blob projection relative to the max luminance
     THRESHOLD_WIDTH = 8  # the fraction of the projected image width to use as the integration area when binarizing
-    THRESHOLD_HEIGHT = 3.5  # the fraction of the projected image height to use as the integration area (None=as width)
-    THRESHOLD_BLACK = 5  # the % below the average luminance in a projected image that is considered to be black
-    THRESHOLD_WHITE = 5  # the % above the average luminance in a projected image that is considered to be white
+    THRESHOLD_HEIGHT = 2.5  # the fraction of the projected image height to use as the integration area (None=as width)
+    THRESHOLD_BLACK = 3  # the % below the average luminance in a projected image that is considered to be black
+    THRESHOLD_WHITE = 10  # the % above the average luminance in a projected image that is considered to be white
     MIN_EDGE_SAMPLES = 3  # minimum samples in an edge to be considered a valid edge
     INNER_EDGE_GAP = 1.0  # fraction of inner edge y co-ord to add to inner edge when looking for the outer edge
     MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments

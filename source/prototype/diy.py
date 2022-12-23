@@ -945,7 +945,7 @@ def verify():
         # test.codes(test_codes_folder, test_num_set, test_ring_width)
         # test.rings(test_codes_folder, test_ring_width)  # must be after test.codes (else it gets deleted)
 
-        test.scan_codes(test_codes_folder)
+        # test.scan_codes(test_codes_folder)
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')

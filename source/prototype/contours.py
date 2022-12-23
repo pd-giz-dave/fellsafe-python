@@ -529,7 +529,7 @@ class Targets:
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
     # all these 'ness' thresholds are a tuple of small area threshold and big area threshold
     max_squareness = (0.4 , 0.3 )        # how close to square the bounding box has to be, 0=perfect, >0=less perfect
-    max_wavyness   = (0.2 , 0.15)        # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
+    max_wavyness   = (0.25, 0.15)        # how close to not wavy a contour perimeter must be, 0=not wavy, >0=more wavy
     max_whiteness  = (0.2 , 0.15)        # how close to fully white a blob has to be, 0=all white, >0=less white
     max_roundness  = (0.3 , 0.18)        # how close to circular a blob has to be, 0=perfect, >0=less perfect
     min_radius: float = 2.1              # less than this and we're into less than 1 pixel per ring!
@@ -1156,15 +1156,16 @@ def _test(src, size, proximity, black):
 
 
 if __name__ == "__main__":
+    import const
     #src = "/home/dave/blob-extractor/test/data/checker.png"
     #src = "/home/dave/blob-extractor/test/data/diffract.png"
     #src = "/home/dave/blob-extractor/test/data/dummy.png"
     #src = "/home/dave/blob-extractor/test/data/labyrinth.png"
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
-    # src = '/home/dave/precious/fellsafe/fellsafe-image/media/' \
-    #       'distant-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg'
+    # src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/' \
+          'far-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/lead-head-ratio-codes/photo-101.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/projected-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/old-codes/photo-101.jpg"
@@ -1196,4 +1197,4 @@ if __name__ == "__main__":
     # endregion
 
     # size 1152 is 2K, 2160 is 4K, proximity 16 is close, 48 is far, black=-5 for far, 0.01 for close
-    _test(src, size=1152, proximity=16, black=0.01)
+    _test(src, size=const.VIDEO_2K, proximity=const.PROXIMITY_FAR, black=const.BLACK_LEVEL[const.PROXIMITY_FAR])

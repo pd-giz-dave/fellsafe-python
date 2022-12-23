@@ -1,10 +1,8 @@
 """ decode digits in an extent
 
     the 'extent' describes the target as the inner and outer edges
-    (i.e where the inner and outer black rings are)
+    (i.e. where the inner and outer black rings are)
     this module analyses the pixels between these edges to find the likely digit sequence
-
-    a kind of k-means clustering algorithm is used
 
 """
 
@@ -13,9 +11,7 @@ import structs
 import codec
 
 class Cluster:
-    """ provide functions to detect digits by using a kind of k-means clustering algorithm
-        on the white pixels of an extent
-        """
+    """ provide functions to detect digits within an extent """
 
     # region constants...
     DIGIT_BASE = codec.Codec.DIGIT_BASE  # number base for our digits
@@ -43,6 +39,7 @@ class Cluster:
         self.transform   = scanner.transform
         self._draw_lines = scanner._draw_lines
 
+    # region helpers...
     @staticmethod
     def drop_illegal_digits(digits):
         """ the initial digit classification takes no regard of not allowed digits,
@@ -171,6 +168,7 @@ class Cluster:
                     block = '{}{}'.format(block, slice[x])
             bits = '{} {}'.format(bits, block)
         return '[{}]'.format(bits[1:])
+    # endregion
 
     def find_all_digits(self, extent: structs.Extent) -> ([structs.Digit], str):
         """ find all the digits from an analysis of the given extent,
@@ -192,7 +190,7 @@ class Cluster:
         GREY_BEFORE = 0  # 1  # grey option bit mask to specify how to handle grey before the first white
         GREY_CENTRE = 0  # 2  # grey option bit mask to specify how to handle grey between before and after white
         GREY_AFTER  = 0  # 4  # grey option bit mask to specify how to handle grey after the last white
-        GREY_ONLY   = 0  # 8  # grey option bit mask to specify how to handle grey when there is no white
+        GREY_ONLY   = 8  # 8  # grey option bit mask to specify how to handle grey when there is no white
 
         def drop_dodgy_zero(x, option, digits, logging=False):
             nonlocal header
