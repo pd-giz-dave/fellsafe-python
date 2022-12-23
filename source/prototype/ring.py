@@ -2,11 +2,7 @@
 import codec
 import math
 import angle
-
-MAX_LUMINANCE = 255
-MIN_LUMINANCE = 0
-MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
-
+import const
 
 class Ring:
     """ this class knows how to draw the marker and data rings according to its constructor parameters
@@ -70,7 +66,7 @@ class Ring:
             def update_pixel(x, y, value):
                 """ update the pixel value at x,y by adding value (value may be -ve) """
                 old_value = self.f.getpixel(x, y)
-                new_value = int(max(min(old_value + value, MAX_LUMINANCE), MIN_LUMINANCE))
+                new_value = int(max(min(old_value + value, const.MAX_LUMINANCE), const.MIN_LUMINANCE))
                 self.f.putpixel(x, y, new_value, True)
 
             xL: int = int(cX)
@@ -78,7 +74,7 @@ class Ring:
 
             if (cX - xL) < (1/255) and (cY - yL) < (1/255):
                 # short-cut when no/small neighbours involved ('cos Python is so slow!)
-                self.f.putpixel(xL, yL, min(pixel, MIN_LUMINANCE), True)
+                self.f.putpixel(xL, yL, min(pixel, const.MIN_LUMINANCE), True)
                 return
 
             xH: int = xL + 1
@@ -98,17 +94,17 @@ class Ring:
             update_pixel(xH, yH, part_xHyH)
 
         if bit is None:
-            colour = MID_LUMINANCE
+            colour = const.MID_LUMINANCE
         elif bit == 0:
-            colour = MIN_LUMINANCE
+            colour = const.MIN_LUMINANCE
         elif bit == 1:
-            colour = MAX_LUMINANCE
+            colour = const.MAX_LUMINANCE
         else:
-            colour = MID_LUMINANCE
+            colour = const.MID_LUMINANCE
 
-        if colour == MIN_LUMINANCE:
+        if colour == const.MIN_LUMINANCE:
             # set to reduce the luminance
-            colour = int(0 - MAX_LUMINANCE)
+            colour = int(0 - const.MAX_LUMINANCE)
 
         put_pixel(self.x + x, self.y + y, colour)
 
