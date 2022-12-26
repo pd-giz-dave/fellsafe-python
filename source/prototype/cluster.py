@@ -6,6 +6,14 @@
 
 """
 
+# ToDo: different approach:
+#       after find inner/outer extent - extract target and flatten (in greyscale)
+#       then threshold that (tighter)
+#       then find ring (radial) edges by clustering rising and falling edge offsets
+#       then find bit (annular) edges by clustering rising and falling edge offsets
+#       now got a rectangle for each cell, count pixels in those and threshold for 0/1
+#       job done!
+
 import const
 import structs
 import codec
@@ -95,7 +103,7 @@ class Cluster:
             this is public to allow test harnesses access
             """
         dropped = 0
-        for digit in range(len(digits) - 1, 0, -1):
+        for digit in range(len(digits) - 1, -1, -1):
             if digits[digit][1] > Cluster.MAX_DIGIT_ERROR:
                 # error too big to be considered as real
                 dropped += 1
@@ -113,7 +121,7 @@ class Cluster:
             # there is a choice, check if first is a 0 with a 'close' choice
             digit1, error1 = digits[0]
             if digit1 == 0:
-                digit2, error2 = digits[1]  # NB: we know error2 is >= error1 (due to sort above)
+                digit2, error2 = digits[1]  # NB: we know error2 is >= error1 (due to earlier sort)
                 diff = error2 - error1
                 if diff < Cluster.MAX_ZERO_ERROR_DIFF:
                     # second choice is 'close' to first of 0, so treat 0 as dodgy and drop it
@@ -128,8 +136,8 @@ class Cluster:
             this is public to allow test harnesses access
             """
         if len(slice) > 1:
-            error1 = slice[0][1]
-            error2 = slice[1][1]
+            _, error1 = slice[0]
+            _, error2 = slice[1]
             diff = max(error1, error2) - min(error1, error2)
             if diff < Cluster.MAX_DIGIT_ERROR_DIFF:
                 # its ambiguous when only a small error difference
@@ -187,10 +195,14 @@ class Cluster:
         # these are AND masks, when we get a grey in the 'before', 'centre' or 'after' context in a slice
         # the result of the AND on the option being performed is used to determine what to do,
         # 0=treat as black, 1=treat as white
-        GREY_BEFORE = 0  # 1  # grey option bit mask to specify how to handle grey before the first white
-        GREY_CENTRE = 0  # 2  # grey option bit mask to specify how to handle grey between before and after white
-        GREY_AFTER  = 0  # 4  # grey option bit mask to specify how to handle grey after the last white
-        GREY_ONLY   = 8  # 8  # grey option bit mask to specify how to handle grey when there is no white
+        GREY_BEFORE_MASK = 1  # grey option bit mask to specify how to handle grey before the first white
+        GREY_CENTRE_MASK = 2  # grey option bit mask to specify how to handle grey between before and after white
+        GREY_AFTER_MASK  = 4  # grey option bit mask to specify how to handle grey after the last white
+        GREY_ONLY_MASK   = 8  # grey option bit mask to specify how to handle grey when there is no white
+        GREY_BEFORE = 0  # GREY_BEFORE_MASK
+        GREY_CENTRE = 0  # GREY_CENTRE_MASK
+        GREY_AFTER  = 0  # GREY_AFTER_MASK
+        GREY_ONLY   = GREY_ONLY_MASK
 
         def drop_dodgy_zero(x, option, digits, logging=False):
             nonlocal header
@@ -222,19 +234,19 @@ class Cluster:
             """ option is a bit mask of 3 bits, bit 0 = before white, 1 = between, 2 = after
                 a 1 in that bit means treat grey as white and a 0 means treat grey as black
                 """
-            if option & GREY_BEFORE == 0:
+            if option & GREY_BEFORE_MASK == 0:
                 before = '0'
             else:
                 before = '1'
-            if option & GREY_CENTRE == 0:
+            if option & GREY_CENTRE_MASK == 0:
                 centre = '0'
             else:
                 centre = '1'
-            if option & GREY_AFTER == 0:
+            if option & GREY_AFTER_MASK == 0:
                 after = '0'
             else:
                 after = '1'
-            if option & GREY_ONLY == 0:
+            if option & GREY_ONLY_MASK == 0:
                 only = '0'
             else:
                 only = '1'
@@ -292,6 +304,13 @@ class Cluster:
                 # there is a transition to white but not from white, that means it ran into the end
                 last_white = len(pixels) - 1
             # endregion
+            # region ToDo: HACK experiment on edge 'snapping' - does not work
+            # options = []
+            # # ToDo: do options to treat rising to mid as min or max and separate option for falling to mid
+            # for mask, grey_as in ((GREY_BEFORE_MASK, const.MIN_LUMINANCE), (GREY_AFTER_MASK, const.MAX_LUMINANCE)):
+            #     slice = Allocate(pixels, codec.Codec.SPAN, grey_as)
+            #     options.append((mask, slice.bits, slice.error))
+            # endregion ToDo: HACKEND
             # region build the options for the grey treatment...
             # the options are: grey before first white as black or white
             #                  grey after last white as black or white
@@ -343,18 +362,24 @@ class Cluster:
                     else:
                         # can't get here
                         raise Exception('Got unexpected MID_LUMINANCE')
-                options.append((option, slice))
+                options.append((option, slice, 0.0))
                 if has_grey == 0:
                     # there are no greys, so don't bother with the rest
                     break
-            # get rid of duplicates (this can happen if there are no greys before but some after, etc)
+            # endregion
+            # region get rid of duplicates...
             if len(options) > 1:
                 for option in range(len(options)-1, 0, -1):
-                    _, this_bits = options[option]
+                    _, this_bits, this_error = options[option]
                     for other in range(option):
-                        _, other_bits = options[other]
+                        _, other_bits, other_error = options[other]
                         if this_bits == other_bits:
-                            del options[option]
+                            if this_error < other_error:
+                                # keep this, chuck other
+                                del options[other]
+                            else:
+                                # chuck this, keep other
+                                del options[option]
                             break
             # endregion
             # region build the digits for each option...
@@ -365,21 +390,23 @@ class Cluster:
                 illegal = []
                 big_error = []
                 bad_zero = []
-            for option, (mask, bits) in enumerate(options):
+            for option, (_, bits, error) in enumerate(options):
                 if not self.decoder.qualify(bits):
                     if self.logging:
                         disqualified.append(option)
                     slice.append([])  # set an empty digit list
                     continue
-                raw_digits = self.decoder.classify(bits)
+                raw_digits = self.decoder.classify(bits, error)
+                digits = raw_digits.copy()  # protect original raw_digits for log messages
+                # drop digits with an excessive error (reduces subsequent work load)
+                digits, dropped = Cluster.drop_bad_digits(digits)
+                # Don't log these, it generates too much noise with very little meaning
+                # if self.logging and dropped > 0:
+                #     big_error.append((option, raw_digits, dropped))
                 # drop illegal digits
-                digits, dropped = Cluster.drop_illegal_digits(raw_digits.copy())
+                digits, dropped = Cluster.drop_illegal_digits(digits)
                 if self.logging and dropped > 0:
                     illegal.append((option, raw_digits, dropped))
-                # drop digits with an excessive error
-                digits, dropped = Cluster.drop_bad_digits(digits)
-                if self.logging and dropped > 0:
-                    big_error.append((option, raw_digits, dropped))
                 # drop a zero if it has a choice with a small-ish error
                 dropped = drop_dodgy_zero(x, option, digits)
                 if self.logging and dropped > 0:
@@ -392,31 +419,31 @@ class Cluster:
                         self._log(header)
                         header = None
                     for option in disqualified:
-                        mask, bits = options[option]
-                        self._log('    {}{} ignoring non-qualifying bits {}'.
-                                  format(prefix, show_grey_option(mask), Cluster.show_bits(bits)))
+                        mask, bits, error = options[option]
+                        self._log('    {}{}(err={:.2f}) ignoring non-qualifying bits {}'.
+                                  format(prefix, show_grey_option(mask), error, Cluster.show_bits(bits)))
                         prefix = '    '
                     for option, raw_digits, dropped in illegal:
-                        mask, bits = options[option]
-                        self._log('    {}{} dropping {} illegal choices from {}'.
-                                  format(prefix, show_grey_option(mask), dropped, Cluster.show_options(raw_digits)))
+                        mask, bits, error = options[option]
+                        self._log('    {}{}(err={:.2f}) dropping {} illegal choices from {}'.
+                                  format(prefix, show_grey_option(mask), error, dropped, Cluster.show_options(raw_digits)))
                         prefix = '    '
                     for option, raw_digits, dropped in big_error:
-                        mask, bits = options[option]
-                        self._log('    {}{} dropping {} big error choices from {}'.
-                                  format(prefix, show_grey_option(mask), dropped, Cluster.show_options(raw_digits)))
+                        mask, bits, error = options[option]
+                        self._log('    {}{}(err={:.2f}) dropping {} big error choices from {}'.
+                                  format(prefix, show_grey_option(mask), error, dropped, Cluster.show_options(raw_digits)))
                         prefix = '    '
                     for option, raw_digits, dropped in bad_zero:
-                        mask, bits = options[option]
-                        self._log('    {}{} dropping {} zero choices from {}'.
-                                  format(prefix, show_grey_option(mask), dropped, Cluster.show_options(raw_digits)))
+                        mask, bits, error = options[option]
+                        self._log('    {}{}(err={:.2f}) dropping {} zero choices from {}'.
+                                  format(prefix, show_grey_option(mask), error, dropped, Cluster.show_options(raw_digits)))
                         prefix = '    '
             # endregion
             # region merge the grey options...
             # get rid of dodgy 0's, a 'dodgy' 0 is one where option 0 is black but some other is not
             # NB: option 0 is where all greys are considered to be black
-            grey_as_black = slice[0]
-            if len(grey_as_black) > 0 and grey_as_black[0][0] == 0:
+            first_digits = slice[0]
+            if len(first_digits) > 0 and first_digits[0][0] == 0:
                 # it thinks its a zero, so check others
                 invalid = 0
                 for option in range(1, len(slice)):
@@ -426,7 +453,8 @@ class Cluster:
                         # also invalid, we drop the 0, so just count them here
                         invalid += 1
                         continue
-                    if slice[option][0][0] != 0:
+                    other_digits = slice[option]
+                    if other_digits[0][0] != 0:
                         # some other option thinks it is not 0, so its a dodgy 0, drop all in that slice
                         if self.logging:
                             if header is not None:
@@ -434,7 +462,7 @@ class Cluster:
                                 header = None
                             self._log('    {}{} dropping zero slice: {} in favour of {}'.
                                       format(prefix, show_grey_option(option),
-                                             Cluster.show_options(slice[0]), Cluster.show_options(slice[option])))
+                                             Cluster.show_options(first_digits), Cluster.show_options(other_digits)))
                             prefix = '    '
                         del slice[0]
                         break
@@ -445,19 +473,22 @@ class Cluster:
                             self._log(header)
                             header = None
                         self._log('    {}{} dropping zero: {} all its other {} options are invalid'.
-                                  format(prefix, show_grey_option(0), Cluster.show_options(slice[0]), invalid))
+                                  format(prefix, show_grey_option(0), Cluster.show_options(first_digits), invalid))
                         prefix = '    '
                     del slice[0]
             # join all the (remaining) slices so we can find the best choice for each digit
             choices = []
-            for option in slice:
-                choices += option
-            choices.sort(key=lambda d: (d[0], d[1]))  # put like digits together in least error order
+            for digits in slice:
+                for digit, error in digits:
+                    choices.append((digit, error))
+            choices.sort(key=lambda k: (k[0], k[1]))  # put like digits together in least error order
             for choice in range(len(choices) - 1, 0, -1):
-                if choices[choice][0] == choices[choice-1][0]:
+                this_digit , _ = choices[choice]
+                other_digit, _ = choices[choice-1]
+                if this_digit == other_digit:
                     # duplicate digit, we're on the worst one, so dump that
                     del choices[choice]
-            choices.sort(key=lambda d: d[1])  # put merged list into least error order
+            choices.sort(key=lambda k: k[1])  # put merged list into least error order
             drop_dodgy_zero(x, 0, choices, self.logging)  # JIC some percolated up
             # endregion
             slices.append(choices)
@@ -466,85 +497,116 @@ class Cluster:
         # an ambiguous choice is when a digit has (nearly) equal error choices,
         # we try to find a choice that matches one of its non-ambiguous neighbours,
         # if found, resolve to that, otherwise drop the digit
-        for x, slice in enumerate(slices):
-            best_choice = first_good_choice(slice)
-            if best_choice is None:
-                # got no, or an ambiguous, choice, check its neighbours
-                left_x = (x - 1) % max_x
-                right_x = (x + 1) % max_x
-                left_choice = first_good_choice(slices[left_x])
-                right_choice = first_good_choice(slices[right_x])
-                if left_choice is None and right_choice is None:
-                    # both neighbours are ambiguous too, so just drop this one
-                    if len(slice) > 0:
-                        # there is something to drop
+        # there may be a series of consecutive ambiguities, in which case the ends of
+        # series get resolved but not the centre, so we iterate until either the whole
+        # series has been resolved or no more resolutions are possible, the remaining
+        # ambiguous digits are dropped
+        # region resolve ambiguities...
+        resolutions = 1
+        passes      = 0
+        while resolutions > 0:
+            resolutions = 0
+            passes     += 1
+            for x, slice in enumerate(slices):
+                best_choice = first_good_choice(slice)
+                if best_choice is None:
+                    # got no, or an ambiguous, choice, check its neighbours
+                    left_x = (x - 1) % max_x
+                    right_x = (x + 1) % max_x
+                    left_choice = first_good_choice(slices[left_x])
+                    right_choice = first_good_choice(slices[right_x])
+                    if left_choice is None and right_choice is None:
+                        # both neighbours are ambiguous too, leave for next pass
+                        continue
+                    # there is scope to resolve this ambiguity
+                    if self.logging:
+                        if header is not None:
+                            self._log(header)
+                            header = None
+                    # if only 1 choice, inherit the other (that makes them the same in comparisons below)
+                    if left_choice is None:
+                        left_choice = right_choice
+                        left_x      = right_x
+                    if right_choice is None:
+                        right_choice = left_choice
+                        right_x      = left_x
+                    # choose best neighbour
+                    left_digit , left_error  = left_choice
+                    right_digit, right_error = right_choice
+                    if len(slice) < 2:
+                        # we've got no choice, so just inherit our best neighbour
+                        if left_error < right_error:
+                            if self.logging:
+                                self._log('    {:3n}:(pass {}) resolving ambiguity of {} with neighbour {}: {}'.
+                                          format(x, passes, Cluster.show_options(slices[x]),
+                                                 left_x, Cluster.show_options(slices[left_x])))
+                            slices[x] = [left_choice]
+                        else:
+                            if self.logging:
+                                self._log('    {:3n}:(pass {}) resolving ambiguity of {} with neighbour {}: {}'.
+                                          format(x, passes, Cluster.show_options(slices[x]),
+                                                 right_x, Cluster.show_options(slices[right_x])))
+                            slices[x] = [right_choice]
+                        resolutions += 1
+                        continue
+                    # we have choices to resolve
+                    digit1, error1 = slice[0]
+                    digit2, error2 = slice[1]
+                    left_match  = (digit1 == left_digit or digit2 == left_digit)
+                    right_match = (digit1 == right_digit or digit2 == right_digit)
+                    if left_match and right_match:
+                        # both sides match, pick the one with the least error
+                        if left_error < right_error:
+                            # left is best, so drop right
+                            right_match = False
+                        else:
+                            # right is best so drop left
+                            left_match = False
+                    if left_match:
+                        # got a left match use it
                         if self.logging:
-                            if header is not None:
-                                self._log(header)
-                                header = None
-                            self._log('    {}: dropping ambiguous choices: {}'.
-                                      format(x, Cluster.show_options(slices[x])))
-                        slices[x] = []
+                            self._log('    {:3n}:(pass {}) resolving ambiguity of {} with neighbour {}: {}'.
+                                      format(x, passes, Cluster.show_options(slices[x]),
+                                             left_x, Cluster.show_options(slices[left_x])))
+                        if digit1 == left_digit:
+                            # first choice is best, dump the 2nd
+                            del slice[1]
+                        else:
+                            # second choice is best, dump the first
+                            del slice[0]
+                        resolutions += 1
+                        continue
+                    if right_match:
+                        # got a right match use it
+                        if self.logging:
+                            self._log('    {:3n}:(pass {}) resolving ambiguity of {} with neighbour {}: {}'.
+                                      format(x, passes, Cluster.show_options(slices[x]),
+                                             right_x, Cluster.show_options(slices[right_x])))
+                        if digit1 == right_digit:
+                            # first choice is best, dump the second
+                            del slice[1]
+                        else:
+                            # second choice is best, dump the first
+                            del slice[0]
+                        resolutions += 1
+                        continue
+                    # neither side matches, leave to next pass
                     continue
-                # there is scope to resolve this ambiguity
+        # endregion
+        # region do final pass to drop remaining ambiguous choices
+        for x, slice in enumerate(slices):
+            if Cluster.is_ambiguous(slice):
+                # unresolvable ambiguity - drop it
                 if self.logging:
                     if header is not None:
                         self._log(header)
                         header = None
-                # if only 1 choice, inherit the other (that makes them the same in comparisons below)
-                if left_choice is None:
-                    left_choice = right_choice
-                    left_x = right_x
-                if right_choice is None:
-                    right_choice = left_choice
-                    right_x = left_x
-                # choose best neighbour
-                left_digit, left_error = left_choice
-                right_digit, right_error = right_choice
-                if len(slice) < 2:
-                    # we've got no choice, so just inherit our best neighbour
-                    if left_error < right_error:
-                        if self.logging:
-                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
-                                      format(x, Cluster.show_options(slices[x]),
-                                             left_x, Cluster.show_options(slices[left_x])))
-                        slices[x] = [left_choice]
-                    else:
-                        if self.logging:
-                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
-                                      format(x, Cluster.show_options(slices[x]),
-                                             right_x, Cluster.show_options(slices[right_x])))
-                        slices[x] = [right_choice]
-                    continue
-                # we have choices to resolve
-                digit1, error1 = slice[0]
-                digit2, error2 = slice[1]
-                if left_error < right_error:
-                    # try left neighbour first
-                    if digit1 == left_digit or digit2 == left_digit:
-                        # got a match use it
-                        if self.logging:
-                            self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
-                                      format(x, Cluster.show_options(slices[x]),
-                                             left_x, Cluster.show_options(slices[left_x])))
-                        slice[0] = left_choice
-                        del slice[1]
-                        continue
-                # try right neighbour
-                if digit1 == right_digit or digit2 == right_digit:
-                    # got a match use it
-                    if self.logging:
-                        self._log('    {}: resolving ambiguity of {} with neighbour {}: {}'.
-                                  format(x, Cluster.show_options(slices[x]),
-                                         right_x, Cluster.show_options(slices[right_x])))
-                    slice[0] = right_choice
-                    del slice[1]
-                    continue
-                # neither side matches, just drop it
-                if self.logging:
-                    self._log('    {}: dropping ambiguous choices: {}'.format(x, Cluster.show_options(slices[x])))
+                    self._log('    {:3n}:(pass {}) dropping unresolvable ambiguous choices: {}'.
+                              format(x, passes, Cluster.show_options(slices[x])))
                 slices[x] = []
-                continue
+        if self.logging and header is None:
+            self._log('    {} ambiguity passes'.format(passes))
+        # endregion
         # endregion
         # region resolve singletons...
         # a singleton is a single slice bordered both sides by some valid digit
@@ -563,7 +625,7 @@ class Cluster:
                 # inherit best neighbour
                 pass
             else:
-                this_digit, this_error = this_slice[0]
+                this_digit, _ = this_slice[0]
                 if left_digit == this_digit or right_digit == this_digit:
                     # not a potential singleton
                     continue
@@ -586,13 +648,13 @@ class Cluster:
                     header = None
             if left_error < right_error:
                 if self.logging:
-                    self._log('    {}: resolve singleton {} to {}: {}'.
+                    self._log('    {:3n}: resolve singleton {} to {}: {}'.
                               format(x, Cluster.show_options(this_slice),
                                      left_x, Cluster.show_options(left_slice)))
                 slices[x] = left_slice
             else:
                 if self.logging:
-                    self._log('    {}: resolve singleton {} to {}: {}'.
+                    self._log('    {:3n}: resolve singleton {} to {}: {}'.
                               format(x, Cluster.show_options(this_slice),
                                      right_x, Cluster.show_options(right_slice)))
                 slices[x] = right_slice
@@ -604,7 +666,7 @@ class Cluster:
                 header = None
             self._log('    initial slices (fail reason {}):'.format(reason))
             for x, options in enumerate(slices):
-                self._log('        {}: options={}'.format(x, Cluster.show_options(options)))
+                self._log('        {:3n}: options={}'.format(x, Cluster.show_options(options)))
         # endregion
         # region build digit list...
         digits = []
@@ -651,7 +713,7 @@ class Cluster:
             digits.append(last_digit)
         # endregion
 
-        # save slices in the extent for others to use
+        # save slices in the extent for others to use  ToDo: get rid of the need for this
         extent.slices = slices
 
         if self.logging:
@@ -660,7 +722,7 @@ class Cluster:
                 header = None
             self._log('    {} digits (fail reason {}):'.format(len(digits), reason))
             for item, digit in enumerate(digits):
-                self._log('        {}: {}'.format(item, digit))
+                self._log('        {:2n}: {}'.format(item, digit))
 
         if self.save_images:
             plot = self.transform.copy(buckets)
@@ -726,6 +788,8 @@ class Cluster:
                 return the digit, how many there are and the average error,
                 the return info is sufficient to create a Scan.Digit
                 """
+            # ToDo: this should be a separate function and/or part of find_all_digits,
+            #       as is here, the structure of slices is bleeding too far
             second_choice = [[0, 0] for _ in range(Cluster.DIGIT_BASE)]
             for x in range(slice_start, slice_end):
                 options = slices[x % len(slices)]
@@ -1044,3 +1108,231 @@ class Cluster:
             self._log('decode_digits: num:{}, code:{}, doubt:{}, error:{:.3f} from: {}'.
                       format(number, code, doubt, error, msg[2:]))
         return structs.Result(number, doubt + error, code, digits)
+
+class Allocate:
+    """ given a ring span and a pixel slice allocate transitions to ring edges,
+        transitions can be either rising or falling,
+        a detected transition is allocated to its nearest ring edge (min squared distance),
+        along with its distance (squared) and a 'strength' (3 steps -> strongest, strong, weak),
+        ring edges are calculated from the span and the length of the pixel slice,
+        the edge list is a list of offsets into the pixel slice where a transition is expected,
+    """
+
+    NO_EDGE        = 0
+    STRONGEST_EDGE = 1  # lists are sorted ascending on this, so make best lowest number
+    STRONG_EDGE    = 2
+    WEAK_EDGE      = 3
+
+    RISING_EDGE    = 1  # is the bit value of the edge 'destination' (i.e. rises to 1)
+    FALLING_EDGE   = 0  # ..similar (i.e. falls to 0)
+
+    def __init__(self, pixels, span, grey_as):
+        self.pixels        = pixels
+        self.span          = span
+        self.width         = len(pixels) / span
+        self.ideal_rising  = self.make_ideal_edges(self.width, span, -1)
+        self.ideal_falling = self.make_ideal_edges(self.width, span, 0)
+
+        self.actual_rising   = self.make_actual_edges(pixels, const.MIN_LUMINANCE, const.MAX_LUMINANCE, grey_as, 0)
+        self.actual_falling  = self.make_actual_edges(pixels, const.MAX_LUMINANCE, const.MIN_LUMINANCE, grey_as, 0)
+
+        self.matched_rising  = self.match_edges(self.ideal_rising , self.actual_rising , self.width, Allocate.RISING_EDGE)
+        self.matched_falling = self.match_edges(self.ideal_falling, self.actual_falling, self.width, Allocate.FALLING_EDGE)
+
+        self.edges            = self.make_combined_edges(self.matched_rising, self.matched_falling)
+        self.bits, self.error = self.make_slice(self.edges, len(pixels))
+
+    @staticmethod
+    def make_ideal_edges(width, span, exclude=None):
+        # width is the width of a single ring
+        # span is how many rings there are
+        edges = []
+        for edge in range(1, span):  # NB: the inner and outer edges are not included
+            edges.append(edge * width)
+        if exclude is not None:
+            del edges[exclude]
+        # returned edges are in ascending offset order
+        return edges
+
+    @staticmethod
+    def make_actual_edges(samples, from_level, to_level, mid_level=const.MID_LUMINANCE, offset=0):
+        # there are 3 possible transitions in either direction:
+        #  from --> to   (strongest +3)
+        #  from --> mid  (weak      +1)
+        #  mid  --> to   (strong    +2)
+        #  nothing       (no edge    0)
+        edges = []
+        prev_level = None
+        for bit, this_level in enumerate(samples):
+            if this_level == const.MID_LUMINANCE:
+                this_level = mid_level
+            if prev_level is None:
+                prev_level = this_level  # don't want a transition on the first sample (yet)
+            if prev_level == from_level and this_level == to_level:
+                strength = Allocate.STRONGEST_EDGE
+            elif prev_level == from_level and this_level == const.MID_LUMINANCE:
+                strength = Allocate.WEAK_EDGE
+            elif prev_level == const.MID_LUMINANCE and this_level == to_level:
+                strength = Allocate.STRONG_EDGE
+            else:
+                strength = Allocate.NO_EDGE
+            if strength != Allocate.NO_EDGE:
+                edges.append((bit+offset, strength))
+            prev_level = this_level
+        if len(edges) == 0:
+            # found no edges, what to do depends on context (first sample value and the edge direction)
+            first_sample = samples[0]
+            if first_sample == const.MID_LUMINANCE:
+                first_sample = mid_level
+            if from_level > to_level:
+                # looking for falling edges and found none
+                if first_sample == const.MIN_LUMINANCE:
+                    # got leading 0's, treat initial sample as falling
+                    edges.append((0, Allocate.STRONG_EDGE))
+                else:
+                    # its got leading not-0's, treat final sample as falling
+                    edges.append((len(samples), Allocate.STRONG_EDGE))
+            else:
+                # looking for rising edges and found none
+                if first_sample == const.MIN_LUMINANCE:
+                    # its all 0's, treat final sample as rising
+                    edges.append((len(samples), Allocate.STRONG_EDGE))
+                else:
+                    # its got leading not-0's, treat initial sample as rising
+                    edges.append((0, Allocate.STRONG_EDGE))
+        # returned edges are in ascending offset order
+        return edges
+
+    @staticmethod
+    def match_edges(ideals, actuals, width, direction):
+        # ideal is a list of expected edge offsets
+        # actual is a list of actual offsets and their strengths
+        # make a list of adjusted edges with an error (in range 0..1)
+        max_error = width * width
+        edges = []
+        for bit, ideal in enumerate(ideals):
+            for actual, strength in actuals:
+                error = ideal - actual
+                error *= error
+                error /= max_error  # now in range 0..1
+                if error < 1.0:
+                    # beyond one width error is meaningless, so only want those within a width of expectation
+                    edges.append((bit, ideal, actual, strength, error))
+        # we may have one actual assigned to two ideals,
+        # in this case we want to chuck out the worst,
+        # so sort on actual then error then strength then ideal and filter duplicates
+        edges.sort(key=lambda k: (k[2], k[4], k[3], k[1]))
+        for edge in range(len(edges)-1, 0, -1):
+            _, _, this_actual, this_strength, this_error = edges[edge]
+            _, _, prev_actual, prev_strength, prev_error = edges[edge-1]
+            if this_actual == prev_actual:
+                # got a dup
+                if this_error > prev_error:
+                    # this is worse, chuck it
+                    del edges[edge]
+                elif this_strength > prev_strength:
+                    # this is same error but weaker, chuck it
+                    del edges[edge]
+                else:
+                    # same error, same strength, so we've got ambiguity,
+                    # ambiguity only matters if there is no other choice at an edge
+                    # or other choices have a bigger error,
+                    # to be ambiguous an actual edge must be equidistant to two ideal edges,
+                    # to do that its error must be at a maximum, so if there are other choices
+                    # they should be better, for a rising edge we dump the latter, for a falling the former
+                    if direction == Allocate.RISING_EDGE:
+                        del edges[edge]
+                    else:
+                        del edges[edge-1]
+        # re-sort by ideal then error then strength, so we can produce ideal ordered result
+        edges.sort(key=lambda k: (k[1], k[4], k[3]))
+        matched = []
+        for bit, ideal, actual, strength, error in edges:
+            matched.append((ideal, actual, strength, error))
+        # NB: an actual may match one or two ideals (i.e. can be ambiguous)
+        #     an ideal may have 0 or more (if the pixel slice has lots of short spikes)
+        # returned matched edges are in ascending offset order
+        return matched
+
+    @staticmethod
+    def make_combined_edges(rising_matches, falling_matches):
+        NO_POSITION = 1 << 30  # an edge position we know does not exist
+        edges       = []
+        rising_bit  = 0
+        falling_bit = 0
+        while rising_bit < len(rising_matches) or falling_bit < len(falling_matches):
+            if rising_bit < len(rising_matches):
+                rising     = rising_matches[rising_bit]
+                rising_inc = 1
+            else:
+                rising     = []
+                rising_inc = 0
+            if len(rising) > 0:
+                rising_pos = rising[0]
+            else:
+                rising_pos = NO_POSITION
+            if falling_bit < len(falling_matches):
+                falling     = falling_matches[falling_bit]
+                falling_inc = 1
+            else:
+                falling     = []
+                falling_inc = 0
+            if len(falling) > 0:
+                falling_pos = falling[0]
+            else:
+                falling_pos = NO_POSITION
+            if rising_pos < falling_pos:
+                # got only a rising edge here
+                rising_bit += rising_inc
+                edges.append((Allocate.RISING_EDGE, rising))
+            elif falling_pos < rising_pos:
+                # got only a falling edge here
+                falling_bit += falling_inc
+                edges.append((Allocate.FALLING_EDGE, falling))
+            else:
+                # got both here, resolve which to keep
+                rising_bit  += rising_inc
+                falling_bit += falling_inc
+                if len(rising) > len(falling):
+                    # got a rising edge
+                    edges.append((Allocate.RISING_EDGE, rising))
+                elif len(rising) < len(falling):
+                    # got a falling edge
+                    edges.append((Allocate.FALLING_EDGE, falling))
+                else:
+                    # both same, ignore it (they cancel out)
+                    continue
+        return edges
+
+    @staticmethod
+    def make_slice(edges, length):
+        # a slice is a pixel list that spans the original pixels and an error (0..1)
+        # they are constructed from rising edges to their subsequent falling edges
+        # there can be zero or more matches for every ideal edge position
+        # edges reflect a perfect digit, translate that into the equivalent pixel list
+        slice            = [None for _ in range(length)]
+        current_pixel    = 0
+        current_position = 0
+        current_error    = 0
+        current_ideal    = -1  # an offset we know does not exist
+        for direction, (ideal, actual, strength, error) in edges:
+            # ToDo: extend to cater for ambiguity, how?
+            if ideal == current_ideal:
+                # already done this one (the least error version was first)
+                continue
+            next_position = int(round(ideal))
+            for pos in range(current_position, next_position):
+                if pos >= length:
+                    # gone off the end
+                    break
+                slice[pos] = current_pixel
+            current_ideal = ideal
+            current_position = next_position
+            current_pixel    = direction
+            current_error   += error
+        error = current_error / max(len(edges), 1)
+        # now fill to the end (NB: this also catches the no edges case, i.e. a '0' or a '7')
+        for pos in range(current_position, length):
+            slice[pos] = current_pixel
+        # slice is now in a form that can be given to Codec.qualify and Codec.classify
+        return slice, error

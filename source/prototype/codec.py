@@ -31,7 +31,6 @@
 import math
 import rand
 
-
 class Codec:
     """ Encode and decode a code-word or a code-block,
         a code-word is a number with specific properties,
@@ -49,15 +48,15 @@ class Codec:
     # encoding is a bit pattern across the data rings for each digit (a 0 at either end is implied)
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     # if you do change it, also make appropriate changes to BIT_WEIGHTS and NOT_ALLOWED_ERROR
-    ENCODING = [  # allowed, coding
-                (True,  [0, 0, 0]),
-                (True,  [0, 0, 1]),
-                (True,  [0, 1, 0]),
-                (True,  [0, 1, 1]),
-                (True,  [1, 0, 0]),
-                (False, [1, 0, 1]),  # never use this, it creates a double radial 'pulse'
-                (True,  [1, 1, 0]),
-                (False, [1, 1, 1]),  # too easily confused with 3 or 6
+    ENCODING = [  # allowed, coding, weight (used to scale errors for easily confused classifications, e.g. 3->1 or 2)
+                (True,  [0, 0, 0], 1  ),  # 0
+                (True,  [0, 0, 1], 1  ),  # 1
+                (True,  [0, 1, 0], 1  ),  # 2
+                (True,  [0, 1, 1], 1  ),  # 3 - can be confused with 2 and 1
+                (True,  [1, 0, 0], 1  ),  # 4
+                (False, [1, 0, 1], 1  ),  # 5 never use this, it creates a double radial 'pulse'
+                (True,  [1, 1, 0], 1  ),  # 6 - can be confused with 2 and 4
+                (False, [1, 1, 1], 1  ),  # 7 do not use this, its too easily confused with 3 or 6
                ]
 
     SYNC_DIGIT = 0  # must be allowed above, otherwise arbitrary, zero is the easiest to detect
@@ -436,11 +435,12 @@ class Codec:
 
         return True
 
-    def classify(self, actual: [int]):
+    def classify(self, actual: [int], source_error: float=0.0):
         """ given a pixel slice, return a list of the most likely digits it represents with an error,
             the pixel list must be a list of 0's, 1's or None's and must have at least SPAN bits,
             every viable digit is returned in least error first order, the list may be empty
             all errors are in the range 0..1, with 0=perfect and 1=utter crap,
+            the given source error is just added to the digit error (and capped at 1.0)
             """
 
         def compare_pixel_slices(ideal, actual, spans, weights):
@@ -544,7 +544,8 @@ class Codec:
                 if error > 1.0:
                     raise Exception('Zero error ({:.2f}) plus ones error ({:.2f}) is greater than 1.0 for digit {}'.
                                     format(zero_error, ones_error, digit))
-                digits.append((digit, error))
+                error *= Codec.ENCODING[digit][2]  # scale by the digit weight
+                digits.append((digit, min(error + source_error, 1.0)))
 
         # put into least error first order
         digits.sort(key=lambda d: d[1])
@@ -564,7 +565,7 @@ class Codec:
         """ given a set of data rings for a single digit return the corresponding digit,
             it is, in a sense, the opposite to _rings for a single digit
             """
-        for digit, (allowed, coding) in enumerate(Codec.ENCODING):
+        for digit, (allowed, coding, weight) in enumerate(Codec.ENCODING):
             if not allowed:
                 # illegal digit
                 continue
@@ -598,7 +599,7 @@ class Codec:
             """
         if digit < 0 or digit >= len(Codec.ENCODING):
             return None
-        allowed, coding = Codec.ENCODING[digit]
+        allowed, coding, weight = Codec.ENCODING[digit]
         if only_if_allowed and not allowed:
             return None
         return coding
