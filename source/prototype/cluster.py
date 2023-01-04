@@ -17,6 +17,7 @@
 import const
 import structs
 import codec
+import frame
 
 class Cluster:
     """ provide functions to detect digits within an extent """
@@ -189,7 +190,19 @@ class Cluster:
 
         buckets = extent.buckets
         max_x, max_y = buckets.size()
+        inner = extent.inner
+        outer = extent.outer
         reason = None
+
+        # region ToDo: HACK...
+        # cells = Cells(self.scan, extent)
+        # self._unload(cells.target, '04-target')
+        # buckets = cells.buckets
+        # max_x, max_y = buckets.size()
+        # inner = [0 for _ in range(max_x)]
+        # outer = [max_y - 1 for _ in range(max_x)]
+        # reason = None
+        # endregion ToDO: HACKEND
 
         # a 0 in these bit positions mean treat grey as black, else treat as white
         # these are AND masks, when we get a grey in the 'before', 'centre' or 'after' context in a slice
@@ -253,8 +266,6 @@ class Cluster:
             return '(grey {}{}{}{})'.format(before, centre, after, only)
 
         # region generate likely digit choices for each x...
-        inner = extent.inner
-        outer = extent.outer
         slices = []
         for x in range(max_x):
             start_y = inner[x] + 1  # get past the white bullseye, so start at first black
@@ -304,12 +315,12 @@ class Cluster:
                 # there is a transition to white but not from white, that means it ran into the end
                 last_white = len(pixels) - 1
             # endregion
-            # region ToDo: HACK experiment on edge 'snapping' - does not work
-            # options = []
-            # # ToDo: do options to treat rising to mid as min or max and separate option for falling to mid
-            # for mask, grey_as in ((GREY_BEFORE_MASK, const.MIN_LUMINANCE), (GREY_AFTER_MASK, const.MAX_LUMINANCE)):
-            #     slice = Allocate(pixels, codec.Codec.SPAN, grey_as)
-            #     options.append((mask, slice.bits, slice.error))
+            # region ToDo: HACK experiment on edge 'snapping'
+            options = []
+            # ToDo: do options to treat rising to mid as min or max and separate option for falling to mid
+            for mask, grey_as in ((GREY_BEFORE_MASK, const.MIN_LUMINANCE), (GREY_AFTER_MASK, const.MAX_LUMINANCE)):
+                slice = Allocate(pixels, codec.Codec.SPAN, grey_as)
+                options.append((mask, slice.bits, slice.error))
             # endregion ToDo: HACKEND
             # region build the options for the grey treatment...
             # the options are: grey before first white as black or white
@@ -319,53 +330,53 @@ class Cluster:
             # we classify the pixels adjusted for these options, then pick the best,
             # this has the effect of sliding the central pulse up/down around the grey boundaries
             # there are 16 combinations of greys - before b/w * between b/w * after b/w * no white
-            options = []
-            for option in range(16):
-                # option is a bit mask of 4 bits, bit 0 = before white, 1 = between, 2 = after, 3 = no white
-                # a 1 in that bit means treat grey as white and a 0 means treat grey as black
-                # NB: option 0 must be to consider *all* greys as black
-                slice = []
-                for y, pixel in enumerate(pixels):
-                    if pixel == const.MID_LUMINANCE:
-                        if has_white == 0:
-                            if option & GREY_ONLY == 0:
-                                # treat as black
-                                pixel = const.MIN_LUMINANCE
-                            else:
-                                # treat as white
-                                pixel = const.MAX_LUMINANCE
-                        elif y < first_white:
-                            if option & GREY_BEFORE == 0:
-                                # treat before as black
-                                pixel = const.MIN_LUMINANCE
-                            else:
-                                # treat before as white
-                                pixel = const.MAX_LUMINANCE
-                        elif y > last_white:
-                            if option & GREY_AFTER == 0:
-                                # treat after as black
-                                pixel = const.MIN_LUMINANCE
-                            else:
-                                # treat after as white
-                                pixel = const.MAX_LUMINANCE
-                        else:  # if y >= first_white and y <= last_white:
-                            if option & GREY_CENTRE == 0:
-                                # treat between as black
-                                pixel = const.MIN_LUMINANCE
-                            else:
-                                # treat between as white
-                                pixel = const.MAX_LUMINANCE
-                    if pixel == const.MIN_LUMINANCE:
-                        slice.append(0)
-                    elif pixel == const.MAX_LUMINANCE:
-                        slice.append(1)
-                    else:
-                        # can't get here
-                        raise Exception('Got unexpected MID_LUMINANCE')
-                options.append((option, slice, 0.0))
-                if has_grey == 0:
-                    # there are no greys, so don't bother with the rest
-                    break
+            # options = []
+            # for option in range(16):
+            #     # option is a bit mask of 4 bits, bit 0 = before white, 1 = between, 2 = after, 3 = no white
+            #     # a 1 in that bit means treat grey as white and a 0 means treat grey as black
+            #     # NB: option 0 must be to consider *all* greys as black
+            #     slice = []
+            #     for y, pixel in enumerate(pixels):
+            #         if pixel == const.MID_LUMINANCE:
+            #             if has_white == 0:
+            #                 if option & GREY_ONLY == 0:
+            #                     # treat as black
+            #                     pixel = const.MIN_LUMINANCE
+            #                 else:
+            #                     # treat as white
+            #                     pixel = const.MAX_LUMINANCE
+            #             elif y < first_white:
+            #                 if option & GREY_BEFORE == 0:
+            #                     # treat before as black
+            #                     pixel = const.MIN_LUMINANCE
+            #                 else:
+            #                     # treat before as white
+            #                     pixel = const.MAX_LUMINANCE
+            #             elif y > last_white:
+            #                 if option & GREY_AFTER == 0:
+            #                     # treat after as black
+            #                     pixel = const.MIN_LUMINANCE
+            #                 else:
+            #                     # treat after as white
+            #                     pixel = const.MAX_LUMINANCE
+            #             else:  # if y >= first_white and y <= last_white:
+            #                 if option & GREY_CENTRE == 0:
+            #                     # treat between as black
+            #                     pixel = const.MIN_LUMINANCE
+            #                 else:
+            #                     # treat between as white
+            #                     pixel = const.MAX_LUMINANCE
+            #         if pixel == const.MIN_LUMINANCE:
+            #             slice.append(0)
+            #         elif pixel == const.MAX_LUMINANCE:
+            #             slice.append(1)
+            #         else:
+            #             # can't get here
+            #             raise Exception('Got unexpected MID_LUMINANCE')
+            #     options.append((option, slice, 0.0))
+            #     if has_grey == 0:
+            #         # there are no greys, so don't bother with the rest
+            #         break
             # endregion
             # region get rid of duplicates...
             if len(options) > 1:
@@ -783,6 +794,48 @@ class Cluster:
                      format(nominal_digit_width, min_digit_width, max_digit_width,
                             min_splittable_digit_width, min_droppable_digit_width)
 
+        def drop_small_digit(limit_width: int, context) -> bool:
+            nonlocal header
+            smallest_x = None
+            for x in range(1, len(copy)):  # never consider the initial sync digit
+                xx = copy[x]
+                digits_xx = digits_list[xx]
+                if digits_xx is None:
+                    # this one has been dumped
+                    continue
+                if len(digits_xx) > 1:
+                    # this one has been split
+                    continue
+                if smallest_x is None:
+                    # found first dump candidate
+                    smallest_digit = digits[copy[x]]
+                    if smallest_digit.samples > limit_width:
+                        # too big to drop
+                        continue
+                    else:
+                        smallest_x = x
+                    continue
+                smallest_digit = digits[copy[smallest_x]]
+                if digits[xx].samples < smallest_digit.samples:
+                    # found a smaller candidate
+                    smallest_x = x
+                elif digits[xx].samples == smallest_digit.samples:
+                    if digits[xx].error > smallest_digit.error:
+                        # found a similar size candidate with a bigger error
+                        smallest_x = x
+            if smallest_x is None:
+                # nothing (left) small enough to drop
+                return False
+            smallest_xx = copy[smallest_x]
+            if self.logging:
+                if header is not None:
+                    self._log(header)
+                    header = None
+                self._log('    {}: dropping {} digit {}'.
+                          format(smallest_xx, context, digits[smallest_xx]))
+            digits_list[smallest_xx] = None
+            return True
+
         def find_best_2nd_choice(slices, slice_start, slice_end):
             """ find the best 2nd choice in the given slices,
                 return the digit, how many there are and the average error,
@@ -900,7 +953,18 @@ class Cluster:
                         # ran into next copy
                         break
                     copy.append(xx)
+                # drop digits that are too small
                 digits_required = Cluster.DIGITS_PER_NUM
+                while drop_small_digit(min_digit_width, 'small'):
+                    digits_required += 1
+                while len(copy) > digits_required:
+                    # too many digits - drop the smallest droppable digit
+                    if drop_small_digit(min_droppable_digit_width, 'excess'):
+                        digits_required += 1
+                    else:
+                        # run out of options - this is a show stopper
+                        reason = 'too many digits'
+                        break
                 while len(copy) < digits_required:
                     # not enough digits - split the biggest with the biggest error
                     biggest_x = None
@@ -965,47 +1029,6 @@ class Cluster:
                                   format(biggest_xx, biggest_digit, digit_1, digit_2))
                     digits_list[biggest_xx] = [digit_1, digit_2]
                     digits_required -= 1
-                while len(copy) > digits_required:
-                    # too many digits - drop the smallest with the biggest error that is not a sync digit
-                    smallest_x = None
-                    for x in range(1, len(copy)):  # never consider the initial sync digit
-                        xx = copy[x]
-                        digits_xx = digits_list[xx]
-                        if digits_xx is None:
-                            # this one has been dumped
-                            continue
-                        if len(digits_xx) > 1:
-                            # this one has been split - not possible to see that here!
-                            continue
-                        if smallest_x is None:
-                            # found first dump candidate
-                            smallest_x = x
-                            smallest_digit = digits[copy[smallest_x]]
-                            if smallest_digit.samples >= min_droppable_digit_width:
-                                # too big to drop
-                                smallest_x = None
-                            continue
-                        smallest_digit = digits[copy[smallest_x]]
-                        if digits[xx].samples < smallest_digit.samples:
-                            # found a smaller candidate
-                            smallest_x = x
-                        elif digits[xx].samples == smallest_digit.samples:
-                            if digits[xx].error > smallest_digit.error:
-                                # found a similar size candidate with a bigger error
-                                smallest_x = x
-                    if smallest_x is None:
-                        # nothing (left) small enough to drop, that's a show stopper
-                        reason = 'too many digits'
-                        break
-                    smallest_xx = copy[smallest_x]
-                    if self.logging:
-                        if header is not None:
-                            self._log(header)
-                            header = None
-                        self._log('    {}: dropping excess digit {}'.
-                                  format(smallest_xx, digits[smallest_xx]))
-                    digits_list[smallest_xx] = None
-                    digits_required += 1
                 if reason is not None:
                     # we've given up someplace
                     if self.logging:
@@ -1109,7 +1132,7 @@ class Cluster:
                       format(number, code, doubt, error, msg[2:]))
         return structs.Result(number, doubt + error, code, digits)
 
-class Allocate:
+class Allocate:  # failed idea of 'snapping' edges to the ideal
     """ given a ring span and a pixel slice allocate transitions to ring edges,
         transitions can be either rising or falling,
         a detected transition is allocated to its nearest ring edge (min squared distance),
@@ -1117,6 +1140,8 @@ class Allocate:
         ring edges are calculated from the span and the length of the pixel slice,
         the edge list is a list of offsets into the pixel slice where a transition is expected,
     """
+    # ToDo: move pulses rather than stretch/shrink
+    #       move pulse to ideal leading edge, leave trailing alone
 
     NO_EDGE        = 0
     STRONGEST_EDGE = 1  # lists are sorted ascending on this, so make best lowest number
@@ -1336,3 +1361,109 @@ class Allocate:
             slice[pos] = current_pixel
         # slice is now in a form that can be given to Codec.qualify and Codec.classify
         return slice, error
+
+class Cells:
+    """ from an extent find the data cells """
+
+    INNER_OFFSET     = 0
+    OUTER_OFFSET     = 0
+    THRESHOLD_WIDTH  = 18  # ToDo: HACK-->4
+    THRESHOLD_HEIGHT = 1
+    THRESHOLD_BLACK  = -12  # ToDo: HACK-->8
+    THRESHOLD_WHITE  = None  # ToDo: HACK-->16
+
+    def __init__(self, scanner, extent: structs.Extent):
+        self.scan = scanner  # parent context
+        self.extent: structs.Extent = extent
+        self.target: frame.Frame = Cells.extract_target(extent)
+        self.buckets: frame.Frame = self.binarize()
+
+    @staticmethod
+    def extract_target(extent: structs.Extent) -> frame.Frame:
+        """ extract the target from the image around the extent,
+            we create a new image that is just the inner, data and outer rings such that
+            the inner extent is straight at y offset 0, and the outer extent is stretched
+            such that the target becomes purely rectangular
+            """
+        image = extent.image
+        target = image.instance()
+        max_x, max_y = image.size()
+        min_inner = max_y
+        max_outer = 0
+        for x in range(max_x):
+            min_inner = min(min_inner, extent.inner[x])
+            max_outer = max(max_outer, extent.outer[x])
+        target_max_x = max_x
+        target_max_y = (max_outer + Cells.OUTER_OFFSET) - (min_inner + Cells.INNER_OFFSET) + 1
+        target.new(target_max_x, target_max_y)
+        for x in range(max_x):
+            source = []
+            start_y = extent.inner[x]+Cells.INNER_OFFSET
+            end_y   = extent.outer[x]+Cells.OUTER_OFFSET + 1
+            for y in range(start_y, end_y):
+                source.append(image.getpixel(x, y))
+            dest = Cells.stretch(source, target_max_y)
+            for y in range(target_max_y):
+                target.putpixel(x, y, dest[y])
+        return target
+
+    @staticmethod
+    def stretch(source, length):
+        """ stretch the source vector to length,
+            source must not be longer than length,
+            source must be a vector of a sequence of greyscale pixels
+            """
+        if len(source) > length:
+            raise Exception('source length ({}) exceeds stretch length ({})'.format(len(source), length))
+        if len(source) == length:
+            # nothing to do
+            return source
+        # where a destination pixel falls between two source pixels, the destination pixel becomes
+        # a combination of the two source pixels
+        # scale is source length over destination length, for each dest pixel (d) the source pixel (s)
+        # is d*scale, this will be fractional s = s.p and represents a 1 pixel length area,
+        # so we use s*(1-p) + (s+1)*p (i.e. combine the overlap portions), e.g.
+        # 0 1 2 3 4 5 6 7         <-- source pixels
+        # 0 1 2 3 4 5 6 7 8 9 0 1 <-- destination pixels
+        # scale is 8/12 = 0.66
+        # destination pixel 5 = source pixel 5 * 0.66 = 3.3, so set the destination pixel value to (3)*0.7 + (4)*0.3
+        # destination pixel 6 = source pixel 6 * 0.66 = 3.96, so set the destination pixel value to (3)*0.04 + (4)*0.96
+        # for the last pixel, 11 * .66 = 7.26, 7+1 does not exist, so just treat as if there is another the same, so
+        # last = (7)*.26 + (7)*74 - i.e. use the whole of the last pixel
+        scale = len(source) / length
+        dest  = [None for _ in range(length)]
+        for d in range(length):
+            s      = d * scale
+            s_base = int(s)
+            s_frac = s - s_base
+            s_next = s_base + 1
+            if s_next >= len(source):
+                s_next = s_base
+            p_base = source[s_base]
+            p_next = source[s_next]
+            pixel  = p_base * (1 - s_frac) + p_next * s_frac
+            dest[d] = int(pixel)
+        return dest
+
+    def binarize(self):
+        """ binarize the given target """
+        buckets = self.scan._binarize(self.target,
+                                      width=Cells.THRESHOLD_WIDTH, height=Cells.THRESHOLD_HEIGHT,
+                                      black=Cells.THRESHOLD_BLACK, white=Cells.THRESHOLD_WHITE,
+                                      clean=True, suffix='-target')
+        return buckets
+
+    def annular_centres(self, buckets: frame.Frame) -> [[int, int]]:
+        """ find the centres of all the annular pulses in the given buckets,
+            an annular pulse is a rising followed by a falling edge around the ring,
+            each is characterised by a centre x co-ord and a width,
+            we make a list of such pulses for every y co-ord
+            """
+        max_x, max_y = buckets.size()
+        for y in range(max_y):
+            rising = []
+            falling = []
+            for x in range(max_x):
+                this_pixel = buckets.getpixel(x, y)
+                next_pixel = buckets.getpixel((x + 1) % max_x, y)
+

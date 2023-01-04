@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 import os
 import pathlib
+import const
 
 """ WARNING
     cv2's co-ordinates are backwards from our pov, the 'x' co-ordinate is vertical and 'y' horizontal.
@@ -10,16 +11,6 @@ import pathlib
     NB: The final implementation is not expected to use cv2 (its too big) so its use here is mostly a
         diagnostic coding convenience. Significant algorithms are implemented DIY. 
     """
-
-# colours
-MAX_LUMINANCE = 255
-MIN_LUMINANCE = 0
-MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
-
-# alpha channel
-TRANSPARENT = MIN_LUMINANCE
-OPAQUE = MAX_LUMINANCE
-
 
 class Frame:
     """ image frame buffer as a 2D array of luminance values,
@@ -40,7 +31,7 @@ class Frame:
         """ return a new instance of self """
         return Frame(self.read_from, self.write_to)
 
-    def new(self, width, height, luminance):
+    def new(self, width, height, luminance=const.MIN_LUMINANCE):
         """ prepare a new buffer of the given size and luminance """
         self.buffer = np.full((height, width), luminance, dtype=np.uint8)  # NB: numpy arrays follow cv2 conventions
         self.alpha = None
@@ -139,9 +130,9 @@ class Frame:
         self.buffer[y, x] = value  # NB: cv2 x, y are reversed
         if with_alpha:
             if self.alpha is None:
-                self.alpha = np.full((self.max_y, self.max_x), TRANSPARENT,  # default is fully transparent
+                self.alpha = np.full((self.max_y, self.max_x), const.TRANSPARENT,  # default is fully transparent
                                      dtype=np.uint8)  # NB: numpy arrays follow cv2 conventions
-            self.alpha[y, x] = OPAQUE  # want foreground only for our pixels
+            self.alpha[y, x] = const.OPAQUE  # want foreground only for our pixels
 
     def inimage(self, x, y, r):
         """ determine if the points radius R and centred at X, Y are within the image """

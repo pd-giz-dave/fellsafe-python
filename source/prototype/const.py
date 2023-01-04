@@ -8,6 +8,11 @@ MIN_LUMINANCE = 0
 MID_LUMINANCE = (MAX_LUMINANCE - MIN_LUMINANCE) >> 1
 # endregion
 
+# region alpha channel...
+TRANSPARENT = MIN_LUMINANCE
+OPAQUE      = MAX_LUMINANCE
+# endregion
+
 # region Diagnostic image colours...
 BLACK = (0, 0, 0)
 GREY = (64, 64, 64)

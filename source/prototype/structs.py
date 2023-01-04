@@ -55,13 +55,14 @@ class Extent:
         the horizontal and vertical edge fragments it was built from """
 
     def __init__(self, inner=None, outer=None, inner_fail=None, outer_fail=None,
-                 buckets=None, rising_edges=None, falling_edges=None, slices=None):
+                 image=None, buckets=None, rising_edges=None, falling_edges=None, slices=None):
         self.inner: [int] = inner  # list of y co-ords for the inner edge
         self.inner_fail = inner_fail  # reason if failed to find inner edge or None if OK
         self.outer: [int] = outer  # list of y co-ords for the outer edge
         self.outer_fail = outer_fail  # reason if failed to find outer edge or None if OK
         self.rising_edges: [Edge] = rising_edges  # rising edge list used to create this extent
         self.falling_edges: [Edge] = falling_edges  # falling edge list used to create this extent
+        self.image = image  # the projected image the buckets where creaated from
         self.buckets = buckets  # the binarized image the extent was created from
         self.slices = slices  # the slices extracted from the extent (by _find_all_digits)
 

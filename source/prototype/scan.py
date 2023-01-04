@@ -397,6 +397,7 @@ class Scan:
         if clean:
             # clean the pixels - BWB or WBW sequences are changed to BBB or WWW
             # pixels wrap in the x direction but not in the y direction
+            # ToDo: re-jig to allow arbitrary short sequences to be cleaned, e.g. ..BBWWBB.. --> ..BBBBBB.. et al
             if self.logging:
                 header = 'binarize:'
             passes = 0
@@ -792,7 +793,8 @@ class Scan:
         """ determine the target inner or outer edge, the Edge type determines which,
             there should be a consistent set of falling/rising edges for the inner/outer black ring,
             edges that are within a few pixels of each other going right round is what we want,
-            returns a list of y co-ords and fail reason (None iff not failed)
+            returns a list of y co-ords and fail reason (None iff not failed),
+            the y co-ords returned are the last 'white' pixel of the inner edge and the first of the outer
             """
 
         # region helpers...
@@ -1283,7 +1285,7 @@ class Scan:
 
             extent = structs.Extent(inner=inner, inner_fail=inner_fail,
                                     outer=outer, outer_fail=outer_fail,
-                                    buckets=buckets,
+                                    image=target, buckets=buckets,
                                     falling_edges=falling_edges, rising_edges=rising_edges)
 
             if self.save_images:
