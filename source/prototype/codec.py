@@ -49,13 +49,13 @@ class Codec:
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     # if you do change it, also make appropriate changes to BIT_WEIGHTS and NOT_ALLOWED_ERROR
     ENCODING = [  # allowed, coding, weight (used to scale errors for easily confused classifications, e.g. 3->1 or 2)
-                (True,  [0, 0, 0], 1  ),  # 0
+                (True,  [0, 0, 0], 2  ),  # 0 - we need to be very confident to classify as a sync digit
                 (True,  [0, 0, 1], 1  ),  # 1
                 (True,  [0, 1, 0], 1  ),  # 2
-                (True,  [0, 1, 1], 1  ),  # 3 - can be confused with 2 and 1
+                (True,  [0, 1, 1], 1.2),  # 3 - can be confused with 2 and 1
                 (True,  [1, 0, 0], 1  ),  # 4
                 (False, [1, 0, 1], 1  ),  # 5 never use this, it creates a double radial 'pulse'
-                (True,  [1, 1, 0], 1  ),  # 6 - can be confused with 2 and 4
+                (True,  [1, 1, 0], 1.2),  # 6 - can be confused with 2 and 4
                 (False, [1, 1, 1], 1  ),  # 7 do not use this, its too easily confused with 3 or 6
                ]
 
@@ -545,6 +545,10 @@ class Codec:
                     raise Exception('Zero error ({:.2f}) plus ones error ({:.2f}) is greater than 1.0 for digit {}'.
                                     format(zero_error, ones_error, digit))
                 error *= Codec.ENCODING[digit][2]  # scale by the digit weight
+                if error > 1.0:
+                    error = 0.999  # what else can we do?
+                    # raise Exception('Scaled error ({:.2f}) is greater than 1.0 for digit {} (scale {})'.
+                    #                 format(error, digit, Codec.ENCODING[digit][2]))
                 digits.append((digit, min(error + source_error, 1.0)))
 
         # put into least error first order
