@@ -40,6 +40,7 @@ class Codec:
 
     # region constants...
     DIGITS_PER_WORD = 6  # how many digits per encoded code-word
+    MAX_SAME_DIGITS = 2  # max number of consecutive same digits in a code-word
     COPIES_PER_BLOCK = 3  # number of copies in a code-word (DIGITS_PER_WORD * COPIES_PER_BLOCK must be odd)
     INNER_BLACK_RINGS = 1  # number of inner black rings (defined here 'cos encoding relies on it)
     OUTER_BLACK_RINGS = 1  # number of outer black rings (defined here 'cos encoding relies on it)
@@ -48,15 +49,16 @@ class Codec:
     # encoding is a bit pattern across the data rings for each digit (a 0 at either end is implied)
     # **** DO NOT CHANGE THIS - it'll invalidate existing codes
     # if you do change it, also make appropriate changes to BIT_WEIGHTS and NOT_ALLOWED_ERROR
+    # we only allow digits that ensure the middle bit is always a '1' (i.e. white)
     ENCODING = [  # allowed, coding, weight (used to scale errors for easily confused classifications, e.g. 3->1 or 2)
                 (True,  [0, 0, 0], 2  ),  # 0 - we need to be very confident to classify as a sync digit
-                (True,  [0, 0, 1], 1  ),  # 1
+                (False, [0, 0, 1], 1  ),  # 1 - centre not white
                 (True,  [0, 1, 0], 1  ),  # 2
-                (True,  [0, 1, 1], 1.2),  # 3 - can be confused with 2 and 1
-                (True,  [1, 0, 0], 1  ),  # 4
-                (False, [1, 0, 1], 1  ),  # 5 never use this, it creates a double radial 'pulse'
-                (True,  [1, 1, 0], 1.2),  # 6 - can be confused with 2 and 4
-                (False, [1, 1, 1], 1  ),  # 7 do not use this, its too easily confused with 3 or 6
+                (True,  [0, 1, 1], 1  ),  # 3 - can be confused with 2
+                (False, [1, 0, 0], 1  ),  # 4 - centre not white
+                (False, [1, 0, 1], 1  ),  # 5 - never use this, it creates a double radial 'pulse'
+                (True,  [1, 1, 0], 1  ),  # 6 - can be confused with 2
+                (True,  [1, 1, 1], 1  ),  # 7
                ]
 
     SYNC_DIGIT = 0  # must be allowed above, otherwise arbitrary, zero is the easiest to detect
@@ -294,7 +296,7 @@ class Codec:
             if it is, return the 'scale' for that length, else None
             the scale is used to map ideal slice bit indices to actual
             """
-        # ToDo: this is constant - move it to __init__
+        # ToDo: below is constant - move it to __init__
         bits = self._make_slice_bits(Codec.SYNC_DIGIT)  # only digit we can guarantee is valid
         scale = length / len(bits)
         if scale < 1.0:
@@ -423,8 +425,8 @@ class Codec:
             # its all, or mostly, black, always OK (its a 0)
             return True
         if count >= int(round((ring_width * Codec.RINGS_PER_DIGIT) * Codec.MAX_SLICE_WHITE)):
-            # its all, or mostly, white, always crap (its a 7)
-            return False
+            # its all, or mostly, white, always OK (its a 7)
+            return True
         # test every offset in the data portion of a 101 sequence
         start_data = int(ring_width * Codec.INNER_BLACK_RINGS)
         end_data = min(start_data + data_length, length)
@@ -649,6 +651,7 @@ class Codec:
         digits = self.digits(candidate)
         has_white = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
         has_black = [0 for _ in range(Codec.RINGS_PER_DIGIT)]
+        got_same  = 0
         for this in range(len(digits)):
             this_digit = digits[this]
             coding = self.coding(this_digit)
@@ -662,48 +665,30 @@ class Codec:
             elif this == 0:
                 # does not meet first digit must be the sync digit requirement
                 return False
+            # no more than N consecutive digits the same
             before_digit = digits[(this - 1) % len(digits)]
-            if this_digit == before_digit:
-                # does not meet consecutive digits must be different requirement
+            if before_digit == this_digit:
+                # got a digit that is the same as the previous one
+                got_same += 1
+                if got_same > Codec.MAX_SAME_DIGITS:
+                    # too many same consecutive digits
+                    return False
+            else:
+                # NB: guaranteed to get here for the first digit ('cos its 0 and nothing else can be)
+                got_same = 1
+            if this > 0:
+                for ring in (0, Codec.RINGS_PER_DIGIT - 1):
+                    # count black and white cells in the first and last rings (excluding the sync digit)
+                    if coding[ring] == 0:
+                        has_black[ring] += 1
+                    if coding[ring] == 1:
+                        has_white[ring] += 1
+        for ring in (0, Codec.RINGS_PER_DIGIT - 1):
+            if has_black[ring] < 1:
+                # does not meet requirement for minimum number of black cells in the first and last ring
                 return False
-            for ring in range(Codec.RINGS_PER_DIGIT):
-                # consecutive digits cannot be the same
-                # no black bit is allowed to be fully surrounded by white
-                # because it can disappear in neighbour smudges, neighbours that are white smudge the corner,
-                # if all 4 corners get smudged the whole thing can disappear!
-                if ring == 0 or ring == (Codec.RINGS_PER_DIGIT - 1):
-                    # we know there is black above the first ring and below the last ring, so not a problem here
-                    pass
-                elif coding[ring] == 0:
-                    # there are 4 neighbours here, at least one must be black (so at least one corner survives)
-                    black_neighbours = 0
-                    for x, y in [          (0, -1),
-                                 (-1,  0),          (+1,  0),
-                                           (0, +1)          ]:
-                        test_digit = digits[(this + x) % len(digits)]
-                        test_ring = ring + y
-                        bits = self.coding(test_digit)
-                        if bits is None:
-                            # not a legal digit
-                            return None
-                        if bits[test_ring] == 0:
-                            black_neighbours += 1
-                    if black_neighbours < 1:
-                        # does not meet black neighbours requirement
-                        return False
-                # there must be at least one black and one white bit per ring,
-                # to prevent continuous edges around a ring that could be confused with the target inner/outer edges
-                if coding[ring] == 0:
-                    has_black[ring] += 1
-                if coding[ring] == 1:
-                    has_white[ring] += 1
-        for is_black in has_black:
-            if is_black == 0:
-                # does not meet each ring must have at least one black segment per copy requirement
-                return False
-        for is_white in has_white:
-            if is_white == 0:
-                # does not meet each ring must have at least one white segment per copy requirement
+            if has_white[ring] < 1:
+                # does not meet requirement for minimum number of white cells in the first and last ring
                 return False
 
         # all good

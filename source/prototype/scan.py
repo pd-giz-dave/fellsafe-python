@@ -49,7 +49,8 @@ class Scan:
     THRESHOLD_HEIGHT = 2.5  # the fraction of the projected image height to use as the integration area (None=as width)
     THRESHOLD_BLACK = 3  # the % below the average luminance in a projected image that is considered to be black
     THRESHOLD_WHITE = 10  # the % above the average luminance in a projected image that is considered to be white
-    MIN_EDGE_SAMPLES = 3  # minimum samples in an edge to be considered a valid edge
+    NIPPLE_CLEAN    = (0,0)  # annular. radial 'nipple' clean length in pixels (changes 101 to 111, et al, 0,0==off)
+    MIN_EDGE_SAMPLES = 1  # ToDo: HACK-->3  # minimum samples in an edge to be considered a valid edge
     INNER_EDGE_GAP = 1.0  # fraction of inner edge y co-ord to add to inner edge when looking for the outer edge
     MAX_NEIGHBOUR_ANGLE_INNER = 0.4  # ~=22 degrees, tan of the max acceptable angle when joining inner edge fragments
     MAX_NEIGHBOUR_ANGLE_OUTER = 0.9  # ~=42 degrees, tan of the max acceptable angle when joining outer edge fragments
@@ -329,18 +330,15 @@ class Scan:
 
     def _binarize(self, target: frame.Frame,
                   width: float = 2, height: float = None,
-                  black: float = -1, white: float = None, clean=True, suffix='') -> frame.Frame:
+                  black: float = -1, white: float = None, suffix='') -> frame.Frame:
         """ binarize the given projected image,
             width is the fraction of the image width to use as the integration area,
             height is the fraction of the image height to use as the integration area (None==same as width),
             black is the % below the average that is considered to be the black/grey boundary,
             white is the % above the average that is considered to be the grey/white boundary,
             white of None means same as black and will yield a binary image,
-            iff clean=True, 'tidy' it by removing short pixel sequences (1 or 2 'alone'),
             suffix is used to modify diagnostic image names
             """
-
-        MAX_CLEAN_PASSES = 8  # cleaning can sometimes be unstable, so limit to this many passes
 
         max_x, max_y = target.size()
 
@@ -394,101 +392,110 @@ class Scan:
 
         buckets = make_binary(target, width, height, black, white)
 
-        if clean:
-            # clean the pixels - BWB or WBW sequences are changed to BBB or WWW
-            # pixels wrap in the x direction but not in the y direction
-            # ToDo: re-jig to allow arbitrary short sequences to be cleaned, e.g. ..BBWWBB.. --> ..BBBBBB.. et al
-            if self.logging:
-                header = 'binarize:'
-            passes = 0
-            h_tot_black = 0
-            h_tot_white = 0
-            h_tot_grey = 0
-            v_tot_black = 0
-            v_tot_white = 0
-            v_tot_grey = 0
-            pass_changes = 1
-            while pass_changes > 0 and passes < MAX_CLEAN_PASSES:
-                passes += 1
-                pass_changes = 0
-                h_black = 0
-                h_white = 0
-                h_grey = 0
-                v_black = 0
-                v_white = 0
-                v_grey = 0
-                for x in range(max_x):  # x wraps, so consider them all
-                    for y in range(1, max_y - 1):  # NB: ignoring first and last y - they do not matter
-                        above = buckets.getpixel(x, y - 1)
-                        left = buckets.getpixel((x - 1) % max_x, y)
-                        this = buckets.getpixel(x, y)
-                        right = buckets.getpixel((x + 1) % max_x, y)
-                        below = buckets.getpixel(x, y + 1)
-                        if left == right:
-                            if this != left:
-                                # got a horizontal loner
-                                buckets.putpixel(x, y, left)
-                                pass_changes += 1
-                                if left == const.MIN_LUMINANCE:
-                                    h_black += 1
-                                elif left == const.MAX_LUMINANCE:
-                                    h_white += 1
-                                else:
-                                    h_grey += 1
-                        elif False:  # ToDo: makes it unstable-->left != this and this != right and left != right and this != const.MID_LUMINANCE:
-                            # all different and middle not grey, make middle grey
-                            buckets.putpixel(x, y, const.MID_LUMINANCE)
-                            pass_changes += 1
-                            h_grey += 1
-                        elif above == below:
-                            # only look for vertical when there is no horizontal candidate, else it can oscillate
-                            if this != above:
-                                # got a vertical loner
-                                # this condition is lower priority than above
-                                buckets.putpixel(x, y, above)
-                                pass_changes += 1
-                                if above == const.MIN_LUMINANCE:
-                                    v_black += 1
-                                elif above == const.MAX_LUMINANCE:
-                                    v_white += 1
-                                else:
-                                    v_grey += 1
-                        elif above != this and this != below and above != below and this != const.MID_LUMINANCE:
-                            # all different and middle not grey, make middle grey
-                            buckets.putpixel(x, y, const.MID_LUMINANCE)
-                            pass_changes += 1
-                            v_grey += 1
-                if self.logging and pass_changes > 0:
-                    if header is not None:
-                        self._log(header)
-                        header = None
-                    self._log('    pass {}: cleaning lone pixels: changes this pass: {}'.
-                              format(passes, pass_changes))
-                    self._log('        horizontal: changed {} to white, {} to black, {} to grey'.
-                              format(h_white, h_black, h_grey))
-                    self._log('        vertical: changed {} to white, {} to black, {} to grey'.
-                              format(v_white, v_black, v_grey))
-                h_tot_black += h_black
-                h_tot_white += h_white
-                h_tot_grey += h_grey
-                v_tot_black += v_black
-                v_tot_white += v_white
-                v_tot_grey += v_grey
-            if self.logging:
-                if header is not None:
-                    self._log(header)
-                    header = None
-                if pass_changes > 0:
-                    # this means cleaning oscillated
-                    self._log('    **** cleaning incomplete, {} changes not cleaned'.format(pass_changes))
-                self._log('    cleaned lone pixels in {} passes'.format(passes))
-                self._log('        horizontal: total changed {} to white, {} to black, {} to grey'.
-                          format(h_tot_white, h_tot_black, h_tot_grey))
-                self._log('        vertical: total changed {} to white, {} to black, {} to grey'.
-                          format(v_tot_white, v_tot_black, v_tot_grey))
+        if self.save_images:
+            self._unload(buckets, '04-buckets{}'.format(suffix))
 
-            if self.save_images:
-                self._unload(buckets, '04-buckets{}'.format(suffix))
+        return buckets
+
+    def _clean(self, buckets: frame.Frame, annular_clean=1, radial_clean=1, suffix='') -> frame.Frame:
+        """ clean the given binarizes image,
+            if clean>0 'tidy' image by removing short pixel sequences of up to this length in implied direction,
+            suffix is used to modify diagnostic image names
+            """
+
+        # clean the pixels by changing short sequences to their neighbours
+        # e.g: (R*N)(P*N)(R*N) --> (R*N)(R*N)(R*N), where N=clean length and R<>P
+        # pixels wrap in the annular direction (x) but not in the radial direction (y)
+
+        # the algorithm bused is very crude and inefficient, but good enough to prove the idea
+        # we build a mask that reflects each clean length, then scan for each pattern
+
+        max_x, max_y = buckets.size()
+
+        if annular_clean > 0:
+            if self.logging:
+                header = 'annular clean ({}):'.format(annular_clean)
+            # build masks (lead-in, centre, lead-out)
+            masks = []
+            for mask in range(1, annular_clean+1):
+                masks.append([+1 for _ in range(mask)] + [0 for _ in range(mask)] + [-1 for _ in range(mask)])
+            # region clean for annular occurrences (these wrap)
+            for y in range(max_y):
+                for mask in masks:
+                    for x in range(max_x):
+                        ref_pixel = buckets.getpixel(x, y)
+                        matches = True
+                        for dx in range(len(mask)):
+                            pixel = buckets.getpixel((x + dx) % max_x, y)
+                            if pixel == ref_pixel and mask[dx] != 0:
+                                # matches so far
+                                continue
+                            elif pixel != ref_pixel and mask[dx] == 0:
+                                # matches so far
+                                continue
+                            # does not match
+                            matches = False
+                            break
+                        if not matches:
+                            continue
+                        # set entire pattern to the ref_pixel
+                        for dx in range(len(mask)):
+                            buckets.putpixel((x + dx) % max_x, y, ref_pixel)
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}x{}: cleaned annular {} to {}'.format(x, y, mask, ref_pixel))
+            # endregion
+
+        if radial_clean > 0:
+            if self.logging:
+                header = 'radial clean ({}):'.format(radial_clean)
+            # build masks (lead-in, centre, lead-out)
+            masks = []
+            for mask in range(1, radial_clean + 1):
+                masks.append([+1 for _ in range(mask)] + [0 for _ in range(mask)] + [-1 for _ in range(mask)])
+            # region clean for radial occurrences (these do not wrap)
+            for x in range(max_x):
+                for mask in masks:
+                    outer_limit = radial_clean + len(mask)  # keep away from outer edge by this much (else may merge into it)
+                    inner_limit = radial_clean  # ditto
+                    for y in range(inner_limit, max_y - outer_limit):
+                        ref_pixel = buckets.getpixel(x, y)
+                        matches = True
+                        for dy in range(len(mask)):
+                            if y + dy >= max_y:
+                                # gone off image edge, treat as mis-match
+                                matches = False
+                                break
+                            pixel = buckets.getpixel(x, y + dy)
+                            if pixel == ref_pixel and mask[dy] != 0:
+                                # matches so far
+                                continue
+                            elif pixel != ref_pixel and mask[dy] == 0:
+                                # matches so far
+                                continue
+                            # does not match
+                            matches = False
+                            break
+                        if not matches:
+                            continue
+                        # set entire pattern to the ref_pixel
+                        for dy in range(len(mask)):
+                            if y + dy >= max_y:
+                                # gone off image edge, so we're done
+                                break
+                            buckets.putpixel(x, y + dy, ref_pixel)
+                        if self.logging:
+                            if header is not None:
+                                self._log(header)
+                                header = None
+                            self._log('    {}x{}: cleaned radial {} to {}'.format(x, y, mask, ref_pixel))
+            # endregion
+
+        if self.save_images:
+            if annular_clean > 0 or radial_clean > 0:
+                self._unload(buckets, '04-clean-buckets{}'.format(suffix))
 
         return buckets
 
@@ -901,7 +908,7 @@ class Scan:
                 max_distance is the distance beyond which a merge is not allowed,
                 max_angle is the maximum tolerated slope angle between two edge ends,
                 returns True if it can be merged,
-                to be allowed its x, y values must not to too far from what's there already,
+                to be allowed its x, y values must not be to too far from what's there already,
                 the overlap condition is assumed to have already been checked (by trim_overlap)
                 """
 
@@ -1259,7 +1266,13 @@ class Scan:
     def _identify(self, blob_size):
         """ identify the target in the current image with the given blob size (its radius) """
 
-        def make_extent(target, clean=True, context='') -> structs.Extent:
+        THRESHOLD_WIDTH  = 7      # ToDo: HACK-->Scan.THRESHOLD_WIDTH
+        THRESHOLD_HEIGHT = 1.3    # ToDo: HACK-->Scan.THRESHOLD_HEIGHT
+        THRESHOLD_BLACK  = 0      # ToDo: HACK-->Scan.THRESHOLD_BLACK
+        THRESHOLD_WHITE  = None   # NB: creating a *binary* image # ToDo: HACK-->Scan.THRESHOLD_WHITE
+        CLEAN            = (3,2)  # ToDo: HACK-->Scan.NIPPLE_CLEAN
+
+        def make_extent(target, clean=(0, 0), context='') -> structs.Extent:
             """ binarize and inner/outer edge detect the given image """
 
             if self.logging:
@@ -1268,9 +1281,11 @@ class Scan:
             max_x, max_y = target.size()
 
             buckets = self._binarize(target,
-                                     width=Scan.THRESHOLD_WIDTH, height=Scan.THRESHOLD_HEIGHT,
-                                     black=Scan.THRESHOLD_BLACK, white=Scan.THRESHOLD_WHITE,
-                                     clean=clean, suffix=context)
+                                     width=THRESHOLD_WIDTH, height=THRESHOLD_HEIGHT,
+                                     black=THRESHOLD_BLACK, white=THRESHOLD_WHITE,
+                                     suffix=context)
+            if max(clean) > 0:
+                buckets = self._clean(buckets, annular_clean=clean[0], radial_clean=clean[1], suffix=context)
             slices = self._slices(buckets)
             falling_edges = self._edges(slices, const.FALLING, max_y)
             inner, inner_fail = self._extent(max_x, falling_edges)
@@ -1302,7 +1317,7 @@ class Scan:
             return None
 
         # do the initial edge detection
-        extent = make_extent(target, clean=False, context='-warped')
+        extent = make_extent(target, clean=CLEAN, context='-warped')
 
         max_x, max_y = target.size()
         return max_x, max_y, stretch_factor, extent

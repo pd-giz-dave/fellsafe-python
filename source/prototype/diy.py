@@ -937,8 +937,8 @@ def verify():
         test_num_set = test.test_set(20, [111, 222, 333, 444, 555, 666, 777, 888, 999])
 
         # test.rand()
-        # test.coding()
-        # test.decoding()
+        test.coding()
+        test.decoding()
         # test.errors()
         # test.circles()
         # test.code_words(test_num_set)
@@ -949,10 +949,10 @@ def verify():
         # test.scan_media(test_media_folder)
 
         # test.scan(test_codes_folder, [000], 'test-code-000.png')
-        # test.scan(test_codes_folder, [222], 'test-code-222.png')
+        # test.scan(test_codes_folder, [111], 'test-code-111.png', proximity=const.PROXIMITY_CLOSE)
 
-        test.scan(test_media_folder, [101,102,111,116,222,298,333,387,401,444,555,666,673,732,746,756,777,888,892,999],
-                  'far-101-102-111-116-222-298-333-387-401-444-555-666-673-732-746-756-777-888-892-999.jpg')
+        # test.scan(test_media_folder, [101,111,124,172,222,281,333,337,354,444,555,594,655,666,710,740,777,819,888,900],
+        #           'far-101-111-124-172-222-281-333-337-354-444-555-594-655-666-710-740-777-819-888-900.jpg')
 
     except:
         traceback.print_exc()

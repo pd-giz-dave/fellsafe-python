@@ -239,10 +239,9 @@ class Transform:
                 for pt in points:
                     source.setpixel(_x(pt[0]), _y(pt[1]), colour, bleed)
             elif obj["type"] == self.TEXT:
-                image = cv2.putText(image, obj["text"], _int(obj["start"]),
-                                    cv2.FONT_HERSHEY_SIMPLEX, obj["size"], obj["colour"], 1, cv2.LINE_AA)
+                x, y = _int(obj["start"])
+                source.settext(obj["text"], x, y, obj["size"], obj["colour"])
             else:
                 raise Exception('Unknown object type {}'.format(obj["type"]))
         source.set(image)
         return source
-

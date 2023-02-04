@@ -45,18 +45,11 @@ DEBUG_IMAGE = 1  # just write debug annotated image files
 DEBUG_VERBOSE = 2  # do everything - generates a *lot* of output
 # endregion
 
-# region Step/Edge/Corner types...
-HORIZONTAL = 'horizontal'
-VERTICAL = 'vertical'
-RISING = 'rising'
-FALLING = 'falling'
-# endregion
-
 # region Proximity options...
 # these control the contour detection, for big targets that cover the whole image a bigger
 # integration area is required (i.e. smaller image fraction), this is used for testing
 # print images
 PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
-PROXIMITY_CLOSE = 24  # suitable for print images
-BLACK_LEVEL = {PROXIMITY_FAR: -5, PROXIMITY_CLOSE: 0.01}  # black threshold for binarising contours
+PROXIMITY_CLOSE = 3  # suitable for print images
+BLACK_LEVEL = {PROXIMITY_FAR: -2, PROXIMITY_CLOSE: -0.01}  # black threshold for binarising contours
 # endregion
