@@ -569,7 +569,7 @@ class Targets:
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
     min_size: float = 3                  # min number of pixels across width/height
     max_size: float = 100                # max number of pixels across width/height
-    blur_kernel_size = 3                 # blur kernel size to apply, must be odd, None==do not blur
+    blur_kernel_size = 3                 # blur kernel size to apply, must be odd, None or < 3 == do not blur
     # all these 'ness' parameters are in the range 0..1, where 0 is perfect and 1 is utter crap
     max_squareness = 0.25                # how close to square the bounding box has to be (0.5 is a 2:1 rectangle)
     max_wavyness   = 0.25                # how close to not wavy a contour perimeter must be
@@ -972,10 +972,14 @@ def find_targets(source, params: Targets, logger=None):
     if logger is not None:
         logger.push("find_targets")
     if params.blur_kernel_size is not None:
-        # ToDo: do this DIY so we are not dependent on openCV
-        params.source = cv2.blur(source, (params.blur_kernel_size, params.blur_kernel_size))
+        blur_kernel_size = params.blur_kernel_size | 1  # must be odd (so there is a centre)
     else:
-        params.source = source
+        blur_kernel_size = 0
+    if blur_kernel_size < 3:
+        params.source = source  # pointless
+    else:
+        # ToDo: do this DIY so we are not dependent on openCV
+        params.source = cv2.blur(source, (blur_kernel_size, blur_kernel_size))
     params.binary = make_binary(params.source,
                                 params.integration_width,
                                 params.integration_height,
@@ -1100,7 +1104,6 @@ def _test(src, size, proximity, black, inverted, logger):
         cv2.circle(draw, (int(round(target[0])), int(round(target[1]))), int(round(target[2])), (0, 255, 0), 1)
     cv2.imwrite("contours_blobs.png", draw)
     logger.log("detected blobs shown in contours_blobs.png")
-    logger.log("\n")
 
     logger.log("\nAll accepted blobs:")
     stats_range = 20
