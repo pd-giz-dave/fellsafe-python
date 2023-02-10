@@ -25,8 +25,9 @@
     where 'r' is the blob radius (+/- some margin)
     'd' is the distance between two of the three blob centres and must be in the region of 7r,
     'sqrt(2d^2)' is the distance to the other blob centre of a group of three,
-    blobs smaller than 2r/3 between the three locator blobs are ignored
+    blobs smaller than some factor (<1) of 'r' between the three locator blobs are ignored
 """
+
 import math
 
 import codes     # for the geometry constants
@@ -34,9 +35,44 @@ import const     # for the proximity constants
 import utils     # for the logger
 import contours  # for providing a test source of blobs
 
+Params = contours.Targets  # upstream of here is not allowed to know about contours
+
+class Detection:
+    """ a 'detection' is the four points of a rectangle formed from the three detected corners, and its
+        estimated fourth corner, in clockwise order from the primary corner along with its enclosing box,
+        the enclosing box encloses the rectangle and a margin sufficient to include the white space around
+        the code area (equivalent to the radius of the biggest blob)
+        """
+
+    MARGIN_SCALE = 1.7  # scale factor from the maximum blob radius to the enclosing box edges
+
+    @staticmethod
+    def constrain(value, min_value, max_value):
+        """ constrain the given value (as an int) to be between the given min/max (int) limits """
+        value = int(min(max(int(value), min_value), max_value))
+        return value
+
+    def __init__(self, rectangle, image_width, image_height):
+        """ rectangle is as created by Locator.rectangles() - 4 blob of x,y,radius,label,
+            image width/height is used to constrain the enclosing box for detections close to the image edges
+            the rectangle co-ordinates may be fractional, the box co-ordinates are not
+            """
+        self.tl = (rectangle[0][0], rectangle[0][1])
+        self.tr = (rectangle[1][0], rectangle[1][1])
+        self.br = (rectangle[2][0], rectangle[2][1])
+        self.bl = (rectangle[3][0], rectangle[3][1])
+        margin = max(rectangle[0][2], rectangle[1][2], rectangle[2][2], rectangle[3][2]) * Detection.MARGIN_SCALE
+        min_x = Detection.constrain(min(self.tl[0], self.tr[0], self.br[0], self.bl[0]) - margin, 0, image_width-1)
+        max_x = Detection.constrain(max(self.tl[0], self.tr[0], self.br[0], self.bl[0]) + margin, 0, image_width-1)
+        min_y = Detection.constrain(min(self.tl[1], self.tr[1], self.br[1], self.bl[1]) - margin, 0, image_height-1)
+        max_y = Detection.constrain(max(self.tl[1], self.tr[1], self.br[1], self.bl[1]) + margin, 0, image_height-1)
+        self.box_tl = (min_x, min_y)
+        self.box_br = (max_x, max_y)
+
+
 class Locator:
 
-    # geometry
+    # region geometry...
     STRETCH_FACTOR       = 1.3  # how much image 'stretch' to allow for (as a result of distortion and viewing angle)
     MIN_RADIUS_RATIO     = 0.7  # min size ratio between blobs for them to be considered of similar size
     MAX_LOCATOR_DISTANCE = codes.Codes.LOCATOR_SPACING * STRETCH_FACTOR  # max distance between corner locators
@@ -44,6 +80,7 @@ class Locator:
     MIN_NEIGHBOURS       = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per locator
     MIN_LENGTH_RATIO     = 0.7  # min length ratio of two triangle sides to be considered equal
     MIN_DIAGONAL_RATIO   = 0.8  # min diagonal ratio between expected and actual length to be considered equal
+    # endregion
 
     # blob tuple indexes
     X_COORD = 0
@@ -56,6 +93,8 @@ class Locator:
         self._neighbours = None
         self._corners    = None
         self._triangles  = None
+        self._rectangles = None
+        self._detections = None
 
     @staticmethod
     def is_same(a, b, limit) -> bool:
@@ -241,22 +280,69 @@ class Locator:
         self.triangles().sort(key=lambda k: (k[3][0], k[3][1], k[3][2]))  # put into blob order purely to help debugging
         return self._triangles
 
-if __name__ == "__main__":
-    """ test harness """
+    def rectangles(self):
+        """ return a list of (approximate) rectangles for the discovered triangles,
+            this involves estimating the position of the fourth corner like so:
+               B              A,B,C are the discovered triangle vertices
+              / \             D is the fourth corner whose position is to be estimated
+             /   \            E is the centre of the BC line as Ex = (Cx-Bx)/2 + Bx and Ey = (Cy-By)/2 + By
+            A     \           Dx is then (Ex-Ax)*2 + Ax
+             \  E  \          Dy is then (Ey-Ay)*2 + Ay
+              \     D
+               \   /
+                \ /
+                 C
+            """
+        if self._rectangles is not None:
+            # already done it
+            return self._rectangles
+        self._rectangles = []
+        for tl, tr, bl, blobs in self.triangles():
+            Ax, Ay, Ar, _ = tl
+            Bx, By, _ , _ = tr
+            Cx, Cy, _ , _ = bl
+            Ex = ((Cx - Bx) / 2) + Bx
+            Ey = ((Cy - By) / 2) + By
+            Dx = ((Ex - Ax) * 2) + Ax
+            Dy = ((Ey - Ay) * 2) + Ay
+            br = (Dx, Dy, Ar, None)  # build a blob for the 'bottom-right' corner (same size as 'top-left')
+            self._rectangles.append((tl, tr, br, bl, blobs))
+        # ToDo: resolve ambiguity when an estimated blob is very near an actual one
+        #       (it means a timing mark got detected as a contour)
+        return self._rectangles
+
+    def detections(self, width, height):
+        """ return a list of detections """
+        if self._detections is not None:
+            # already done it
+            return self._detections
+        self._detections = []
+        for rectangle in self.rectangles():
+            self._detections.append(Detection(rectangle, width, height))
+        return self._detections
+
+
+def locate_targets(image, params: Params, logger=None) -> (Params, [Detection]):
+    """ locate targets in the given image using the given params,
+        returns the updated params (for diagnostics) and a (possibly empty) list of detections
+        """
+    contours.find_targets(image, params, logger=logger)
+    locator = Locator(params.blobs, logger.log)
+    max_x = image.shape[1]  # NB: x is columns and y is rows in the array
+    max_y = image.shape[0]  # ..
+    detections = locator.detections(max_x, max_y)
+    return params, detections
+
+
+def _test(src, proximity, logger, blur=3, create_new_blobs=True):
+    # create_new_blobs=True to create new blobs, False to re-use existing blobs
     import cv2
     import pickle
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/square-codes/test-alt-bits.png"
-    #proximity = const.PROXIMITY_CLOSE
-    proximity = const.PROXIMITY_FAR
-
-    logger = utils.Logger('locator.log')
-    logger.log('_test')
-
-    if True:  # True to create new blobs, False to re-use existing blobs
+    if create_new_blobs:
+        # this is very slow
         results = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
-                                 inverted=True, logger=logger)
+                                 inverted=True, blur=blur, logger=logger)
         blobs_dump = open('locator.blobs','wb')
         pickle.dump(results, blobs_dump)
         blobs_dump.close()
@@ -266,6 +352,8 @@ if __name__ == "__main__":
         blobs_dump.close()
     blobs = results.targets
     image = results.source
+    max_x = image.shape[1]  # NB: x, y are reversed in mumpy arrays
+    max_y = image.shape[0]  #     ..
     image = cv2.merge([image, image, image])  # make into a colour image
 
     logger.log('\n\nLocator:')
@@ -295,9 +383,46 @@ if __name__ == "__main__":
         ax, ay, _, _ = tl
         bx, by, _, _ = tr
         cx, cy, _, _ = bl
-        logger.log(' {} -> {} -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
+        logger.log('  {} -> {} -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
                    format(a, b, c, ax, ay, bx, by, cx, cy))
-        cv2.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.RED, 1)
-        cv2.line(image, (int(round(bx)), int(round(by))), (int(round(cx)), int(round(cy))), const.GREEN, 1)
-        cv2.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE, 1)
+    rectangles = locator.rectangles()
+    logger.log('{} rectangles:'.format((len(rectangles))))
+    for tl, tr, br, bl, (a, b, c) in rectangles:
+        ax, ay, _ , _ = tl
+        bx, by, _ , _ = tr
+        cx, cy, _ , _ = bl
+        dx, dy, dr, _ = br
+        logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
+                   format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy))
+        cv2.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.RED   , 1)
+        cv2.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.GREEN , 1)
+        cv2.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.YELLOW, 1)
+        cv2.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE  , 1)
+        cv2.circle(image, (int(round(dx)), int(round(dy))), int(round(dr)), const.GREEN, 1)  # mark our estimated blob
+    detections = locator.detections(max_x, max_y)
+    logger.log('{} detections:'.format(len(detections)))
+    for detection in detections:
+        logger.log('  rectangle: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
+                   format(detection.tl[0], detection.tl[1],
+                          detection.tr[0], detection.tr[1],
+                          detection.br[0], detection.br[1],
+                          detection.bl[0], detection.bl[1]))
+        logger.log('    enclosing box: tl: {} x {} -> br: {} x {}'.format(detection.box_tl[0], detection.box_tl[1],
+                                                                          detection.box_br[0], detection.box_br[1]))
+        cv2.rectangle(image, detection.box_tl, detection.box_br, const.GREEN, 1)
     cv2.imwrite('locators.png', image)
+    return locator, results.source  # for upstream test harness
+
+
+if __name__ == "__main__":
+    """ test harness """
+
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/square-codes/test-alt-bits.png"
+    #proximity = const.PROXIMITY_CLOSE
+    proximity = const.PROXIMITY_FAR
+
+    logger = utils.Logger('locator.log')
+    logger.log('_test')
+
+    _test(src, proximity, logger, create_new_blobs=True)
