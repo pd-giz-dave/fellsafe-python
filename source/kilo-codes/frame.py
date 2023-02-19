@@ -6,15 +6,15 @@ import pathlib
 import const
 
 """ WARNING
-    cv2's co-ordinates are backwards from our pov, the 'x' co-ordinate is vertical and 'y' horizontal.
-    The logic here uses 'x' horizontally and 'y' vertically, swapping as required when dealing with cv2.
-    NB: The final implementation is not expected to use cv2 (its too big) so its use here is mostly a
-        diagnostic coding convenience. Significant algorithms are implemented DIY. 
+    cv2 and numpy's co-ordinates are backwards from our pov, the 'x' co-ordinate are columns and 'y' rows.
+    The functions here use 'x' then 'y' parameters, swapping as required when dealing with cv2 and numpy arrays.
+    NB: The final implementation will not use cv2 (its too big) so its use here is purely a diagnostic convenience.
+        Significant algorithms are implemented DIY. 
     """
 
 class Frame:
     """ image frame buffer as a 2D array of luminance values,
-        it uses the opencv library to read/write and modify images at the pixel level,
+        it uses the opencv library to read/write images and numpy arrays to modify images at the pixel level,
         its the source of images for the Transform functions
         """
 
@@ -63,7 +63,7 @@ class Frame:
         """ load frame buffer from an image file as a grey scale image """
         self.buffer = cv2.imread('{}/{}'.format(self.read_from, image_file), cv2.IMREAD_GRAYSCALE)
         self.alpha = None
-        self.max_x = self.buffer.shape[1]  # NB: cv2 x, y are reversed
+        self.max_x = self.buffer.shape[1]  # NB: cv2 x, y are reversed, [0] is rows, [1] is columns
         self.max_y = self.buffer.shape[0]  # ..
         self.source = image_file
 
@@ -105,6 +105,7 @@ class Frame:
             only valid on a colour image
             """
         if x < 0 or x >= self.max_x or y < 0 or y >= self.max_y:
+            # ignore out of range pixel
             return
         was = self.buffer[y, x]
         now_part = (was[0] * bleed[0], was[1] * bleed[1], was[2] * bleed[2])
@@ -117,6 +118,7 @@ class Frame:
             nb: cv2 x,y is reversed from our pov
             """
         if x < 0 or x >= self.max_x or y < 0 or y >= self.max_y:
+            # out of range pixel
             return None
         else:
             return self.buffer[y, x]  # NB: cv2 x, y are reversed

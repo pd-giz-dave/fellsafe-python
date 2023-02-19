@@ -390,7 +390,7 @@ class Blob:
 
     def __init__(self, label: int, image, inverted: bool):
         self.label: int = label
-        self.image = image  # the binary image the blob was found within
+        self.image = image  # the binary image buffer the blob was found within
         self.inverted = inverted  # True if its a balck blob, else a white blob
         self.external: Contour = None
         self.internal: [Contour] = []
@@ -549,15 +549,19 @@ class Labels:
     def get_blob(self, label: int):
         if self.blobs is None:
             return None
-        else:
+        elif label in self.blobs:
             return self.blobs[label]
+        else:
+            # no such label
+            return None
 
 
 class Targets:
     """ a holder for the parameters required by find_targets and its result """
-    source = None                        # the source greyscale image
-    blurred = None                       # the blurred greyscale image
-    binary = None                        # the binarized blurred image
+    source_file = None                   # file name of originating source image (for diagnostic naming purposes only)
+    source = None                        # the source greyscale image buffer
+    blurred = None                       # the blurred greyscale image buffer
+    binary = None                        # the binarized blurred image buffer
     box = None                           # when not None the box within the image to process, else all of it
     inverted = False                     # if True look for black blobs, else white blobs
     integration_width: int = 48          # width of integration area as fraction of image width
@@ -582,15 +586,76 @@ class Targets:
 
 
 def blur_image(source, kernel_size):
+    """ return the blurred image as a mean blur over the given kernel size """
+    # we do this by integrating then calculating the average via integral differences,
+    # this means we only visit each pixel once irrespective of the kernel size
     if kernel_size is not None:
         kernel_size = kernel_size | 1  # must be odd (so there is a centre)
     else:
         kernel_size = 0
     if kernel_size < 3:
         return source  # pointless
+
+    # integrate the image
+    integral = integrate(source)
+
+    # get image geometry
+    width  = len(integral[0])
+    height = len(integral)
+
+    # set kernel geometry
+    kernel_plus  = kernel_size >> 1  # offset for going forward
+    kernel_minus = kernel_size - 1   # offset for going backward
+
+    # blur the image by averaging over the given kernel size
+    blurred = np.zeros((height, width), np.uint8)
+    for x in range(width):
+        x1 = int(max(x - kernel_minus, 0))
+        x2 = int(min(x + kernel_plus, width - 1))
+        for y in range(height):
+            y1 = int(max(y - kernel_minus, 0))
+            y2 = int(min(y + kernel_plus, height - 1))
+            count = int((x2 - x1) * (y2 - y1))  # how many samples in the integration area
+            # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
+            # where all but bottom right are *outside* the integration window
+            average = int((integral[y2][x2] + integral[y1][x1] - integral[y1][x2] - integral[y2][x1]) / count)
+            blurred[y][x] = average
+
+    return blurred
+
+def integrate(source, box=None):
+    """ generate the integral of the given box within the given image """
+
+    if box is None:
+        box_min_x = 0
+        box_max_x = len(source[0])
+        box_min_y = 0
+        box_max_y = len(source)
     else:
-        # ToDo: do this DIY so we are not dependent on openCV
-        return cv2.blur(source, (kernel_size, kernel_size))
+        box_min_x = box[0][0]
+        box_max_x = box[1][0] + 1
+        box_min_y = box[0][1]
+        box_max_y = box[1][1] + 1
+    box_width  = box_max_x - box_min_x
+    box_height = box_max_y - box_min_y
+
+    # make an empty buffer to accumulate our integral in
+    integral = np.zeros((box_height, box_width), np.int32)
+
+    for y in range(box_min_y, box_max_y):
+        for x in range(box_min_x, box_max_x):
+            if x == box_min_x:
+                acc = int(source[y, x])
+            else:
+                acc += int(source[y, x])
+            ix = x - box_min_x
+            iy = y - box_min_y
+            if iy == 0:
+                integral[iy][ix] = acc
+            else:
+                integral[iy][ix] = acc + integral[iy - 1][ix]
+
+    return integral
 
 def make_binary(source, box=None, width: float=8, height: float=None, black: float=15, white: float=None):
     """ create a binary (or tertiary) image of the source image within the box using an adaptive threshold,
@@ -635,21 +700,8 @@ def make_binary(source, box=None, width: float=8, height: float=None, black: flo
     height_minus = height_plus - 1                   # offset for going backward
     # endregion
 
-    # make an empty buffer to accumulate our integral in
-    integral = np.zeros((box_height, box_width), np.int32)
-
-    # region accumulate the integral within the box area of the source...
-    for y in range(box_min_y, box_max_y):
-        for x in range(box_min_x, box_max_x):
-            if x == box_min_x:
-                acc = int(source[y, x])
-            else:
-                acc += int(source[y, x])
-            if y == box_min_y:
-                integral[y][x] = acc
-            else:
-                integral[y][x] = acc + integral[y-1][x]
-    # endregion
+    # integrate the image
+    integral = integrate(source, box)
 
     # region do the threshold on a new image buffer...
     binary = np.zeros((box_height, box_width), np.uint8)
@@ -881,7 +933,7 @@ def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = F
     if width < 3 or height < 3:
         return None
     # allocate a label buffer
-    buffer = np.zeros((height, width), np.int32)  # NB: must be signed values
+    buffer = np.zeros((height, width), np.int32)  # NB: must be signed values, 0==background
     # put a 'follow' border around the image edge 1 pixel wide
     # put a -1 border around the buffer edges 1 pixel wide
     # this means we can scan from 1,1 to max-1,max-1 and not need to bother about the edges
@@ -920,7 +972,13 @@ def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = F
                 labels.add_label(label, blob)
             elif below_label == 0 and below_in == find_outside:
                 # found a new internal contour (a hole)
+                if before_label < 1:
+                    # this means its a hole in 'here'
+                    before_label = here_label
                 current_blob = labels.get_blob(before_label)
+                if current_blob is None:
+                    raise Exception('Cannot find current blob when before label is {} at {}x{}'.
+                                    format(before_label, x, y))
                 current_blob.add_contour(contour_trace(image, buffer, before_label, x, y,
                                                        external=False, direct=direct, inverted=inverted))
             elif here_label == 0:
@@ -1037,64 +1095,49 @@ def get_targets(source, params=None, logger=None) -> [tuple]:
     if params is None:
         params = Targets()  # use defaults
     result = find_targets(source, params, logger)
+    if logger is not None:
+        show_result(params, result, logger)
     return params.targets, params.binary
 
+def extract_box(image, box: ((int, int), (int, int))):
+    """ extract a box of the given image """
+    tl_x, tl_y = box[0]
+    br_x, br_y = box[1]
+    width  = br_x - tl_x + 1
+    height = br_y - tl_y + 1
+    buffer = np.zeros((height, width), np.uint8)
+    for x in range(width):
+        for y in range(height):
+            buffer[y, x] = image[tl_y + y, tl_x + x]
+    return buffer
 
-def _test(src, size, proximity, black, inverted, blur, logger):
-    """ ************** TEST **************** """
-
-    def downsize(source, new_size):
-        """ downsize the given image such that either its width or height is at most that given,
-            the aspect ratio is preserved,
-            """
-        height, width = source.shape
-        if width <= new_size or height <= new_size:
-            # its already small enough
-            return source
-        if width > height:
-            # bring height down to new size
-            new_height = new_size
-            new_width = int(width / (height / new_size))
-        else:
-            # bring width down to new size
-            new_width = new_size
-            new_height = int(height / (width / new_size))
-        shrunk = cv2.resize(source, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
-        return shrunk
-
-    logger.log("\nPreparing image: size={}, proximity={}".format(size, proximity))
-    source = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
-    # Downsize it (to simulate low quality smartphone cameras)
-    shrunk = downsize(source, size)
-    logger.log("\nDetecting blobs")
-    params = Targets()
-    params.integration_width = proximity
-    params.black_threshold = black
-    params.inverted = inverted
-    params.blur_kernel_size = blur
-    # do the actual detection
-    image, blobs, buffer, labels, _ = find_targets(shrunk, params, logger=logger)
+def show_result(params, result, logger):
     # show what happened
-    cv2.imwrite("contours-blurred.png", params.blurred)
+    image, blobs, buffer, labels, _ = result
+    if params.blur_kernel_size is not None and params.blur_kernel_size >= 3:
+        logger.draw(params.blurred, file='blurred')
     draw = cv2.merge([image, image, image])
-    logger.log("\n")
-    cv2.imwrite("contours_binary.png", draw)
-    logger.log("binary image shown in contours_binary.png")
+    logger.draw(draw, file='binary')
     max_x = buffer.shape[1]
     max_y = buffer.shape[0]
-    draw_bad = cv2.merge([shrunk, shrunk, shrunk])
-    draw_good = cv2.merge([shrunk, shrunk, shrunk])
+    if params.box is not None:
+        source_part = extract_box(params.source, params.box)
+    else:
+        source_part = params.source
+    logger.draw(source_part, file='grayscale')
+    draw_bad = cv2.merge([source_part, source_part, source_part])
+    draw_good = cv2.merge([source_part, source_part, source_part])
     # NB: cv2 colour order is BGR not RGB
-    colours = {REJECT_NONE:            (const.LIME   , 'lime'   ),
-               REJECT_UNKNOWN:         (const.RED    , 'red'    ),
-               REJECT_TOO_SMALL:       (const.YELLOW , 'yellow' ),
-               REJECT_TOO_BIG:         (const.YELLOW , 'yellow' ),
-               REJECT_WHITENESS:       (const.MAROON , 'maroon' ),
-               REJECT_BLACKNESS:       (const.CYAN   , 'cyan'   ),
-               REJECT_INTERNALS:       (const.OLIVE  , 'olive'  ),
-               REJECT_SQUARENESS:      (const.NAVY   , 'navy'   ),
-               REJECT_WAVYNESS:        (const.MAGENTA, 'magenta'),
-               REJECT_OFFSETNESS:      (const.ORANGE , 'orange' ),
+    colours = {REJECT_NONE: (const.LIME, 'lime'),
+               REJECT_UNKNOWN: (const.RED, 'red'),
+               REJECT_TOO_SMALL: (const.YELLOW, 'yellow'),
+               REJECT_TOO_BIG: (const.YELLOW, 'yellow'),
+               REJECT_WHITENESS: (const.MAROON, 'maroon'),
+               REJECT_BLACKNESS: (const.CYAN, 'cyan'),
+               REJECT_INTERNALS: (const.OLIVE, 'olive'),
+               REJECT_SQUARENESS: (const.NAVY, 'navy'),
+               REJECT_WAVYNESS: (const.MAGENTA, 'magenta'),
+               REJECT_OFFSETNESS: (const.ORANGE, 'orange'),
                }
     for x in range(max_x):
         for y in range(max_y):
@@ -1122,19 +1165,18 @@ def _test(src, size, proximity, black, inverted, blur, logger):
         points = circumference(circle.centre.x, circle.centre.y, circle.radius)
         draw_good = plot(draw_good, points, const.BLUE)
 
-    cv2.imwrite("contours_accepted.png", draw_good)
-    logger.log("accepted contours shown in contours_accepted.png")
-    cv2.imwrite("contours_rejected.png", draw_bad)
-    logger.log("rejected contours shown in contours_rejected.png")
-    draw = cv2.merge([shrunk, shrunk, shrunk])
+    logger.draw(draw_good, file='accepted')
+    logger.draw(draw_bad, file='rejected')
+    draw = cv2.merge([source_part, source_part, source_part])
     for target in params.targets:
-        cv2.circle(draw, (int(round(target[0])), int(round(target[1]))), int(round(target[2])), (0, 255, 0), 1)
-    cv2.imwrite("contours_blobs.png", draw)
-    logger.log("detected blobs shown in contours_blobs.png")
+        x = int(round(target[0]))
+        y = int(round(target[1]))
+        cv2.circle(draw, (x, y), int(round(target[2])), (0, 255, 0), 1)
+    logger.draw(draw, file='blobs')
 
     logger.log("\nAll accepted blobs:")
     stats_range = 20
-    stats_span = 100/stats_range/100
+    stats_span = 100 / stats_range / 100
     all_squareness_stats = [0 for _ in range(stats_range + 1)]
     all_wavyness_stats = [0 for _ in range(stats_range + 1)]
     all_whiteness_stats = [0 for _ in range(stats_range + 1)]
@@ -1159,7 +1201,7 @@ def _test(src, size, proximity, black, inverted, blur, logger):
         for i, num in enumerate(stats):
             if num == 0:
                 continue
-            msg = '{}, {:.2f}-{}'.format(msg, i*stats_span, num)
+            msg = '{}, {:.2f}-{}'.format(msg, i * stats_span, num)
         logger.log('  {:10}: {}'.format(name, msg[2:]))
 
     for b, blob in enumerate(blobs):
@@ -1185,7 +1227,7 @@ def _test(src, size, proximity, black, inverted, blur, logger):
     # show stats
     logger.log("\nAll reject frequencies (across {} blobs):".format(len(blobs)))
     for reason, count in reject_stats.items():
-        logger.log("  {}: {} ({:.2f}%)".format(reason, count, (count/len(blobs))*100))
+        logger.log("  {}: {} ({:.2f}%)".format(reason, count, (count / len(blobs)) * 100))
     logger.log("\nAll blobs stats (across {} blobs):".format(len(blobs)))
     log_stats("squareness", all_squareness_stats)
     log_stats("wavyness", all_wavyness_stats)
@@ -1209,6 +1251,49 @@ def _test(src, size, proximity, black, inverted, blur, logger):
     logger.log("\nBlob colours:")
     for reason, (_, name) in colours.items():
         logger.log('  {}: {}'.format(name, reason))
+
+def downsize(source, new_size):
+    """ downsize the given image such that either its width or height is at most that given,
+        the aspect ratio is preserved, its a no-op if image already small enough,
+        returns the modified image,
+        this is purely a diagnostic aid to simulate low-resolution cameras
+        """
+    height, width = source.shape
+    if width <= new_size or height <= new_size:
+        # its already small enough
+        return source
+    if width > height:
+        # bring height down to new size
+        new_height = new_size
+        new_width = int(width / (height / new_size))
+    else:
+        # bring width down to new size
+        new_width = new_size
+        new_height = int(height / (width / new_size))
+    shrunk = cv2.resize(source, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+    return shrunk
+
+def load_image(src):
+    """ load the given image file as a grayscale image """
+    return cv2.imread(src, cv2.IMREAD_GRAYSCALE)
+
+def _test(src, size, proximity, black, inverted, blur, logger, params=None):
+    """ ************** TEST **************** """
+
+    logger.log("\nPreparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
+    source = load_image(src)
+    # Downsize it (to simulate low quality smartphone cameras)
+    shrunk = downsize(source, size)
+    logger.log("\nDetecting blobs")
+    if params is None:
+        params = Targets()
+    params.source_file = src
+    params.integration_width = proximity
+    params.black_threshold = black
+    params.inverted = inverted
+    params.blur_kernel_size = blur
+    # do the actual detection
+    result = get_targets(shrunk, params, logger=logger)
 
     return params
 
@@ -1237,7 +1322,7 @@ if __name__ == "__main__":
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/close-101-111-124-172-222-281-333-337-354-444-555-594-655-666-710-740-777-819-888-900.jpg"
     src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/square-codes/test-alt-bits.png"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
@@ -1259,7 +1344,7 @@ if __name__ == "__main__":
     # blobs, buffer, labels = find_blobs(image)
     # endregion
 
-    logger = utils.Logger('contours.log')
+    logger = utils.Logger('contours.log', 'contours')
     logger.log('_test')
 
     _test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],

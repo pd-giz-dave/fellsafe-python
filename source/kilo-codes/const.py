@@ -58,7 +58,6 @@ DEBUG_VERBOSE = 2  # do everything - generates a *lot* of output
 # integration area is required (i.e. smaller image fraction), this is used for testing print images
 PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
 PROXIMITY_CLOSE = 3  # suitable for print images
-PROXIMITY_INSIDE = 1  # for use within a 'box' inside the image
 # black threshold for binarising contours
-BLACK_LEVEL = {PROXIMITY_FAR: -2, PROXIMITY_CLOSE: -0.01, PROXIMITY_INSIDE: -0.01}
+BLACK_LEVEL = {PROXIMITY_FAR: -0.5, PROXIMITY_CLOSE: -0.01}
 # endregion

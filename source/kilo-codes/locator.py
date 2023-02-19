@@ -29,13 +29,19 @@
 """
 
 import math
+import cv2       # purely for diagnostic aids
 
 import codes     # for the geometry constants
 import const     # for the proximity constants
 import utils     # for the logger
 import contours  # for providing a test source of blobs
 
-Params = contours.Targets  # upstream of here is not allowed to know about contours
+class Params(contours.Targets):
+    def __init__(self):
+        self.locator = None
+
+get_targets = contours.get_targets  # only here to hide contours from upstream
+extract_box = contours.extract_box  # ..
 
 class Detection:
     """ a 'detection' is the four points of a rectangle formed from the three detected corners, and its
@@ -44,12 +50,12 @@ class Detection:
         the code area (equivalent to the radius of the biggest blob)
         """
 
-    MARGIN_SCALE = 1.7  # scale factor from the maximum blob radius to the enclosing box edges
+    MARGIN_SCALE = 1.5  # scale factor from the maximum blob radius to the enclosing box edges
 
     @staticmethod
     def constrain(value, min_value, max_value):
         """ constrain the given value (as an int) to be between the given min/max (int) limits """
-        value = int(min(max(int(value), min_value), max_value))
+        value = int(min(max(int(round(value)), min_value), max_value))
         return value
 
     def __init__(self, rectangle, image_width, image_height):
@@ -57,10 +63,10 @@ class Detection:
             image width/height is used to constrain the enclosing box for detections close to the image edges
             the rectangle co-ordinates may be fractional, the box co-ordinates are not
             """
-        self.tl = (rectangle[0][0], rectangle[0][1])
-        self.tr = (rectangle[1][0], rectangle[1][1])
-        self.br = (rectangle[2][0], rectangle[2][1])
-        self.bl = (rectangle[3][0], rectangle[3][1])
+        self.tl = rectangle[0]
+        self.tr = rectangle[1]
+        self.br = rectangle[2]
+        self.bl = rectangle[3]
         margin = max(rectangle[0][2], rectangle[1][2], rectangle[2][2], rectangle[3][2]) * Detection.MARGIN_SCALE
         min_x = Detection.constrain(min(self.tl[0], self.tr[0], self.br[0], self.bl[0]) - margin, 0, image_width-1)
         max_x = Detection.constrain(max(self.tl[0], self.tr[0], self.br[0], self.bl[0]) + margin, 0, image_width-1)
@@ -88,13 +94,15 @@ class Locator:
     R_COORD = 2
 
     def __init__(self, blobs, logger=None):
-        self.blobs      = blobs
-        self.logger     = logger
+        self.blobs       = blobs
+        self.logger      = logger
         self._neighbours = None
         self._corners    = None
         self._triangles  = None
         self._rectangles = None
         self._detections = None
+        self._width      = None
+        self._height     = None
 
     @staticmethod
     def is_same(a, b, limit) -> bool:
@@ -311,54 +319,46 @@ class Locator:
         #       (it means a timing mark got detected as a contour)
         return self._rectangles
 
-    def detections(self, width, height):
+    def detections(self, width=None, height=None):
         """ return a list of detections """
-        if self._detections is not None:
+        if width is None:
+            width = self._width
+        if height is None:
+            height = self._height
+        if self._detections is not None and self._width == width and self._height == height:
             # already done it
             return self._detections
         self._detections = []
+        self._width      = width
+        self._height     = height
         for rectangle in self.rectangles():
             self._detections.append(Detection(rectangle, width, height))
         return self._detections
 
 
-def locate_targets(image, params: Params, logger=None) -> (Params, [Detection]):
-    """ locate targets in the given image using the given params,
-        returns the updated params (for diagnostics) and a (possibly empty) list of detections
+def locate_targets(image, params: Params, logger=None) -> [Detection]:
+    """ locate targets in the given image blobs using the given params,
+        returns a (possibly empty) list of detections
+        NB: params are modified
         """
-    contours.find_targets(image, params, logger=logger)
-    locator = Locator(params.blobs, logger.log)
+    locator = Locator(params.targets, logger.log)
     max_x = image.shape[1]  # NB: x is columns and y is rows in the array
     max_y = image.shape[0]  # ..
     detections = locator.detections(max_x, max_y)
-    return params, detections
+    if logger is not None:
+        show_results(params, locator, logger)
+    params.locator = locator  # for upstream diagnostics
+    return detections
 
-
-def _test(src, proximity, logger, blur=3, create_new_blobs=True):
-    # create_new_blobs=True to create new blobs, False to re-use existing blobs
-    import cv2
-    import pickle
-
-    if create_new_blobs:
-        # this is very slow
-        results = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
-                                 inverted=True, blur=blur, logger=logger)
-        blobs_dump = open('locator.blobs','wb')
-        pickle.dump(results, blobs_dump)
-        blobs_dump.close()
-    else:
-        blobs_dump = open('locator.blobs', 'rb')
-        results = pickle.load(blobs_dump)
-        blobs_dump.close()
-    blobs = results.targets
-    image = results.source
-    max_x = image.shape[1]  # NB: x, y are reversed in mumpy arrays
-    max_y = image.shape[0]  #     ..
-    image = cv2.merge([image, image, image])  # make into a colour image
+def show_results(params, locator, logger):
+    blobs  = params.targets
+    source = params.source
+    max_x  = source.shape[1]  # NB: x, y are reversed in numpy arrays
+    max_y  = source.shape[0]  # ..
+    image  = cv2.merge([source, source, source])  # make into a colour image
 
     logger.log('\n\nLocator:')
-    blobs.sort(key=lambda k: (k[0], k[1]))  # put in x,y order purely to help debugging
-    locator = Locator(blobs, logger.log)
+    blobs.sort(key=lambda k: (k[0], k[1]))  # put in x,y order purely to help diagnostics
     neighbours = locator.neighbours()
     logger.log('{} blobs with {} or more neighbours:'.format(len(neighbours), Locator.MIN_NEIGHBOURS))
     for blob, neighbour in neighbours:
@@ -388,16 +388,13 @@ def _test(src, proximity, logger, blur=3, create_new_blobs=True):
     rectangles = locator.rectangles()
     logger.log('{} rectangles:'.format((len(rectangles))))
     for tl, tr, br, bl, (a, b, c) in rectangles:
-        ax, ay, _ , _ = tl
-        bx, by, _ , _ = tr
-        cx, cy, _ , _ = bl
+        ax, ay, _, _ = tl
+        bx, by, _, _ = tr
+        cx, cy, _, _ = bl
         dx, dy, dr, _ = br
         logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
                    format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy))
-        cv2.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.RED   , 1)
-        cv2.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.GREEN , 1)
-        cv2.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.YELLOW, 1)
-        cv2.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE  , 1)
+        draw_rectangle(image, tl, tr, br, bl)
         cv2.circle(image, (int(round(dx)), int(round(dy))), int(round(dr)), const.GREEN, 1)  # mark our estimated blob
     detections = locator.detections(max_x, max_y)
     logger.log('{} detections:'.format(len(detections)))
@@ -409,20 +406,56 @@ def _test(src, proximity, logger, blur=3, create_new_blobs=True):
                           detection.bl[0], detection.bl[1]))
         logger.log('    enclosing box: tl: {} x {} -> br: {} x {}'.format(detection.box_tl[0], detection.box_tl[1],
                                                                           detection.box_br[0], detection.box_br[1]))
-        cv2.rectangle(image, detection.box_tl, detection.box_br, const.GREEN, 1)
-    cv2.imwrite('locators.png', image)
-    return locator, results.source  # for upstream test harness
+        cv2.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+    logger.draw(image, file='locators')
+
+def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
+    """ draw the given located code rectangle corner points on the given image for diagnostic purposes,
+        origin is the co-ordinate reference for the given corner points, this is subtracted to gain the
+        equivalent co-ordinates in the image (the image may be a 'box' extracted from a larger image)
+        """
+    ax, ay = tl[0] - origin[0], tl[1] - origin[1]
+    bx, by = tr[0] - origin[0], tr[1] - origin[1]
+    cx, cy = bl[0] - origin[0], bl[1] - origin[1]
+    dx, dy = br[0] - origin[0], br[1] - origin[1]
+    cv2.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.GREEN , 1)
+    cv2.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.YELLOW, 1)
+    cv2.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.RED   , 1)
+    cv2.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE  , 1)
+    return image
+
+
+def _test(src, proximity, logger, blur=3, create_new_blobs=True):
+    # create_new_blobs=True to create new blobs, False to re-use existing blobs
+    import pickle
+
+    if create_new_blobs:
+        # this is very slow
+        params = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
+                                inverted=True, blur=blur, logger=logger, params=Params())
+        blobs_dump = open('locator.blobs','wb')
+        pickle.dump(params, blobs_dump)
+        blobs_dump.close()
+    else:
+        blobs_dump = open('locator.blobs', 'rb')
+        params = pickle.load(blobs_dump)
+        blobs_dump.close()
+
+    params.source_file = src
+    locate_targets(params.source, params, logger)
+
+    return params  # for upstream test harness
 
 
 if __name__ == "__main__":
     """ test harness """
 
     src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/square-codes/test-alt-bits.png"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
-    logger = utils.Logger('locator.log')
+    logger = utils.Logger('locator.log', 'locator')
     logger.log('_test')
 
-    _test(src, proximity, logger, create_new_blobs=True)
+    _test(src, proximity, logger, blur=3, create_new_blobs=True)

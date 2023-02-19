@@ -90,6 +90,7 @@ class Codes:
     # endregion
     # region Public constants...
     CODE_EXTENT = max(MAX_X_CELL, MAX_Y_CELL)  # max size of the entire code in units of the 'radius' of a locator blob
+    DATA_SHAPE = (5, 5)  # columns x rows of the data bits
     LOCATOR_SPACING = 7  # distance between locator blob centres in units of the 'radius' of a locator blob
     LOCATORS_PER_CODE = 3  # how many locators there are per code
     # endregion
