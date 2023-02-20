@@ -731,7 +731,6 @@ def make_binary(source, box=None, width: float=8, height: float=None, black: flo
 
     return binary
 
-
 def contour_trace(image, buffer, label: int, x: int, y: int,
                   external: bool = True, direct: bool = True, inverted: bool=False) -> Contour:
     """ follow the contour at x,y in image giving it label in buffer,
@@ -791,7 +790,6 @@ def contour_trace(image, buffer, label: int, x: int, y: int,
             i = (previous + 2) & 7
     return contour
 
-
 def count_pixels(image, perimeter):
     """ count how many pixels in the area bounded by perimeter within image are black and how many are white,
         perimeter is a list of x co-ords and the max/min y at that x,
@@ -812,7 +810,6 @@ def count_pixels(image, perimeter):
             else:
                 white += 1
     return black, white
-
 
 def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
     """ return a list of co-ordinates of a circle centred on x,y of radius r,
@@ -918,7 +915,6 @@ def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
 
     return points
 
-
 def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = False) -> [Blob]:
     """ find_blobs in the given image,
         if inverted is True look for black blobs, else white
@@ -990,7 +986,6 @@ def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = F
     else:
         return blobs
 
-
 def filter_blobs(blobs: [Blob], params: Targets, logger=None) -> [Blob]:
     """ filter out blobs that do no meet the target criteria,
         marks *all* blobs with an appropriate reject code and returns a list of good ones
@@ -1051,7 +1046,6 @@ def filter_blobs(blobs: [Blob], params: Targets, logger=None) -> [Blob]:
         logger.pop()
     return good_blobs
 
-
 def find_targets(source, params: Targets, logger=None):
     """ given a monochrome image find all potential targets,
         returns a list of targets where each is a tuple of x:float, y:float, radius:float, label:int
@@ -1088,7 +1082,6 @@ def find_targets(source, params: Targets, logger=None):
     else:
         logger.pop()
         return params.binary, blobs, buffer, labels, params.targets
-
 
 def get_targets(source, params=None, logger=None) -> [tuple]:
     """ find targets in the given image using default parameters """

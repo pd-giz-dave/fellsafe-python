@@ -67,6 +67,7 @@ class Detection:
         self.tr = rectangle[1]
         self.br = rectangle[2]
         self.bl = rectangle[3]
+        self.squareness = rectangle[5]  # maybe used as a discriminator downstream
         margin = max(rectangle[0][2], rectangle[1][2], rectangle[2][2], rectangle[3][2]) * Detection.MARGIN_SCALE
         min_x = Detection.constrain(min(self.tl[0], self.tr[0], self.br[0], self.bl[0]) - margin, 0, image_width-1)
         max_x = Detection.constrain(max(self.tl[0], self.tr[0], self.br[0], self.bl[0]) + margin, 0, image_width-1)
@@ -86,6 +87,7 @@ class Locator:
     MIN_NEIGHBOURS       = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per locator
     MIN_LENGTH_RATIO     = 0.7  # min length ratio of two triangle sides to be considered equal
     MIN_DIAGONAL_RATIO   = 0.8  # min diagonal ratio between expected and actual length to be considered equal
+    NEAR_CORNER_SCALE    = 1.0  # scaling factor to consider two corners as overlapping
     # endregion
 
     # blob tuple indexes
@@ -103,17 +105,23 @@ class Locator:
         self._detections = None
         self._width      = None
         self._height     = None
+        self._dropped    = None
 
     @staticmethod
     def is_same(a, b, limit) -> bool:
-        """ determine if the two given numbers are considered equal within the given limit """
+        """ determine if the two given numbers are considered equal within the given limit,
+            if they are, return their ratio, else return None
+            """
         ratio = min(a, b) / max(a, b)
-        return ratio >= limit
+        if ratio < limit:
+            return None
+        else:
+            return ratio
 
     @staticmethod
     def distance(here, there) -> float:
         """ calculate the distance between the two given blobs,
-            returns the distance squared or None if they are too far apart,
+            returns the distance squared,
             we use squared result so we do not need to do a square root (which is slow)
             """
         distance_x  = here[Locator.X_COORD] - there[Locator.X_COORD]
@@ -122,6 +130,33 @@ class Locator:
         distance_y *= distance_y
         distance    = distance_x + distance_y
         return distance
+
+    @staticmethod
+    def is_near(a, b) -> bool:
+        """ determine if corner a is near corner b, 'near' is when their areas overlap,
+            i.e. the distance between them is less than the sum of their radii times some scaling constant
+            """
+        gap = Locator.distance(a, b)
+        limit = (a[Locator.R_COORD] + b[Locator.R_COORD]) * Locator.NEAR_CORNER_SCALE
+        limit *= limit  # gap is distance squared, so the limit must be too
+        return gap < limit
+
+    @staticmethod
+    def quality(rectangle):
+        """ return a measure of the quality of the given rectangle,
+            a high quality rectangle is more square and has more evenly sized locators
+            """
+        tl, tr, br, bl, _, squareness = rectangle
+        tl_r = tl[Locator.R_COORD]
+        tr_r = tr[Locator.R_COORD]
+        # don't look at br as that is an estimate and will have the same radius as tl
+        bl_r = bl[Locator.R_COORD]
+        max_r = max(tl_r, tr_r, bl_r)
+        tl_ratio = tl_r / max_r  # range 0..1
+        tr_ratio = tr_r / max_r
+        bl_ratio = bl_r / max_r
+        ratio = tl_ratio * tr_ratio * bl_ratio  # range 0..1, 0==bad, 1==good
+        return ratio * squareness               # range 0..1, 0==bad, 1==good
 
     def neighbours(self):
         """ return a list of similar size near neighbours for each blob """
@@ -140,7 +175,7 @@ class Locator:
                 # check size first (as its cheap)
                 here_r  = here [Locator.R_COORD]
                 there_r = there[Locator.R_COORD]
-                if not Locator.is_same(here_r, there_r, Locator.MIN_RADIUS_RATIO):
+                if Locator.is_same(here_r, there_r, Locator.MIN_RADIUS_RATIO) is None:
                     # sizes too dis-similar
                     continue
                 # size OK, now check distance
@@ -159,7 +194,8 @@ class Locator:
 
     def corners(self):
         """ return a list of triplets that meet our corner requirements,
-            that is a triangle A,B,C such that A->B == A->C == d and B->C == sqrt(2d^2)
+            that is a triangle A,B,C such that A->B == A->C == d and B->C == sqrt(2d^2),
+            i.e. a right-angle triangle with 2 equal sides
             """
         if self._corners is not None:
             # already done it
@@ -176,9 +212,9 @@ class Locator:
                     b2c = Locator.distance(self.blobs[b], self.blobs[c])
                     # a2b is side ab length, c2a is side ac length, b2c is side bc length
                     # we want two sides to be d^2 and the other to be 2d^2
-                    if not Locator.is_same(a2b, c2a, Locator.MIN_LENGTH_RATIO):
-                        if not Locator.is_same(a2b, b2c, Locator.MIN_LENGTH_RATIO):
-                            if not Locator.is_same(c2a, b2c, Locator.MIN_LENGTH_RATIO):
+                    if Locator.is_same(a2b, c2a, Locator.MIN_LENGTH_RATIO) is None:
+                        if Locator.is_same(a2b, b2c, Locator.MIN_LENGTH_RATIO) is None:
+                            if Locator.is_same(c2a, b2c, Locator.MIN_LENGTH_RATIO) is None:
                                 # no two sides the same, so not a corner
                                 continue
                             else:
@@ -196,25 +232,36 @@ class Locator:
                         primary         = a
                         actual_length   = b2c
                         expected_length = a2b + c2a
-                    if not Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO):
+                    squareness = Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO)
+                    if squareness is None:
                         # not required distance
+                        # if self.logger is not None:
+                        #     drop_x, drop_y, drop_r, _ = self.blobs[primary]
+                        #     ratio = Locator.is_same(expected_length, actual_length, 0)
+                        #     self.logger('Dropping triplet at {:.2f}x{:.2f}y ({:.2f}r) as not being square enough, '
+                        #                 'expected diagonal length:{:.2f}, actual:{:.2f} (ratio is {:.2f}, limit is {})'.
+                        #                 format(drop_x, drop_y, drop_r,
+                        #                        expected_length, actual_length, ratio, Locator.MIN_DIAGONAL_RATIO))
                         continue
                     # found a qualifying corner set
                     # save corner in blob number order so can easily find duplicates
                     corners = [a, b, c]
                     corners.sort()
                     corners.append(primary)
+                    corners.append(squareness)  # this is used to filter duplicate rectangles, the closer to 1 the better
                     self._corners.append(corners)
         if len(self._corners) > 0:
             # remove duplicates (NB: relying on blobs within corners being sorted into blob order)
             self._corners.sort(key=lambda k: (k[0], k[1], k[2]))
-            ref = self._corners[-1]
+            ref_a, ref_b, ref_c, _, _ = self._corners[-1]
             for corner in range(len(self._corners)-2, -1, -1):
-                abc = self._corners[corner]
-                if abc == ref:
+                a, b, c, _, _ = self._corners[corner]
+                if a == ref_a and b == ref_b and c == ref_c:
                     del self._corners[corner+1]
                 else:
-                    ref = abc
+                    ref_a = a
+                    ref_b = b
+                    ref_c = c
         return self._corners
 
     def triangles(self):
@@ -238,7 +285,7 @@ class Locator:
             return (qa==1 and qb==2) or (qa==2 and qb==3) or (qa==3 and qb==4) or (qa==4 and qb==1)
 
         self._triangles = []
-        for a, b, c, primary in self.corners():
+        for a, b, c, primary, squareness in self.corners():
             # primary is the corner where the right-angle is (one of a or b or c)
             # if we know A is a right-angle it means B and C will be in adjacent quadrants
             # clockwise means B is 'before' C in this:
@@ -284,7 +331,7 @@ class Locator:
             tl = self.blobs[triangle[0]]
             tr = self.blobs[triangle[1]]
             bl = self.blobs[triangle[2]]
-            self._triangles.append((tl, tr, bl, triangle))
+            self._triangles.append((tl, tr, bl, triangle, squareness))
         self.triangles().sort(key=lambda k: (k[3][0], k[3][1], k[3][2]))  # put into blob order purely to help debugging
         return self._triangles
 
@@ -305,7 +352,7 @@ class Locator:
             # already done it
             return self._rectangles
         self._rectangles = []
-        for tl, tr, bl, blobs in self.triangles():
+        for tl, tr, bl, triangle, squareness in self.triangles():
             Ax, Ay, Ar, _ = tl
             Bx, By, _ , _ = tr
             Cx, Cy, _ , _ = bl
@@ -313,14 +360,14 @@ class Locator:
             Ey = ((Cy - By) / 2) + By
             Dx = ((Ex - Ax) * 2) + Ax
             Dy = ((Ey - Ay) * 2) + Ay
-            br = (Dx, Dy, Ar, None)  # build a blob for the 'bottom-right' corner (same size as 'top-left')
-            self._rectangles.append((tl, tr, br, bl, blobs))
-        # ToDo: resolve ambiguity when an estimated blob is very near an actual one
-        #       (it means a timing mark got detected as a contour)
+            br = [Dx, Dy, Ar, None]  # build a blob for the 'bottom-right' corner (same size as 'top-left')
+            self._rectangles.append([tl, tr, br, bl, triangle, squareness])
         return self._rectangles
 
     def detections(self, width=None, height=None):
-        """ return a list of detections """
+        """ return a list of unique detections, to be unique all four corners must be distinct,
+            when not, the best is kept where 'best' is that with the most equal corner radii and most 'square'
+            """
         if width is None:
             width = self._width
         if height is None:
@@ -328,12 +375,59 @@ class Locator:
         if self._detections is not None and self._width == width and self._height == height:
             # already done it
             return self._detections
+
         self._detections = []
+        self._dropped    = []
         self._width      = width
         self._height     = height
+        # resolve ambiguity when an estimated corner is very near an actual one
+        # (it means a timing mark got detected as a contour)
+        for r1, rectangle in enumerate(self.rectangles()):
+            if rectangle is None:
+                # this one has been dumped
+                continue
+            r1_quality = Locator.quality(rectangle)
+            (_, _, br1, _, _, _) = rectangle
+            for r2, rectangle in enumerate(self.rectangles()):
+                if r2 == r1:
+                    # ignore self
+                    continue
+                if rectangle is None:
+                    # this one has been dumped
+                    continue
+                (tl, tr, _, bl, _, _) = rectangle
+                if Locator.is_near(tl, br1) or Locator.is_near(tr, br1) or Locator.is_near(bl, br1):
+                    # got a real corner near our estimate - choose which to dump
+                    r2_quality = Locator.quality(rectangle)
+                    if r1_quality > r2_quality:
+                        # r1 better than r2 - drop r2
+                        self._dropped.append(self._rectangles[r2])
+                        self._rectangles[r2] = None
+                        continue  # carry on looking for more
+                    elif r1_quality < r2_quality:
+                        # r2 better than r1 - drop r1
+                        self._dropped.append(self._rectangles[r1])
+                        self._rectangles[r1] = None
+                        break  # stop looking for more
+                    else:
+                        # both same quality! - tough, stay ambiguous
+                        continue
+        # remove dropped rectangles
+        for rectangle in range(len(self._rectangles)-1, -1, -1):
+            if self._rectangles[rectangle] is None:
+                del self._rectangles[rectangle]
+        # build detection list
         for rectangle in self.rectangles():
+            if rectangle is None:
+                # this one has been dumped
+                continue
             self._detections.append(Detection(rectangle, width, height))
         return self._detections
+
+    def dropped(self):
+        """ return list of dropped detections (diagnostic aid) """
+        self.rectangles()  # make sure we've worked it out
+        return self._dropped
 
 
 def locate_targets(image, params: Params, logger=None) -> [Detection]:
@@ -375,27 +469,39 @@ def show_results(params, locator, logger):
         cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.BLUE, 1)
     corners = locator.corners()
     logger.log('{} corner triplets found:'.format(len(corners)))
-    for a, b, c, primary in corners:
-        logger.log('  {} -> {} -> {}: primary: {}'.format(a, b, c, primary))
+    for a, b, c, primary, squareness in corners:
+        logger.log('  {} -> {} -> {}: primary: {}, squareness: {:.2f}'.format(a, b, c, primary, squareness))
     triangles = locator.triangles()
     logger.log('{} triangles:'.format(len(triangles)))
-    for tl, tr, bl, (a, b, c) in triangles:
+    for tl, tr, bl, (a, b, c), squareness in triangles:
         ax, ay, _, _ = tl
         bx, by, _, _ = tr
         cx, cy, _, _ = bl
-        logger.log('  {} -> {} -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
-                   format(a, b, c, ax, ay, bx, by, cx, cy))
+        logger.log('  {} -> {} -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} (squareness={:.2f})'.
+                   format(a, b, c, ax, ay, bx, by, cx, cy, squareness))
     rectangles = locator.rectangles()
-    logger.log('{} rectangles:'.format((len(rectangles))))
-    for tl, tr, br, bl, (a, b, c) in rectangles:
+    logger.log('{} good rectangles:'.format((len(rectangles))))
+    for rectangle in rectangles:
+        if rectangle is None:
+            continue
+        tl, tr, br, bl, (a, b, c), squareness = rectangle
         ax, ay, _, _ = tl
         bx, by, _, _ = tr
         cx, cy, _, _ = bl
         dx, dy, dr, _ = br
-        logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
-                   format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy))
+        logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'
+                   ' (squareness={:.2f})'.format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy, squareness))
         draw_rectangle(image, tl, tr, br, bl)
         cv2.circle(image, (int(round(dx)), int(round(dy))), int(round(dr)), const.GREEN, 1)  # mark our estimated blob
+    dropped = locator.dropped()
+    logger.log('{} dropped rectangles:'.format((len(dropped))))
+    for tl, tr, br, bl, (a, b, c), squareness in dropped:
+        ax, ay, _, _ = tl
+        bx, by, _, _ = tr
+        cx, cy, _, _ = bl
+        dx, dy, dr, _ = br
+        logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'
+                   ' (squareness={:.2f})'.format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy, squareness))
     detections = locator.detections(max_x, max_y)
     logger.log('{} detections:'.format(len(detections)))
     for detection in detections:
@@ -404,8 +510,9 @@ def show_results(params, locator, logger):
                           detection.tr[0], detection.tr[1],
                           detection.br[0], detection.br[1],
                           detection.bl[0], detection.bl[1]))
-        logger.log('    enclosing box: tl: {} x {} -> br: {} x {}'.format(detection.box_tl[0], detection.box_tl[1],
-                                                                          detection.box_br[0], detection.box_br[1]))
+        logger.log('    enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
+                   format(detection.box_tl[0], detection.box_tl[1], detection.box_br[0], detection.box_br[1],
+                          detection.squareness))
         cv2.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
     logger.draw(image, file='locators')
 
@@ -450,7 +557,7 @@ def _test(src, proximity, logger, blur=3, create_new_blobs=True):
 if __name__ == "__main__":
     """ test harness """
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-close.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
@@ -458,4 +565,4 @@ if __name__ == "__main__":
     logger = utils.Logger('locator.log', 'locator')
     logger.log('_test')
 
-    _test(src, proximity, logger, blur=3, create_new_blobs=True)
+    _test(src, proximity, logger, blur=3, create_new_blobs=False)

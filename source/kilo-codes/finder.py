@@ -490,7 +490,7 @@ def _test(src, proximity, blur=3, logger=None, create_new_detections=True):
 if __name__ == "__main__":
     """ test harness """
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-far.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
