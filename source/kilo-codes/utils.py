@@ -74,3 +74,28 @@ class Logger:
         cv2.imwrite(filename, image)
 
         self.log('{}: image saved as: {}'.format(file, filename))
+
+
+def _unload(image, source=None, file='', target=(0,0), logger=None):
+    """ unload the given image with a name that indicates its source and context,
+        file is the file base name to save the image as,
+        target identifies the x,y of the primary locator the image represents,
+        target of 0,0 means no x/y identification for the image name,
+        """
+
+    folder = image_folder(source=source, target=target)
+    logger.draw(image, folder=folder, file=file)
+
+def image_folder(source=None, target=(0,0)):
+    """ build folder name for diagnostic images for the given target """
+    if target[0] > 0 and target[1] > 0:
+        # use a sub-folder for this image
+        folder = '{:.0f}x{:.0f}y'.format(target[0], target[1])
+    else:
+        folder = ''
+    if source is not None:
+        # construct parent folder to save images in for this source
+        pathname, _ = os.path.splitext(source)
+        _, basename = os.path.split(pathname)
+        folder = '{}{}'.format(basename, folder)
+    return folder

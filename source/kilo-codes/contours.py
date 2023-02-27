@@ -100,10 +100,11 @@ class Circle:
             # NB: min_y > max_y can happen at the x extremes, but we chuck those, so we don't care
             self.points.append((x, min_y, max_y))
         # we want exclusive x co-ords, so knock the first and last out (there should be at least 3 entries)
-        if len(self.points) < 3:
-            raise Exception('perimeter has less than 3 x co-ords')
-        del self.points[0]
-        del self.points[-1]
+        # ToDo: why?
+        # if len(self.points) < 3:
+        #     raise Exception('perimeter has less than 3 x co-ords')
+        # del self.points[0]
+        # del self.points[-1]
         return self.points
 
 
@@ -112,6 +113,11 @@ class Contour:
         the contour only knows the co-ordinates of its points, it knows nothing of the underlying image,
         NB: most of the metrics of a contour are in the range 0..1 where 0 is good and 1 is very bad
         """
+
+    RADIUS_MODE_INSIDE  = 0
+    RADIUS_MODE_MEAN    = 1
+    RADIUS_MODE_OUTSIDE = 2
+    RADIUS_MODES        = 3
 
     def __init__(self):
         self.points: [Point] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
@@ -127,8 +133,8 @@ class Contour:
         self.blob_perimeter: {Point} = None
         self.x_slices: [tuple] = None
         self.y_slices: [tuple] = None
-        self.circle: Circle = None
         self.centroid: Point = None
+        self.radius: [float] = [None for _ in range(Contour.RADIUS_MODES)]
         self.offset: float = None
 
     def add_point(self, point: Point):
@@ -276,38 +282,50 @@ class Contour:
             self.blob_perimeter[(point.x, point.y)] = True  # NB: do NOT use point as the key, its an object not a tuple
         return self.blob_perimeter
 
-    def get_enclosing_circle(self) -> Circle:
-        """ the enclosing circle of a contour is the centre and the radius required to cover (most of) it,
+    def get_blob_radius(self, mode=RADIUS_MODE_INSIDE) -> float:
+        """ get the radius of the blob from its centre for the given mode,
+            when mode is inside the radius found is the maximum that fits entirely inside the contour
+            when mode is outside the radius found is the minimum that fits entirely outside the contour
+            when mode is mean the radius found is the mean distance to the contour perimeter
             this is an expensive operation so its lazy, calculated on demand and then cached
             """
-        if self.circle is not None:
-            return self.circle
-        centre = self.get_centroid()  # the centre of mass of the blob
-        # the centre is the top left of a 1x1 pixel square, an accurate centre is critical,
-        # the radius is calculated as the mean distance from the centre to the perimeter points,
-        # the centre is the top-left of a 1x1 pixel square, so the actual centre is +0.5 on this,
-        # we want the distance to the *outside* of the perimeter, so when the perimeter is ahead
-        # of the centre we add the pixel width, i.e. 1, when the perimeter is behind its as is
+        if self.radius[mode] is not None:
+            # already done it
+            return self.radius[mode]
+        centre = self.get_centroid()  # the centre of mass of the blob (assuming its solid)
+        # the perimeter points are the top-left of a 1x1 pixel square, we want their centre, so we add 0.5
         perimeter = self.get_blob_perimeter()
         mean_distance_squared = 0
+        min_distance_squared = None
+        max_distance_squared = None
         for x, y in perimeter:
-            if x < centre.x:
-                x_distance = (centre.x + 0.5) - x
-            else:
-                x_distance = (x + 1) - (centre.x + 0.5)
+            x += 0.5
+            y += 0.5
+            x_distance = centre.x - x
             x_distance *= x_distance
-            if y < centre.y:
-                y_distance = (centre.y + 0.5) - y
-            else:
-                y_distance = (y + 1) - (centre.y + 0.5)
+            y_distance = centre.y - y
             y_distance *= y_distance
-            mean_distance_squared += (x_distance + y_distance)
+            distance = x_distance + y_distance
+            mean_distance_squared += distance
+            if min_distance_squared is None or min_distance_squared > distance:
+                min_distance_squared = distance
+            if max_distance_squared is None or max_distance_squared < distance:
+                max_distance_squared = distance
         if len(perimeter) > 0:
             mean_distance_squared /= len(perimeter)
-        r = math.sqrt(mean_distance_squared)
-        # make the circle
-        self.circle = Circle(centre, r)
-        return self.circle
+        mean_r    = max(math.sqrt(mean_distance_squared), 1.0)
+        inside_r  = max(math.sqrt(min_distance_squared), 1.0)
+        outside_r = max(math.sqrt(max_distance_squared), 1.0)
+        # cache all results
+        self.radius[Contour.RADIUS_MODE_INSIDE ] = inside_r
+        self.radius[Contour.RADIUS_MODE_OUTSIDE] = outside_r
+        self.radius[Contour.RADIUS_MODE_MEAN   ] = mean_r
+        # return just the one asked for
+        return self.radius[mode]
+
+    def get_enclosing_circle(self, mode=RADIUS_MODE_INSIDE) -> Circle:
+        """ get the requested circle type """
+        return Circle(self.get_centroid(), self.get_blob_radius(mode))
 
     def get_circle_perimeter(self):
         """ get the perimeter of the enclosing circle,
@@ -379,7 +397,7 @@ class Contour:
                 samples = max_x - min_x + 1
                 sum_y += samples * y
                 num_y += samples
-            self.centroid = Point(sum_x / num_x, sum_y / num_y)
+            self.centroid = Point((sum_x / num_x) + 0.5, (sum_y / num_y) + 0.5)  # +0.5 is to get to the pixel centre
         return self.centroid
 
 
@@ -570,11 +588,9 @@ class Targets:
                                          # NB: Make a small +ve number to ensure totally white stays white
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
-    min_area: float = 3 * 3              # this should be small to detect far away targets
-    max_area: float = 200000             # this has to be big to cater for testing drawn targets (rather than photos)
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
     min_size: float = 3                  # min number of pixels across width/height
-    max_size: float = 100                # max number of pixels across width/height
+    max_size: float = 128                # max number of pixels across width/height
     blur_kernel_size = 3                 # blur kernel size to apply, must be odd, None or < 3 == do not blur
     # all these 'ness' parameters are in the range 0..1, where 0 is perfect and 1 is utter crap
     max_squareness = 0.25                # how close to square the bounding box has to be (0.5 is a 2:1 rectangle)
@@ -793,7 +809,8 @@ def contour_trace(image, buffer, label: int, x: int, y: int,
 def count_pixels(image, perimeter):
     """ count how many pixels in the area bounded by perimeter within image are black and how many are white,
         perimeter is a list of x co-ords and the max/min y at that x,
-        co-ords outside the image bounds are considered to be black
+        perimeter points are inside the area,
+        co-ords outside the image bounds are ignored,
         """
     limit_y = image.shape[0]
     limit_x = image.shape[1]
@@ -802,9 +819,9 @@ def count_pixels(image, perimeter):
     for x, min_y, max_y in perimeter:
         for y in range(min_y, max_y + 1):
             if y >= limit_y or y < 0:
-                black += 1
+                pass
             elif x >= limit_x or x < 0:
-                black += 1
+                pass
             elif image[y, x] == BLACK:
                 black += 1
             else:
@@ -1314,10 +1331,10 @@ if __name__ == "__main__":
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/photo-332-222-555-800-574-371-757-611-620-132-near-blurry.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/close-101-111-124-172-222-281-333-337-354-444-555-594-655-666-710-740-777-819-888-900.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-distant.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    #proximity = const.PROXIMITY_CLOSE
-    proximity = const.PROXIMITY_FAR
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    proximity = const.PROXIMITY_CLOSE
+    #proximity = const.PROXIMITY_FAR
 
     # region test shape...
     # shape = [[0,0,0,0,0,0,0,0,0,0],

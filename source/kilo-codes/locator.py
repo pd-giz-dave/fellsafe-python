@@ -23,7 +23,7 @@
        x   x
          x  (C)
     where 'r' is the blob radius (+/- some margin)
-    'd' is the distance between two of the three blob centres and must be in the region of 7r,
+    'd' is the distance between two of the three blob centres and must be in the region of LOCATOR_SPACING*r,
     'sqrt(2d^2)' is the distance to the other blob centre of a group of three,
     blobs smaller than some factor (<1) of 'r' between the three locator blobs are ignored
 """
@@ -50,7 +50,7 @@ class Detection:
         the code area (equivalent to the radius of the biggest blob)
         """
 
-    MARGIN_SCALE = 1.5  # scale factor from the maximum blob radius to the enclosing box edges
+    MARGIN_SCALE = 1.7  # scale factor from the maximum blob radius to the enclosing box edges
 
     @staticmethod
     def constrain(value, min_value, max_value):
@@ -84,7 +84,7 @@ class Locator:
     MIN_RADIUS_RATIO     = 0.7  # min size ratio between blobs for them to be considered of similar size
     MAX_LOCATOR_DISTANCE = codes.Codes.LOCATOR_SPACING * STRETCH_FACTOR  # max distance between corner locators
     MIN_LOCATOR_DISTANCE = codes.Codes.LOCATOR_SPACING / STRETCH_FACTOR  # min distance between corner locators
-    MIN_NEIGHBOURS       = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per locator
+    MIN_NEIGHBOURS       = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per 'major' locator
     MIN_LENGTH_RATIO     = 0.7  # min length ratio of two triangle sides to be considered equal
     MIN_DIAGONAL_RATIO   = 0.8  # min diagonal ratio between expected and actual length to be considered equal
     NEAR_CORNER_SCALE    = 1.0  # scaling factor to consider two corners as overlapping
@@ -94,6 +94,7 @@ class Locator:
     X_COORD = 0
     Y_COORD = 1
     R_COORD = 2
+    L_COORD = 3
 
     def __init__(self, blobs, logger=None):
         self.blobs       = blobs
@@ -149,7 +150,7 @@ class Locator:
         tl, tr, br, bl, _, squareness = rectangle
         tl_r = tl[Locator.R_COORD]
         tr_r = tr[Locator.R_COORD]
-        # don't look at br as that is an estimate and will have the same radius as tl
+        # don't look at br radius as that is an estimate (so no quality information in it)
         bl_r = bl[Locator.R_COORD]
         max_r = max(tl_r, tr_r, bl_r)
         tl_ratio = tl_r / max_r  # range 0..1
@@ -445,6 +446,7 @@ def locate_targets(image, params: Params, logger=None) -> [Detection]:
     return detections
 
 def show_results(params, locator, logger):
+    """ diagnostic aid - log stats and draw images """
     blobs  = params.targets
     source = params.source
     max_x  = source.shape[1]  # NB: x, y are reversed in numpy arrays
@@ -466,7 +468,7 @@ def show_results(params, locator, logger):
                        format(there, x, y, r, math.sqrt(distance)))
     for blob, neighbour in neighbours:
         x, y, r, _ = locator.blobs[blob]
-        cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.BLUE, 1)
+        cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.YELLOW, 1)
     corners = locator.corners()
     logger.log('{} corner triplets found:'.format(len(corners)))
     for a, b, c, primary, squareness in corners:
@@ -532,11 +534,11 @@ def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
     return image
 
 
-def _test(src, proximity, logger, blur=3, create_new_blobs=True):
+def _test(src, proximity, logger, blur=3, create_new=True):
     # create_new_blobs=True to create new blobs, False to re-use existing blobs
     import pickle
 
-    if create_new_blobs:
+    if create_new:
         # this is very slow
         params = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
                                 inverted=True, blur=blur, logger=logger, params=Params())
@@ -557,12 +559,12 @@ def _test(src, proximity, logger, blur=3, create_new_blobs=True):
 if __name__ == "__main__":
     """ test harness """
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/square-codes/square-codes-close.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    #proximity = const.PROXIMITY_CLOSE
-    proximity = const.PROXIMITY_FAR
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    proximity = const.PROXIMITY_CLOSE
+    #proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('locator.log', 'locator')
     logger.log('_test')
 
-    _test(src, proximity, logger, blur=3, create_new_blobs=False)
+    _test(src, proximity, logger, blur=3, create_new=True)

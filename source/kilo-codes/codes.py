@@ -4,45 +4,51 @@
     The data area structure is implicit knowledge, its contents come from outside
     or are delivered to outside.
     Structure overview:
-    0____1____2____3____  4____  5____  6____  7____8____9____10___
-    ____________________  _____  _____  _____  ____________________
-    1____xxxxxxxxxx_____  *****  _____  *****  _____xxxxxxxxxx_____  <--
-    _____xxxxxxxxxx_____  *****  _____  *****  _____xxxxxxxxxx_____  <-- column markers
-    2____xxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxx_____  <--
-    _____xxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxx_____  <--
+    0____1____2____3____4____  5____  6____  7____  8____9____10___11___12___
+    _________________________  _____  _____  _____  _________________________
+    1____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
+    _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
+    2____xxxxxxxxxxxxxxx_____  *****  _____  *****  _____xxxxxxxxxxxxxxx_____  <-- column markers
+    _____xxxxxxxxxxxxxxx_____  *****  _____  *****  _____xxxxxxxxxxxxxxx_____  <--
+    3____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
+    _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
+              /                                                   \
+    4        /-----     _____  .....  .....  .....  _____     _____\
+            / -----     _____  . A .  . B .  . C .  _____     _____ \
+              -----     _____  .....  .....  .....  _____     _____
 
-    3    -----     _____  .....  .....  .....  _____     _____
-         -----     _____  . A .  . B .  . C .  _____     _____
-         -----     _____  .....  .....  .....  _____     _____
+    5         *****_____.....  .....  .....  .....  ....._____*****         /  \
+              *****_____. H .  . G .  . F .  . E .  . D ._____*****        /    \
+              *****_____.....  .....  .....  .....  ....._____*****       /      \
+                                                                     mark cells extracted by finder.py
+    6         -----     .....  .....  .....  .....  .....     _____       \      /
+              -----     . I .  . J .  . K .  . L .  . M .     _____        \    /
+              -----     .....  .....  .....  .....  .....     _____         \  /
 
-    4    *****_____.....  .....  .....  .....  ....._____*****
-         *****_____. H .  . G .  . F .  . E .  . D ._____*****
-         *****_____.....  .....  .....  .....  ....._____*****
+    7         *****_____.....  .....  .....  .....  ....._____*****
+              *****_____. R .  . Q .  . P .  . O .  . N ._____*****
+              *****_____.....  .....  .....  .....  ....._____*****
 
-    5    -----     .....  .....  .....  .....  .....     _____
-         -----     . I .  . J .  . K .  . L .  . M .     _____
-         -----     .....  .....  .....  .....  .....     _____
+    8         _____     _____  .....  .....  .....  _____     _____
+            \ _____     _____  . S .  . T .  . U .  _____     _____ /
+             \_____     _____  .....  .....  .....  _____     _____/
+              \                                                   /
+    9____xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
+    _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
+    10___xxxxxxxxxxxxxxx_____  *****  _____  *****  __________mmmmm__________  <-- column markers
+    _____xxxxxxxxxxxxxxx_____  *****  _____  *****  __________mmmmm__________  <--
+    11___xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
+    _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
+    12_______________________  _____  _____  _____  _________________________
+    0____1____2____3____4____  5____  6____  7____  8____9____10___11___12___
+              ^^^^^                                           ^^^^^
+              |||||                                           |||||
+              +++++--------------- row markers ---------------+++++
 
-    6    *****_____.....  .....  .....  .....  ....._____*****
-         *****_____. R .  . Q .  . P .  . O .  . N ._____*****
-         *****_____.....  .....  .....  .....  ....._____*****
-
-    7    _____     _____  .....  .....  .....  _____     _____
-         _____     _____  . S .  . T .  . U .  _____     _____
-         _____     _____  .....  .....  .....  _____     _____
-
-    8____xxxxxxxxxx_____  _____  _____  _____  _____*****_____       <--
-    _____xxxxxxxxxx_____  _____  _____  _____  _____*****_____       <--
-    9____xxxxxxxxxx_____  *****  _____  *****  _____     _____       <-- column markers
-    _____xxxxxxxxxx_____  *****  _____  *****  _____     _____       <--
-    10__________________  _____  _____  _____  ____________________
-    0____1____2____3____  4____  5____  6____  7____8____9____10___
-            ^^^^                                       ^^^^^
-            ||||                                       |||||
-            ++++-------------- row markers ------------+++++
-
-    xx..xx ares the locator blobs that are detected via their contour
-    **** are the row/column marker blobs, also detected by their contour
+    xx..xx are the 'major locator' blobs
+    mm..mm is the 'minor locator' blob that is the same size as a marker blob
+    **** are the row/column 'marker' blobs
+    all locator and marker blobs are detected by their contour
     ....   is a 'bit box' that can be either a '1' (white) or a '0' (black)
     a '1' is white area (detected by its relative luminance)
     a '0' is black area (detected by its relative luminance)
@@ -50,6 +56,8 @@
     A..U are the bits of the codeword (21)
     their centre co-ordinates and size are calculated from the marker blobs
     numbers in the margins are 'cell' addresses (in units of the width of a marker blob)
+    Note: The bottom-right 'minor locator' is much smaller than the others but its centre
+          still aligns with bottom-left and top-right 'major locator' blobs
 """
 
 import frame
@@ -63,36 +71,40 @@ class Codes:
     # region Geometry constants...
     # all drawing co-ordinates are in units of a 'cell' where a 'cell' is the minimum width between
     # luminance transitions, cell 0,0 is the top left of the canvas
-    # the locator blobs are 2x2 cells starting at 1,1
-    # the marker blobs and data blobs are 1x1 cells separated by at least 1 cell
-    LOCATORS   = [(1,1),(1,2),None,(8,1),(9,1),
-                  (2,1),(2,2),None,(8,2),(9,2),
+    # the major locator blobs are 3x3 cells starting at 1,1
+    # the minor locator blob is 1x1 cells
+    # the marker blobs and data blobs are 1x1 cells, marker blobs are separated by at least 1 cell
+    LOCATORS   = [(1,1),(1,2),(1,3),None,(9,1),(10,1),(11,1),
+                  (2,1),(2,2),(2,3),None,(9,2),(10,2),(11,2),
+                  (3,1),(3,2),(3,3),None,(9,3),(10,3),(11,3),
                   None,
-                  (1,8),(2,8),
-                  (1,9),(2,9)]
-    MARKERS    = [None,(4,1),None,(6,1),
+                  (1,9),(2,9),(3,9),
+                  (1,10),(2,10),(3,10),None,(10,10),
+                  (1,11),(2,11),(3,11)]
+    MARKERS    = [None,(5,2),None,(7,2),
                   None,
-                  (1,4),None,(9,4),
+                  (2,5),None,None,None,(10,5),
                   None,
-                  (1,6),None,(9,6),
+                  (2,7),None,None,None,(10,7),
                   None,
-                  None,None ,None,(8,8),
-                  None,(4,9),None,(6,9)]
+                  None,(5,10),None,(7,10)]
     STRUCTURE  = LOCATORS + MARKERS
-    DATA_BITS  = [None, (4,3),(5,3),(6,3),None,
-                  (7,4),(6,4),(5,4),(4,4),(3,4),
-                  (3,5),(4,5),(5,5),(6,5),(7,5),
-                  (7,6),(6,6),(5,6),(4,6),(3,6),
-                  None, (4,7),(5,7),(6,7),None]
-    NAME_CELL  = (8.5,10.5)  # co-ordinate of the bottom-left of the text
-    MAX_X_CELL = 10
-    MAX_Y_CELL = 10
+    DATA_BITS  = [None, (5,4),(6,4),(7,4),None,
+                  (8,5),(7,5),(6,5),(5,5),(4,5),
+                  (4,6),(5,6),(6,6),(7,6),(8,6),
+                  (8,7),(7,7),(6,7),(5,7),(4,7),
+                  None, (5,8),(6,8),(7,8),None]
+    NAME_CELL  = (9,12)  # co-ordinate of the bottom-left of the text
+    MAX_X_CELL = 12
+    MAX_Y_CELL = 12
     # endregion
     # region Public constants...
-    CODE_EXTENT = max(MAX_X_CELL, MAX_Y_CELL)  # max size of the entire code in units of the 'radius' of a locator blob
-    DATA_SHAPE = (5, 5)  # columns x rows of the data bits
-    LOCATOR_SPACING = 7  # distance between locator blob centres in units of the 'radius' of a locator blob
-    LOCATORS_PER_CODE = 3  # how many locators there are per code
+    LOCATORS_PER_CODE = 3  # how many 'major' locators there are per code
+    LOCATOR_SCALE = 3  # size of major locators relative to markers (so radius of enclosing circle is half this)
+    TIMING_SCALE  = 1 / LOCATOR_SCALE  # size of timing marks relative to locators
+    LOCATOR_SPAN = 8  # distance between locator centres in units of marker width
+    LOCATOR_SPACING = LOCATOR_SPAN / (LOCATOR_SCALE / 2)  # locator spacing in units of locator radius
+    TIMING_CELLS  = [3, 5]               # timing mark cell positions along a line between locators
     # endregion
 
     def __init__(self, canvas: frame.Frame):
@@ -149,7 +161,7 @@ class Codes:
                 continue
             self.draw_cell(cell)
 
-    def cell2pixel(self, cell) -> (int, int):
+    def cell2pixel(self, cell: (int, int)) -> (int, int):
         """ translate a cell address to its equivalent pixel address in our canvas """
         x = int(round(cell[0] * self.cell_width))
         y = int(round(cell[1] * self.cell_height))
@@ -160,8 +172,8 @@ class Codes:
 if __name__ == "__main__":
     """ test harness """
 
-    CELL_WIDTH  = 48
-    CELL_HEIGHT = 48
+    CELL_WIDTH  = 42
+    CELL_HEIGHT = 42
 
     image = frame.Frame()
     image.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
