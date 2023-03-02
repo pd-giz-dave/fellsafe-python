@@ -6,7 +6,7 @@
 """
 import math
 import random  # only used for testing
-import cv2     # only used for diagnostics
+import canvas  # only used for diagnostics
 
 import const
 import utils
@@ -164,7 +164,7 @@ def decode_bits(bits, source=None, image=None, origins=None, logger=None, codec=
                 logger.push(folder, folder)
                 if image is not None:
                     if draw is None:
-                        draw = cv2.merge([image, image, image])
+                        draw = canvas.colourize(image)
                     top_left = (origin[0], origin[1])
                     bottom_right = (top_left[0]+128, top_left[1]+16)
                     if decode is None:
@@ -173,9 +173,8 @@ def decode_bits(bits, source=None, image=None, origins=None, logger=None, codec=
                     else:
                         colour = const.GREEN
                         text = '{}.{} ({:.0f})'.format(decode[0], decode[1], size)
-                    cv2.rectangle(draw, top_left, bottom_right, colour, 1)
-                    cv2.putText(draw, text, (top_left[0]+3, bottom_right[1]-3),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
+                    canvas.rectangle(draw, top_left, bottom_right, colour, 1)
+                    canvas.settext(draw, text, (top_left[0]+3, bottom_right[1]-3), colour=colour)
             logger.log('{} decodes as {}'.format(bits, decode))
             if origins is not None:
                 logger.pop()
@@ -292,4 +291,4 @@ if __name__ == "__main__":
     #_test_decoder(logger)
 
     # test whole pipeline
-    _test_pipeline(src, proximity, blur=3, logger=logger, create_new=False)
+    _test_pipeline(src, proximity, blur=3, logger=logger, create_new=True)

@@ -2,7 +2,7 @@
 
 import os
 import pathlib
-import cv2
+import canvas
 
 class Logger:
     """ crude logging system that saves to a file and prints to the console """
@@ -74,7 +74,7 @@ class Logger:
         filename = '{}/{}.png'.format(folder, file)
 
         # save the image
-        cv2.imwrite(filename, image)
+        canvas.unload(image, filename)
 
         self.log('{}: image saved as: {}'.format(file, filename))
 

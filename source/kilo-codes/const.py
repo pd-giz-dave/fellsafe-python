@@ -14,6 +14,7 @@ OPAQUE      = MAX_LUMINANCE
 # endregion
 
 # region Diagnostic image colours...
+# NB: cv2 colour order is BGR not RGB
 BLACK      = (  0,   0,   0)
 GREY       = ( 64,  64,  64)
 WHITE      = (255, 255, 255)

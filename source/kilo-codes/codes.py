@@ -61,7 +61,7 @@
           still aligns with bottom-left and top-right 'major locator' blobs
 """
 
-import frame
+import canvas
 import const
 
 class Codes:
@@ -120,9 +120,9 @@ class Codes:
                      None, (2,8),(4,8),(6,8),None]
     # endregion
 
-    def __init__(self, canvas: frame.Frame):
-        self.canvas = canvas  # where we do our drawing or detecting (when drawing it should be square)
-        self.max_x, self.max_y = canvas.size()
+    def __init__(self, image_buffer):
+        self.canvas = image_buffer  # where we do our drawing or detecting (when drawing it should be square)
+        self.max_x, self.max_y = canvas.size(self.canvas)
         self.code_span   = min(self.max_x, self.max_y)
         self.cell_width  = int(round(self.code_span / (self.MAX_X_CELL + 1)))
         self.cell_height = self.cell_width
@@ -150,8 +150,7 @@ class Codes:
 
     def draw_name(self, position: (int, int), name:str):
         """ draw the codeword name """
-        x, y = self.cell2pixel(position)
-        self.canvas.settext(name, x, y, size=0.5)
+        canvas.settext(self.canvas, name, self.cell2pixel(position), size=0.5)
 
     def draw_cell(self, position: (int, int), colour: int=BLACK):
         """ draw a cell - i.e. make the area black """
@@ -160,7 +159,7 @@ class Codes:
         end_y = start_y + self.cell_height
         for x in range(start_x, end_x):
             for y in range(start_y, end_y):
-                self.canvas.putpixel(x, y, colour)
+                canvas.putpixel(self.canvas, x, y, colour)
 
     def clear_canvas(self):
         """ make the entire codeword structure white """
@@ -190,8 +189,7 @@ if __name__ == "__main__":
     CELL_WIDTH  = 42
     CELL_HEIGHT = 42
 
-    image = frame.Frame()
-    image.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
+    image = canvas.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
     codec = Codes(image)
     codec.draw_codeword(0b010_01010_10101_01010_010, 'TEST01...')
-    image.unload('test-alt-bits.png')
+    canvas.unload(image, 'test-alt-bits.png')

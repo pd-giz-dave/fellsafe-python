@@ -29,7 +29,7 @@
 """
 
 import math
-import cv2       # purely for diagnostic aids
+import canvas    # purely for diagnostic aids
 
 import codes     # for the geometry constants
 import const     # for the proximity constants
@@ -466,7 +466,7 @@ def show_results(params, locator, logger):
     source = params.source
     max_x  = source.shape[1]  # NB: x, y are reversed in numpy arrays
     max_y  = source.shape[0]  # ..
-    image  = cv2.merge([source, source, source])  # make into a colour image
+    image  = canvas.colourize(source)  # make into a colour image
 
     logger.log('Locator:')
     neighbours = locator.neighbours()
@@ -477,12 +477,12 @@ def show_results(params, locator, logger):
                    format(blob, x, y, r, len(neighbour)))
         for there, distance in neighbour:
             x, y, r, _ = locator.blobs[there]
-            cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.RED, 1)
+            canvas.circle(image, (x, y), r, const.RED, 1)
             logger.log('      {}: centre: {:.2f}, {:.2f}, radius: {:.2f}, distance: {:.2f} '.
                        format(there, x, y, r, math.sqrt(distance)))
     for blob, neighbour in neighbours:
         x, y, r, _ = locator.blobs[blob]
-        cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.YELLOW, 1)
+        canvas.circle(image, (x, y), r, const.YELLOW, 1)
     corners = locator.corners()
     logger.log('{} corner triplets found:'.format(len(corners)))
     for a, b, c, primary, squareness in corners:
@@ -508,7 +508,7 @@ def show_results(params, locator, logger):
         logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'
                    ' (squareness={:.2f})'.format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy, squareness))
         draw_rectangle(image, tl, tr, br, bl)
-        cv2.circle(image, (int(round(dx)), int(round(dy))), int(round(dr)), const.GREEN, 1)  # mark our estimated blob
+        canvas.circle(image, (dx, dy), dr, const.GREEN, 1)  # mark our estimated blob
     dropped = locator.dropped()
     logger.log('{} dropped rectangles:'.format((len(dropped))))
     for tl, tr, br, bl, (a, b, c), squareness in dropped:
@@ -529,7 +529,7 @@ def show_results(params, locator, logger):
         logger.log('    enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
                    format(detection.box_tl[0], detection.box_tl[1], detection.box_br[0], detection.box_br[1],
                           detection.squareness))
-        cv2.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+        canvas.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
     logger.draw(image, file='locators')
 
 def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
@@ -541,10 +541,10 @@ def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
     bx, by = tr[0] - origin[0], tr[1] - origin[1]
     cx, cy = bl[0] - origin[0], bl[1] - origin[1]
     dx, dy = br[0] - origin[0], br[1] - origin[1]
-    cv2.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.GREEN , 1)
-    cv2.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.YELLOW, 1)
-    cv2.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.RED   , 1)
-    cv2.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE  , 1)
+    canvas.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.GREEN , 1)
+    canvas.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.YELLOW, 1)
+    canvas.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.RED   , 1)
+    canvas.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), const.BLUE  , 1)
     return image
 
 

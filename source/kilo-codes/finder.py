@@ -6,7 +6,7 @@ import const
 import utils
 import codes
 import locator
-import cv2      # only for diagnostics
+import canvas      # only for diagnostics
 
 
 class Finder:
@@ -62,11 +62,11 @@ class Finder:
                     # nothing here
                     continue
                 x, y, r, _ = edge[mark]
-                cv2.circle(image, (int(round(x)), int(round(y))), int(round(r)), const.ORANGE, 1)
+                canvas.circle(image, (x, y), r, const.ORANGE, 1)
 
         for i, detection in enumerate(self.detections):
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            image = cv2.merge([grayscale, grayscale, grayscale])
+            image = canvas.colourize(grayscale)
             image = locator.draw_rectangle(image,
                                            detection.tl, detection.tr, detection.br, detection.bl,
                                            origin=detection.box_tl)
@@ -85,20 +85,20 @@ class Finder:
             for cell in range(len(here)):
                 src   = here [cell]
                 dst   = there[cell]
-                src_x = int(round(src[Finder.X_COORD]))
-                src_y = int(round(src[Finder.Y_COORD]))
-                dst_x = int(round(dst[Finder.X_COORD]))
-                dst_y = int(round(dst[Finder.Y_COORD]))
-                cv2.line(image, (src_x, src_y), (dst_x, dst_y), const.GREEN, 1)
+                src_x = src[Finder.X_COORD]
+                src_y = src[Finder.Y_COORD]
+                dst_x = dst[Finder.X_COORD]
+                dst_y = dst[Finder.Y_COORD]
+                canvas.line(image, (src_x, src_y), (dst_x, dst_y), const.GREEN, 1)
 
         for detection, (top, right, bottom, left) in enumerate(self.grids()):
             detection = self.detections[detection]
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            image = cv2.merge([grayscale, grayscale, grayscale])
+            image = canvas.colourize(grayscale)
             draw_grid(image, top, bottom)
             draw_grid(image, left,right)
             tl_x, tl_y, tl_r, _ = top[0]
-            cv2.circle(image, (int(round(tl_x)), int(round(tl_y))), int(round(tl_r)), const.RED, 1)  # mark primary corner
+            canvas.circle(image, (tl_x, tl_y), tl_r, const.RED, 1)  # mark primary corner
             self.draw(image, 'grid', detection)
 
     def draw_cells(self):
@@ -110,7 +110,7 @@ class Finder:
             detection = self.detections[detection]
             origin_x, origin_y = detection.box_tl
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            image = cv2.merge([grayscale, grayscale, grayscale])
+            image = canvas.colourize(grayscale)
             for row, cells in enumerate(rows):
                 for col, (x, y, r, _) in enumerate(cells):
                     if row == 0 and col == 0:
@@ -118,7 +118,7 @@ class Finder:
                         colour = const.RED
                     else:
                         colour = const.GREEN
-                    cv2.circle(image, (int(round(x-origin_x)), int(round(y-origin_y))), int(round(r)), colour, 1)
+                    canvas.circle(image, (x-origin_x, y-origin_y), r, colour, 1)
             self.draw(image, 'cells', detection)
 
     def find_timing(self):

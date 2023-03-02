@@ -13,7 +13,7 @@ import const
 import utils
 import math
 import numpy as np
-import cv2
+import canvas
 
 # co-ordinates of pixel neighbours relative to that pixel, clockwise from 'east':
 #   [5][6][7]
@@ -1124,18 +1124,15 @@ def show_result(params, result, logger):
     image, blobs, buffer, labels, _ = result
     if params.blur_kernel_size is not None and params.blur_kernel_size >= 3:
         logger.draw(params.blurred, file='blurred')
-    draw = cv2.merge([image, image, image])
-    logger.draw(draw, file='binary')
-    max_x = buffer.shape[1]
-    max_y = buffer.shape[0]
+    logger.draw(image, file='binary')
+    max_x, max_y = canvas.size(buffer)
     if params.box is not None:
         source_part = extract_box(params.source, params.box)
     else:
         source_part = params.source
     logger.draw(source_part, file='grayscale')
-    draw_bad = cv2.merge([source_part, source_part, source_part])
-    draw_good = cv2.merge([source_part, source_part, source_part])
-    # NB: cv2 colour order is BGR not RGB
+    draw_bad = canvas.colourize(source_part)
+    draw_good = canvas.colourize(source_part)
     colours = {REJECT_NONE: (const.LIME, 'lime'),
                REJECT_UNKNOWN: (const.RED, 'red'),
                REJECT_TOO_SMALL: (const.YELLOW, 'yellow'),
@@ -1158,28 +1155,19 @@ def show_result(params, result, logger):
                 else:
                     draw_bad[y, x] = colour
 
-    def plot(buffer, points, colour):
-        for x, y in points:
-            if x < 0 or x >= max_x or y < 0 or y >= max_y:
-                continue
-            buffer[y, x] = colour  # NB: cv2 x, y are reversed
-        return buffer
-
     # draw enclosing circles in blue on the detected targets
     for blob in blobs:
         if blob.rejected != REJECT_NONE:
             continue
         circle = blob.external.get_enclosing_circle(params.mode)
         points = circumference(circle.centre.x, circle.centre.y, circle.radius)
-        draw_good = plot(draw_good, points, const.BLUE)
+        draw_good = canvas.plot(draw_good, points, const.BLUE)
 
     logger.draw(draw_good, file='accepted')
     logger.draw(draw_bad, file='rejected')
-    draw = cv2.merge([source_part, source_part, source_part])
+    draw = canvas.colourize(source_part)
     for target in params.targets:
-        x = int(round(target[0]))
-        y = int(round(target[1]))
-        cv2.circle(draw, (x, y), int(round(target[2])), (0, 255, 0), 1)
+        canvas.circle(draw, (target[0], target[1]), target[2], const.GREEN, 1)
     logger.draw(draw, file='blobs')
 
     logger.log("\nAll accepted blobs:")
@@ -1260,31 +1248,6 @@ def show_result(params, result, logger):
     for reason, (_, name) in colours.items():
         logger.log('  {}: {}'.format(name, reason))
 
-def downsize(source, new_size):
-    """ downsize the given image such that either its width or height is at most that given,
-        the aspect ratio is preserved, its a no-op if image already small enough,
-        returns the modified image,
-        this is purely a diagnostic aid to simulate low-resolution cameras
-        """
-    height, width = source.shape
-    if width <= new_size or height <= new_size:
-        # its already small enough
-        return source
-    if width > height:
-        # bring height down to new size
-        new_height = new_size
-        new_width = int(width / (height / new_size))
-    else:
-        # bring width down to new size
-        new_width = new_size
-        new_height = int(height / (width / new_size))
-    shrunk = cv2.resize(source, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
-    return shrunk
-
-def load_image(src):
-    """ load the given image file as a grayscale image """
-    return cv2.imread(src, cv2.IMREAD_GRAYSCALE)
-
 def _test(src, size, proximity, black, inverted, blur, logger, params=None):
     """ ************** TEST **************** """
 
@@ -1293,9 +1256,9 @@ def _test(src, size, proximity, black, inverted, blur, logger, params=None):
     else:
         logger.push(context='_test')
     logger.log("\nPreparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
-    source = load_image(src)
+    source = canvas.load(src)
     # Downsize it (to simulate low quality smartphone cameras)
-    shrunk = downsize(source, size)
+    shrunk = canvas.downsize(source, size)
     logger.log("\nDetecting blobs")
     if params is None:
         params = Targets()
