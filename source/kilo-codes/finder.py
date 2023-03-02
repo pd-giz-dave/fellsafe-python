@@ -19,7 +19,7 @@ class Finder:
     # region tuning...
     MAX_SIZE_RATIO = 1.5*1.5  # max size diff squared between actual and expected size as a fraction of expected radius
     MAX_DISTANCE_RATIO = 2.0*2.0  # max dist squared between actual and expected mark as a fraction of expected radius
-    MIN_MARK_HITS = 1.0  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_MARK_HITS = 0.7  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
@@ -40,72 +40,11 @@ class Finder:
         self.code_grids      = None        # list of detected code grids
         self.code_cells      = None        # list of cell co-ords inside the locators
 
-    def get_pixel(self, x: float, y: float) -> int:
-        """ get the interpolated pixel value at x,y,
-            x,y are fractional so the pixel value returned is a mixture of the 4 pixels around x,y,
-            the mixture is based on the ratio of the neighbours to include, the ratio of all 4 is 1,
-            code based on:
-                void interpolateColorPixel(double x, double y) {
-                    int xL, yL;
-                    xL = (int) Math.floor(x);
-                    yL = (int) Math.floor(y);
-                    xLyL = ipInitial.getPixel(xL, yL, xLyL);
-                    xLyH = ipInitial.getPixel(xL, yL + 1, xLyH);
-                    xHyL = ipInitial.getPixel(xL + 1, yL, xHyL);
-                    xHyH = ipInitial.getPixel(xL + 1, yL + 1, xHyH);
-                    for (int rr = 0; rr < 3; rr++) {
-                        double newValue = (xL + 1 - x) * (yL + 1 - y) * xLyL[rr];
-                        newValue += (x - xL) * (yL + 1 - y) * xHyL[rr];
-                        newValue += (xL + 1 - x) * (y - yL) * xLyH[rr];
-                        newValue += (x - xL) * (y - yL) * xHyH[rr];
-                        rgbArray[rr] = (int) newValue;
-                    }
-                }
-            from here: https://imagej.nih.gov/ij/plugins/download/Polar_Transformer.java
-            explanation:
-            x,y represent the top-left of a 1x1 pixel
-            if x or y are not whole numbers the 1x1 pixel area overlaps its neighbours,
-            the returned pixel value is the sum of the overlap fractions of its neighbour
-            pixel squares, P is the fractional pixel address in its pixel, 1, 2 and 3 are
-            its neighbours, dotted area is contribution from neighbours:
-                +------+------+
-                |  P   |   1  |
-                |  ....|....  |  Ax = 1 - (Px - int(Px) = 1 - Px + int(Px) = (int(Px) + 1) - Px
-                |  . A | B .  |  Ay = 1 - (Py - int(Py) = 1 - Py + int(Py) = (int(Py) + 1) - Py
-                +------+------+  et al for B, C, D
-                |  . D | C .  |
-                |  ....|....  |
-                |  3   |   2  |
-                +----- +------+
-            """
-        cX: float = x
-        cY: float = y
-        xL: int = int(cX)
-        yL: int = int(cY)
-        xH: int = xL + 1
-        yH: int = yL + 1
-        pixel_xLyL = self.image[yL][xL]
-        pixel_xLyH = self.image[yH][xL]
-        pixel_xHyL = self.image[yL][xH]
-        pixel_xHyH = self.image[yH][xH]
-        if pixel_xLyL is None:
-            pixel_xLyL = const.MIN_LUMINANCE
-        if pixel_xLyH is None:
-            pixel_xLyH = const.MIN_LUMINANCE
-        if pixel_xHyL is None:
-            pixel_xHyL = const.MIN_LUMINANCE
-        if pixel_xHyH is None:
-            pixel_xHyH = const.MIN_LUMINANCE
-        ratio_xLyL = (xH - cX) * (yH - cY)
-        ratio_xHyL = (cX - xL) * (yH - cY)
-        ratio_xLyH = (xH - cX) * (cY - yL)
-        ratio_xHyH = (cX - xL) * (cY - yL)
-        part_xLyL = pixel_xLyL * ratio_xLyL
-        part_xHyL = pixel_xHyL * ratio_xHyL
-        part_xLyH = pixel_xLyH * ratio_xLyH
-        part_xHyH = pixel_xHyH * ratio_xHyH
-        pixel = int(round(part_xLyL + part_xHyL + part_xLyH + part_xHyH))
-        return pixel
+    def draw(self, image, file, detection):
+        folder = utils.image_folder(target=detection.tl)
+        self.logger.push(context=folder, folder=folder)
+        self.logger.draw(image, file=file)
+        self.logger.pop()
 
     def draw_detections(self):
         """ draw the detection rectangles and expected timing marks for diagnostic purposes """
@@ -127,17 +66,14 @@ class Finder:
 
         for i, detection in enumerate(self.detections):
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            draw = cv2.merge([grayscale, grayscale, grayscale])
-            draw = locator.draw_rectangle(draw,
-                                          detection.tl, detection.tr, detection.br, detection.bl,
-                                          origin=detection.box_tl)
+            image = cv2.merge([grayscale, grayscale, grayscale])
+            image = locator.draw_rectangle(image,
+                                           detection.tl, detection.tr, detection.br, detection.bl,
+                                           origin=detection.box_tl)
             expected_timing = self.expect_timing()[i]
             for edge in expected_timing:
-                draw_marks(draw, edge)
-            folder = utils.image_folder(target=detection.tl)
-            self.logger.push(folder=folder)
-            self.logger.draw(draw, file='locators')
-            self.logger.pop()
+                draw_marks(image, edge)
+            self.draw(image, 'locators', detection)
 
     def draw_grids(self):
         """ draw the detected code grids for diagnostic purposes """
@@ -158,15 +94,12 @@ class Finder:
         for detection, (top, right, bottom, left) in enumerate(self.grids()):
             detection = self.detections[detection]
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            draw = cv2.merge([grayscale, grayscale, grayscale])
-            draw_grid(draw, top, bottom)
-            draw_grid(draw, left,right)
+            image = cv2.merge([grayscale, grayscale, grayscale])
+            draw_grid(image, top, bottom)
+            draw_grid(image, left,right)
             tl_x, tl_y, tl_r, _ = top[0]
-            cv2.circle(draw, (int(round(tl_x)), int(round(tl_y))), int(round(tl_r)), const.RED, 1)  # mark primary corner
-            folder = utils.image_folder(target=detection.tl)
-            self.logger.push(folder=folder)
-            self.logger.draw(draw, file='grid')
-            self.logger.pop()
+            cv2.circle(image, (int(round(tl_x)), int(round(tl_y))), int(round(tl_r)), const.RED, 1)  # mark primary corner
+            self.draw(image, 'grid', detection)
 
     def draw_cells(self):
         """ draw the detected code cells for diagnostic purposes """
@@ -177,7 +110,7 @@ class Finder:
             detection = self.detections[detection]
             origin_x, origin_y = detection.box_tl
             grayscale = locator.extract_box(self.image, box=(detection.box_tl, detection.box_br))
-            draw = cv2.merge([grayscale, grayscale, grayscale])
+            image = cv2.merge([grayscale, grayscale, grayscale])
             for row, cells in enumerate(rows):
                 for col, (x, y, r, _) in enumerate(cells):
                     if row == 0 and col == 0:
@@ -185,11 +118,8 @@ class Finder:
                         colour = const.RED
                     else:
                         colour = const.GREEN
-                    cv2.circle(draw, (int(round(x-origin_x)), int(round(y-origin_y))), int(round(r)), colour, 1)
-            folder = utils.image_folder(target=detection.tl)
-            self.logger.push(folder=folder)
-            self.logger.draw(draw, file='cells')
-            self.logger.pop()
+                    cv2.circle(image, (int(round(x-origin_x)), int(round(y-origin_y))), int(round(r)), colour, 1)
+            self.draw(image, 'cells', detection)
 
     def find_timing(self):
         """ find candidate timing marks in all the detections,
@@ -206,6 +136,7 @@ class Finder:
         params.black_threshold = 2
         params.direct_neighbours = False
         params.inverted = True
+        params.mode = const.RADIUS_MODE_INSIDE
         params.blur_kernel_size = 0
         params.min_area = 1
         params.min_size = 1
@@ -292,7 +223,9 @@ class Finder:
             self.expected_timing.append(expected_timing)
 
         if self.logger is not None:
+            self.logger.push(context='expect_timing')
             self.draw_detections()
+            self.logger.pop()
 
         return self.expected_timing
 
@@ -475,14 +408,14 @@ class Finder:
                 if self.logger is not None:
                     self.logger.log('Detection {}: Found {} (of {}, {:.2f}%) timing marks:'.
                                     format(detection, got_hits, max_hits, (got_hits / max_hits) * 100))
-            for edge, marks in enumerate(edges):
-                self.logger.log('  Edge {} targets:'.format(edge))
-                for mark, ticks in enumerate(marks):
-                    if ticks is None:
-                        continue  # no ticks here
-                    for (candidate, distance, size, r) in ticks:
-                        log_tick(detection, edge, mark, candidate)
             if self.logger is not None:
+                for edge, marks in enumerate(edges):
+                    self.logger.log('  Edge {} targets:'.format(edge))
+                    for mark, ticks in enumerate(marks):
+                        if ticks is None:
+                            continue  # no ticks here
+                        for (candidate, distance, size, r) in ticks:
+                            log_tick(detection, edge, mark, candidate)
                 self.logger.pop()
         return self.filtered_timing
 
@@ -499,7 +432,7 @@ class Finder:
 
         def get_found_mark(detection, found_marks, mark):
             """ get the identified found mark """
-            if found_marks[mark] is None:
+            if found_marks[mark] is None or len(found_marks[mark]) == 0:
                 # there isn't one here
                 return None
             found_mark_number = found_marks[mark][0][0]
@@ -510,7 +443,7 @@ class Finder:
             """ make the full column repertoire from the found marks and locators for the given detection """
             columns = [None for _ in range(len(found_marks))]  # create every possible column between locators (incl.)
             for mark in range(len(found_marks)):
-                columns[mark] = get_found_mark(detection, found_marks, mark)
+                columns[mark] = get_found_mark(detection, found_marks, mark)  # NB: maybe None
             columns[0]  = found_locators[0]   # discovered locator
             columns[-1] = found_locators[-1]  # ..
             # we now have the detected location of the timing marks and locators in columns,
@@ -518,7 +451,7 @@ class Finder:
             # gaps adjacent to the locators span two cells (see visualisation in codes.py)
             for col in range(1, len(columns)-1):  # we know the first and last are present (the locators)
                 if columns[col] is None:
-                    # got a gap that needs filling from col-1 to ?
+                    # got a gap that needs filling from col-1 to next non-None column
                     gap = 1  # start a new gap
                     end_at = None
                     for end_gap in range(col+1, len(columns)):
@@ -543,11 +476,13 @@ class Finder:
         self.code_grids = []
         for detection in self.filter_timing():
             top, right, bottom, left, corner = self.matched_timing[detection]
-            top_ref, right_ref, bottom_ref, left_ref, _ = self.expected_timing[detection]
+            top_ref, right_ref, bottom_ref, left_ref, corner_ref = self.expected_timing[detection]
             # region calculate actual bottom right refs from the discovered corner
             br = get_found_mark(detection, corner, 0)
-            right_ref [-1] = Finder.make_detection(br, (0,0), 1.0)
-            bottom_ref[-1] = Finder.make_detection(br, (0,0), 1.0)
+            if br is not None:
+                # found a matching mark, overwrite the estimate
+                right_ref [-1] = Finder.make_detection(br, (0,0), 1.0)
+                bottom_ref[-1] = Finder.make_detection(br, (0,0), 1.0)
             # endregion
             top_cols    = make_columns(detection, top,    top_ref)
             right_cols  = make_columns(detection, right,  right_ref)
@@ -556,7 +491,9 @@ class Finder:
             self.code_grids.append([top_cols, right_cols, bottom_cols, left_cols])
 
         if self.logger is not None:
+            self.logger.push('grids')
             self.draw_grids()
+            self.logger.pop()
 
         return self.code_grids
 
@@ -585,13 +522,20 @@ class Finder:
                 code_cells.append(Finder.make_steps(offset, start, end, steps=steps, radius_scale=1.0))
             self.code_cells.append(code_cells)
         if self.logger is not None:
+            self.logger.push('cells')
             self.draw_cells()
+            self.logger.pop()
         return self.code_cells
 
 def find_codes(src, image, detections, logger):
     """ find the valid code areas within the given detections """
+    if logger is not None:
+        logger.push('find_codes')
+        logger.log('')
     found = Finder(src, image, detections, logger)
     result = found.cells()
+    if logger is not None:
+        logger.pop()
     return result
 
 
@@ -599,6 +543,10 @@ def _test(src, proximity, blur=3, logger=None, create_new=True):
     """ ************** TEST **************** """
     import pickle
 
+    if logger.depth() > 1:
+        logger.push('finder/_test')
+    else:
+        logger.push('_test')
     logger.log("\nFinding targets")
 
     # get the detections
@@ -624,7 +572,8 @@ def _test(src, proximity, blur=3, logger=None, create_new=True):
 
     # process the detections
     found = find_codes(src, image, detections, logger)
-    return found
+    logger.pop()
+    return found, image
 
 
 if __name__ == "__main__":
@@ -634,9 +583,7 @@ if __name__ == "__main__":
     src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     proximity = const.PROXIMITY_CLOSE
     #proximity = const.PROXIMITY_FAR
-    create_new = True
 
     logger = utils.Logger('finder.log', 'finder/{}'.format(utils.image_folder(src)))
-    logger.log('_test')
 
-    _test(src, proximity, blur=3, logger=logger, create_new=create_new)
+    _test(src, proximity, blur=3, logger=logger, create_new=False)

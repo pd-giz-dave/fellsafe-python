@@ -2,7 +2,9 @@
     See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for the encoding algorithm.
     The functions here are only suitable for single integer based payloads and CRC's (i.e. up 32 bits).
 """
+import random
 
+import const
 import utils
 
 class CRC:
@@ -10,9 +12,9 @@ class CRC:
     MAX_PAYLOAD_BITS = 15  # limits max lookup table sizes,
     MAX_POLY_BITS    = 15  # but is otherwise arbitrary
 
-    def __init__(self, payload_bits: int, poly: int, log=None):
+    def __init__(self, payload_bits: int, poly: int, logger=None):
         """ save and validate the spec  """
-        self.log          = log  # iff not None a logging function
+        self.logger       = logger  # iff not None a logging function
         self.payload_bits = payload_bits
         self.poly         = poly
         self.poly_bits    = CRC.bit_width(self.poly)
@@ -33,6 +35,16 @@ class CRC:
         self.codewords        = None  # list of all codewords for every payload along with its distance from any other
         self.hamming_distance = None  # the Hamming distance of the polynomial
         self.error_bits       = None  # max error correction capability (==(hamming_distance-1)/2
+
+    def prepare(self):
+        """ initialise lookup tables (preempts what encode and decode would do) """
+        test_code = random.randrange(1, self.payload_range)
+        codeword = self.encode(test_code)
+        result = self.decode(codeword)
+        if result == (test_code, 0):
+            # its all working OK
+            return True
+        raise Exception('Encode of {} decoded as {} when should be {}'.format(test_code, result, (test_code, 0)))
 
     @staticmethod
     def bit_width(val: int) -> int:
@@ -93,18 +105,18 @@ class CRC:
         if N > self.code_bits:
             raise Exception('flips limit is {}, cannot do {}'.format(self.code_bits, N))
         if self.masks is None:
-            if self.log is not None:
-                log('Build bit flip mask table for {} code-bits...'.format(self.code_bits))
+            if self.logger is not None:
+                self.logger.log('Build bit flip mask table for {} code-bits...'.format(self.code_bits))
             self.masks = [[] for _ in range(self.code_bits+1)]
             for bits in range(self.code_range):
                 count = CRC.count_bits(bits)
                 self.masks[count].append(bits)
-            if self.log is not None:
+            if self.logger is not None:
                 total = 0
                 for count in range(1, len(self.masks)):
-                    log('  N:{}={} flips'.format(count, len(self.masks[count])))
+                    self.logger.log('  N:{}={} flips'.format(count, len(self.masks[count])))
                     total += len(self.masks[count])
-                log('  total possible flips: {}'.format(total))
+                self.logger.log('  total possible flips: {}'.format(total))
         return self.masks[N]
 
     def decode(self, codeword: int) -> (int, int):
@@ -116,15 +128,16 @@ class CRC:
         synonym = self.synonyms[codeword]
         return self.unmake_synonym(synonym)
 
-    def build_codewords_table(self) -> int:
+    def build_codewords_table(self) -> (int, int):
         """ build the codewords for each payload and Hamming distance between each codeword and every other codeword,
             returns the Hamming distance and error correction bits
             """
         if self.codewords is not None:
             # already done it
             return self.hamming_distance
-        if self.log is not None:
-            self.log('Build codewords table for polynomial {:b}:...'.format(self.poly))
+        if self.logger is not None:
+            self.logger.push(context='crc')
+            self.logger.log('Build codewords table for polynomial {:b}:...'.format(self.poly))
         self.codewords = [[0,self.code_bits + 1] for _ in range(self.payload_range)]  # init to huge distance
         # build initial code table
         for payload in range(1, self.payload_range):
@@ -147,8 +160,9 @@ class CRC:
             if distance < self.hamming_distance:
                 self.hamming_distance = distance
         self.error_bits = max((self.hamming_distance - 1) >> 1, 0)
-        if self.log is not None:
-            self.log('  hamming distance is {}, max error-bits is {}'.format(self.hamming_distance, self.error_bits))
+        if self.logger is not None:
+            self.logger.log('  hamming distance is {}, max error-bits is {}'.format(self.hamming_distance, self.error_bits))
+            self.logger.pop()
         return self.hamming_distance, self.error_bits
 
     def build_synonyms_table(self) -> int:
@@ -160,8 +174,9 @@ class CRC:
         if self.synonyms is not None:
             # already done it
             return self.unique
-        if self.log is not None:
-            self.log('Build synonyms table (this may take some time!)...')
+        if self.logger is not None:
+            self.logger.push('crc')
+            self.logger.log('Build synonyms table (this may take some time!)...')
         # make all possible codewords (and their distances)
         self.build_codewords_table()
         # make all possible bit flips
@@ -183,8 +198,8 @@ class CRC:
                         continue
                     synonyms[synonym].append(self.make_synonym(payload, N))
                     possible += 1
-        if self.log is not None:
-            self.log('  all possible synonyms = {}'.format(possible))
+        if self.logger is not None:
+            self.logger.log('  all possible synonyms = {}'.format(possible))
         # build unique synonym table
         self.unique = 0
         self.synonyms = [0 for _ in range(self.code_range)]  # set all invalid initially
@@ -216,8 +231,9 @@ class CRC:
                 # no ambiguity here, so keep it
                 self.synonyms[codeword] = candidates[0]
                 self.unique += 1
-        if self.log is not None:
-            self.log('  unique synonyms = {}'.format(self.unique))
+        if self.logger is not None:
+            self.logger.log('  unique synonyms = {}'.format(self.unique))
+            self.logger.pop()
         return self.unique
 
     def analyse_synonyms(self):
@@ -245,7 +261,7 @@ class CRC:
         distance = synonym >> self.payload_bits
         return payload, distance
 
-def find_best_poly(poly_bits: int, payload_bits: int, log=None) -> [(int, int)]:
+def find_best_poly(poly_bits: int, payload_bits: int, logger=None) -> [(int, int)]:
     """ find best CRC polynomial (by doing an exhaustive search of all possible polynomials),
         returns a list of the best polynomials and their Hamming distance
         """
@@ -253,8 +269,8 @@ def find_best_poly(poly_bits: int, payload_bits: int, log=None) -> [(int, int)]:
     POLY_MAX      = 1 << POLY_BITS
     POLY_MSB      = POLY_MAX >> 1
     PAYLOAD_BITS  = payload_bits
-    if log is not None:
-        log('Searching for best {}-bit polynomial in range {}..{} for a {}-bit payload (this may take some time!):...'.
+    if logger is not None:
+        logger.log('Searching for best {}-bit polynomial in range {}..{} for a {}-bit payload (this may take some time!):...'.
             format(POLY_BITS, POLY_MSB, POLY_MAX, PAYLOAD_BITS))
     best_distance = 0
     best_poly     = None
@@ -267,40 +283,39 @@ def find_best_poly(poly_bits: int, payload_bits: int, log=None) -> [(int, int)]:
             best_distance = distance
             best_poly     = poly
             candidates    = [(best_poly, best_distance)]
-            if log is not None:
-                log('  new best so far: {}'.format(candidates))
+            if logger is not None:
+                logger.log('  new best so far: {}'.format(candidates))
         elif distance == best_distance:
             # got another just as good
             candidates.append((poly, distance))
-            if log is not None:
-                log('  another at same best so far: {}'.format(candidates))
-    if log is not None:
-        log('  best overall: {}'.format(candidates))
+            if logger is not None:
+                logger.log('  another at same best so far: {}'.format(candidates))
+    if logger is not None:
+        logger.log('  best overall: {}'.format(candidates))
     return candidates
 
 if __name__ == "__main__":
     """ test harness """
-    log = utils.Logger('crc.log').log
-    log('CRC test harness')
-    PAYLOAD_BITS = 10
-    POLY_BITS    = 12
+    logger = utils.Logger('crc.logger')
+    logger.log('CRC test harness')
+    PAYLOAD_BITS = const.PAYLOAD_BITS
+    POLY_BITS    = const.POLY_BITS
     # find best CRC polynomial (by doing an exhaustive search of all poly-bit polynomials)
-    # best_candidates = find_best_poly(POLY_BITS, PAYLOAD_BITS, log)
+    # best_candidates = find_best_poly(POLY_BITS, PAYLOAD_BITS, logger)
     # POLYNOMIAL     = best_candidates[0][0]
-    PAYLOAD_RANGE  = 1 << PAYLOAD_BITS
-    POLYNOMIAL     = 0xAE3  # discovered by brute force search, has hamming distance of 7
-    # POLYNOMIAL     = 0xC75  # discovered by brute force search, has hamming distance of 7
-    codec = CRC(PAYLOAD_BITS, POLYNOMIAL, log)
-    log('CRC spec: payload bits: {}, crc bits: {}, polynomial: {:b}, payload range: 1..{}, code range 0..{}'.
-        format(PAYLOAD_BITS, codec.crc_bits, POLYNOMIAL, PAYLOAD_RANGE-1, codec.code_range-1))
+    PAYLOAD_RANGE  = const.PAYLOAD_RANGE
+    POLYNOMIAL     = const.POLYNOMIAL
+    codec = CRC(PAYLOAD_BITS, POLYNOMIAL, logger)
+    logger.log('CRC spec: payload bits: {}, crc bits: {}, polynomial: {:b}, payload range: 1..{}, code range 0..{}'.
+               format(PAYLOAD_BITS, codec.crc_bits, POLYNOMIAL, PAYLOAD_RANGE-1, codec.code_range-1))
     codec.build_synonyms_table()
     distances, payloads = codec.analyse_synonyms()
-    log('Analysis:')
+    logger.log('Analysis:')
     for distance, synonyms in enumerate(distances):
         if len(synonyms) == 0:
             # nothing here
             continue
-        log('  distance:{} payloads={}'.format(distance, len(synonyms)))
+        logger.log('  distance:{} payloads={}'.format(distance, len(synonyms)))
     min_synonyms = codec.code_range + 1
     max_synonyms = 0
     avg_synonyms = 0
@@ -319,8 +334,8 @@ if __name__ == "__main__":
         if len(synonyms) > max_synonyms:
             max_synonyms = len(synonyms)
     avg_synonyms /= samples
-    log('  synonyms: min={}, max={}, average={:.0f}'.format(min_synonyms, max_synonyms, avg_synonyms))
-    log('Detection: all payloads for zero error case:')
+    logger.log('  synonyms: min={}, max={}, average={:.0f}'.format(min_synonyms, max_synonyms, avg_synonyms))
+    logger.log('Detection: all payloads for zero error case:')
     passes = []
     fails = []
     encoded = [None for _ in range(PAYLOAD_RANGE)]
@@ -331,13 +346,13 @@ if __name__ == "__main__":
             passes.append(code)
         else:
             fails.append(encoded)
-    log('  passes: {}'.format(len(passes)))
-    log('  fails: {}'.format(len(fails)))
+    logger.log('  passes: {}'.format(len(passes)))
+    logger.log('  fails: {}'.format(len(fails)))
     if len(fails) == 0:
-        log('  all codes pass encode->decode')
+        logger.log('  all codes pass encode->decode')
     else:
-        log('  encode->decode not symmetrical - find out what went wrong!')
-    log('Detection: All codeword cases:')
+        logger.log('  encode->decode not symmetrical - find out what went wrong!')
+    logger.log('Detection: All codeword cases:')
     passes = 0
     fails = 0
     good = {}
@@ -351,13 +366,13 @@ if __name__ == "__main__":
                 good[decoded] += 1
         else:
             fails += 1
-    log('  passes: {}'.format(passes))
-    log('  fails: {}'.format(fails))
+    logger.log('  passes: {}'.format(passes))
+    logger.log('  fails: {}'.format(fails))
     if len(good) == (PAYLOAD_RANGE - 1):
-        log('  all, and only, expected codes detected ({})'.format(len(good)))
+        logger.log('  all, and only, expected codes detected ({})'.format(len(good)))
     else:
-        log('  got {} unique codes when expecting {} - find out why'.format(len(good), PAYLOAD_RANGE - 1))
-    log('Error recovery for every possible code word: {}'.format(codec.code_range-1))
+        logger.log('  got {} unique codes when expecting {} - find out why'.format(len(good), PAYLOAD_RANGE - 1))
+    logger.log('Error recovery for every possible code word: {}'.format(codec.code_range-1))
     passes = 0
     fails = 0
     for code in range(1, codec.code_range):
@@ -367,9 +382,9 @@ if __name__ == "__main__":
         else:
             passes += 1
     total = passes + fails
-    log('  passes: {} ({:.0f}%), fails: {} ({:.0f}%)'.format(passes, (passes / total) * 100,
+    logger.log('  passes: {} ({:.0f}%), fails: {} ({:.0f}%)'.format(passes, (passes / total) * 100,
                                                              fails, (fails / total) * 100))
-    log('Error recovery for every possible N-bit flip for every possible codeword: 1..{} bit flips in {} code-bits'.
+    logger.log('Error recovery for every possible N-bit flip for every possible codeword: 1..{} bit flips in {} code-bits'.
         format(codec.error_bits, codec.code_bits))
     errors = [[0,0] for _ in range(codec.error_bits+1)]  # correct, total for each N
     for payload in range(1, PAYLOAD_RANGE):  # every possible payload
@@ -387,7 +402,7 @@ if __name__ == "__main__":
             # nothing here
             continue
         bad = total - good
-        log('  {}-bit flips: {} good ({:.0f}%), {} bad ({:.0f}%)'.format(N, good, (good/total)*100,
+        logger.log('  {}-bit flips: {} good ({:.0f}%), {} bad ({:.0f}%)'.format(N, good, (good/total)*100,
                                                                          bad, (bad/total)*100))
-    log('Done')
-    log()  # close log file
+    logger.log('Done')
+    logger.log()  # close logger file

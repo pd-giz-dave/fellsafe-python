@@ -50,6 +50,9 @@ class Logger:
     def pop(self):
         self.context.pop(0)
 
+    def depth(self):
+        return len(self.context)
+
     def draw(self, image, folder='', file=''):
         """ unload the given image into the given folder and file,
             folder, iff given, is a sub-folder to save it in (its created as required),

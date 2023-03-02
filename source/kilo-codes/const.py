@@ -61,3 +61,18 @@ PROXIMITY_CLOSE = 3  # suitable for print images
 # black threshold for binarising contours
 BLACK_LEVEL = {PROXIMITY_FAR: -0.5, PROXIMITY_CLOSE: -0.01}
 # endregion
+
+# region Blob circle radius modes...
+RADIUS_MODE_INSIDE  = 0
+RADIUS_MODE_MEAN    = 1
+RADIUS_MODE_OUTSIDE = 2
+RADIUS_MODES        = 3  # count of the number of modes
+# endregion
+
+# region CRC parameters
+PAYLOAD_BITS  = 10
+PAYLOAD_RANGE = 1 << PAYLOAD_BITS
+POLY_BITS     = 12
+POLYNOMIAL    = 0xAE3  # discovered by brute force search, has hamming distance of 7
+# POLYNOMIAL    = 0xC75  # discovered by brute force search, has hamming distance of 7
+# endregion

@@ -12,27 +12,27 @@
     _____xxxxxxxxxxxxxxx_____  *****  _____  *****  _____xxxxxxxxxxxxxxx_____  <--
     3____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
     _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _____xxxxxxxxxxxxxxx_____
-              /                                                   \
-    4        /-----     _____  .....  .....  .....  _____     _____\
-            / -----     _____  . A .  . B .  . C .  _____     _____ \
+
+    4         -----     _____  .....  .....  .....  _____     _____
+              -----     _____  . A .  . B .  . C .  _____     _____
               -----     _____  .....  .....  .....  _____     _____
 
-    5         *****_____.....  .....  .....  .....  ....._____*****         /  \
-              *****_____. H .  . G .  . F .  . E .  . D ._____*****        /    \
-              *****_____.....  .....  .....  .....  ....._____*****       /      \
-                                                                     mark cells extracted by finder.py
-    6         -----     .....  .....  .....  .....  .....     _____       \      /
-              -----     . I .  . J .  . K .  . L .  . M .     _____        \    /
-              -----     .....  .....  .....  .....  .....     _____         \  /
+    5         *****_____.....  .....  .....  .....  ....._____*****
+              *****_____. H .  . G .  . F .  . E .  . D ._____*****
+              *****_____.....  .....  .....  .....  ....._____*****
+
+    6         -----     .....  .....  .....  .....  .....     _____
+              -----     . I .  . J .  . K .  . L .  . M .     _____
+              -----     .....  .....  .....  .....  .....     _____
 
     7         *****_____.....  .....  .....  .....  ....._____*****
               *****_____. R .  . Q .  . P .  . O .  . N ._____*****
               *****_____.....  .....  .....  .....  ....._____*****
 
     8         _____     _____  .....  .....  .....  _____     _____
-            \ _____     _____  . S .  . T .  . U .  _____     _____ /
-             \_____     _____  .....  .....  .....  _____     _____/
-              \                                                   /
+              _____     _____  . S .  . T .  . U .  _____     _____
+              _____     _____  .....  .....  .....  _____     _____
+
     9____xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
     _____xxxxxxxxxxxxxxx_____  _____  _____  _____  _________________________
     10___xxxxxxxxxxxxxxx_____  *****  _____  *****  __________mmmmm__________  <-- column markers
@@ -56,6 +56,7 @@
     A..U are the bits of the codeword (21)
     their centre co-ordinates and size are calculated from the marker blobs
     numbers in the margins are 'cell' addresses (in units of the width of a marker blob)
+    only cell addresses 2,2..10,10 are 'active' in the sense they are detected and processed
     Note: The bottom-right 'minor locator' is much smaller than the others but its centre
           still aligns with bottom-left and top-right 'major locator' blobs
 """
@@ -74,37 +75,49 @@ class Codes:
     # the major locator blobs are 3x3 cells starting at 1,1
     # the minor locator blob is 1x1 cells
     # the marker blobs and data blobs are 1x1 cells, marker blobs are separated by at least 1 cell
-    LOCATORS   = [(1,1),(1,2),(1,3),None,(9,1),(10,1),(11,1),
-                  (2,1),(2,2),(2,3),None,(9,2),(10,2),(11,2),
-                  (3,1),(3,2),(3,3),None,(9,3),(10,3),(11,3),
+    LOCATORS   = [(1,1), (1,2), (1,3), None,(9,1), (10,1), (11,1),  # NB: these co-ords are relative to the canvas
+                  (2,1), (2,2), (2,3), None,(9,2), (10,2), (11,2),
+                  (3,1), (3,2), (3,3), None,(9,3), (10,3), (11,3),
                   None,
-                  (1,9),(2,9),(3,9),
+                  (1,9) ,(2,9) ,(3,9),
                   (1,10),(2,10),(3,10),None,(10,10),
                   (1,11),(2,11),(3,11)]
-    MARKERS    = [None,(5,2),None,(7,2),
+    MARKERS    = [None, (5,2), None,(7,2),  # NB: these co-ords are relative to the canvas
                   None,
-                  (2,5),None,None,None,(10,5),
+                  (2,5), None, None, None, (10,5),
                   None,
-                  (2,7),None,None,None,(10,7),
+                  (2,7), None, None, None, (10,7),
                   None,
-                  None,(5,10),None,(7,10)]
+                  None, (5,10),None,(7,10)]
     STRUCTURE  = LOCATORS + MARKERS
-    DATA_BITS  = [None, (5,4),(6,4),(7,4),None,
-                  (8,5),(7,5),(6,5),(5,5),(4,5),
-                  (4,6),(5,6),(6,6),(7,6),(8,6),
-                  (8,7),(7,7),(6,7),(5,7),(4,7),
-                  None, (5,8),(6,8),(7,8),None]
-    NAME_CELL  = (9,12)  # co-ordinate of the bottom-left of the text
-    MAX_X_CELL = 12
-    MAX_Y_CELL = 12
+    DATA_OFFSET = [2,2]  # data-bits offset from the canvas origin (0,0) - add this to DATA_BITS when drawing
+    DATA_BITS  = [None, (3,2),(4,2),(5,2),None,   # NB: these co-ords are relative to the active area
+                  (6,3),(5,3),(4,3),(3,3),(2,3),  # a None in here is just a spacing convenience and should be ignored
+                  (2,4),(3,4),(4,4),(5,4),(6,4),
+                  (6,5),(5,5),(4,5),(3,5),(2,5),
+                  None, (3,6),(4,6),(5,6),None]
+    NAME_CELL  = (9,12)  # canvas co-ordinate of the bottom-left of the text label
+    MAX_X_CELL = 12  # canvas size
+    MAX_Y_CELL = 12  # ..
     # endregion
     # region Public constants...
     LOCATORS_PER_CODE = 3  # how many 'major' locators there are per code
     LOCATOR_SCALE = 3  # size of major locators relative to markers (so radius of enclosing circle is half this)
     TIMING_SCALE  = 1 / LOCATOR_SCALE  # size of timing marks relative to locators
-    LOCATOR_SPAN = 8  # distance between locator centres in units of marker width
-    LOCATOR_SPACING = LOCATOR_SPAN / (LOCATOR_SCALE / 2)  # locator spacing in units of locator radius
-    TIMING_CELLS  = [3, 5]               # timing mark cell positions along a line between locators
+    LOCATOR_SPAN = 8  # distance between locator centres in units of *marker width*
+    LOCATOR_SPACING = LOCATOR_SPAN / (LOCATOR_SCALE / 2)  # locator spacing in units of *locator radius*
+    # These cell positions are relative to the 'active' area of the code (see visualisation above)
+    TIMING_CELLS  = [3, 5]               # timing mark cell positions along a line between locators (all 4 sides)
+    DATA_CELLS    = DATA_BITS            # public face of the data bits (same as internal as it happens)
+    BLACK_CELLS   = [(0,0),(3,0),(5,0),(8,0),       # active cell areas guaranteed to be black
+                     (0,3),None, None, (8,3),
+                     (0,5),None, None, (8,5),
+                     (0,8),(3,8),(5,8),(8,8)]
+    WHITE_CELLS   = [None, (2,0),(4,0),(6,0),None,  # active cell areas guaranteed to be white
+                     (0,2),None, None, None, (8,2),
+                     (0,4),None, None, None, (8,4),
+                     (0,6),None, None, None, (8,6),
+                     None, (2,8),(4,8),(6,8),None]
     # endregion
 
     def __init__(self, canvas: frame.Frame):
@@ -127,6 +140,8 @@ class Codes:
             if cell is None:
                 # these are just convenience spacers
                 continue
+            cell = (cell[0] + Codes.DATA_OFFSET[0],  # map from active area to canvas
+                    cell[1] + Codes.DATA_OFFSET[1])  # ..
             mask = 1 << bit
             if codeword & mask == 0:
                 self.draw_cell(cell)

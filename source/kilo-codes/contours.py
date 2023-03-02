@@ -114,11 +114,6 @@ class Contour:
         NB: most of the metrics of a contour are in the range 0..1 where 0 is good and 1 is very bad
         """
 
-    RADIUS_MODE_INSIDE  = 0
-    RADIUS_MODE_MEAN    = 1
-    RADIUS_MODE_OUTSIDE = 2
-    RADIUS_MODES        = 3
-
     def __init__(self):
         self.points: [Point] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
         self.top_left: Point = None
@@ -134,7 +129,7 @@ class Contour:
         self.x_slices: [tuple] = None
         self.y_slices: [tuple] = None
         self.centroid: Point = None
-        self.radius: [float] = [None for _ in range(Contour.RADIUS_MODES)]
+        self.radius: [float] = [None for _ in range(const.RADIUS_MODES)]
         self.offset: float = None
 
     def add_point(self, point: Point):
@@ -282,7 +277,7 @@ class Contour:
             self.blob_perimeter[(point.x, point.y)] = True  # NB: do NOT use point as the key, its an object not a tuple
         return self.blob_perimeter
 
-    def get_blob_radius(self, mode=RADIUS_MODE_INSIDE) -> float:
+    def get_blob_radius(self, mode) -> float:
         """ get the radius of the blob from its centre for the given mode,
             when mode is inside the radius found is the maximum that fits entirely inside the contour
             when mode is outside the radius found is the minimum that fits entirely outside the contour
@@ -314,24 +309,24 @@ class Contour:
         if len(perimeter) > 0:
             mean_distance_squared /= len(perimeter)
         mean_r    = max(math.sqrt(mean_distance_squared), 1.0)
-        inside_r  = max(math.sqrt(min_distance_squared), 1.0)
-        outside_r = max(math.sqrt(max_distance_squared), 1.0)
+        inside_r  = max(math.sqrt(min_distance_squared) , 1.0)
+        outside_r = max(math.sqrt(max_distance_squared) , 1.0)
         # cache all results
-        self.radius[Contour.RADIUS_MODE_INSIDE ] = inside_r
-        self.radius[Contour.RADIUS_MODE_OUTSIDE] = outside_r
-        self.radius[Contour.RADIUS_MODE_MEAN   ] = mean_r
+        self.radius[const.RADIUS_MODE_INSIDE ] = inside_r
+        self.radius[const.RADIUS_MODE_OUTSIDE] = outside_r
+        self.radius[const.RADIUS_MODE_MEAN   ] = mean_r
         # return just the one asked for
         return self.radius[mode]
 
-    def get_enclosing_circle(self, mode=RADIUS_MODE_INSIDE) -> Circle:
+    def get_enclosing_circle(self, mode) -> Circle:
         """ get the requested circle type """
         return Circle(self.get_centroid(), self.get_blob_radius(mode))
 
-    def get_circle_perimeter(self):
+    def get_circle_perimeter(self, mode):
         """ get the perimeter of the enclosing circle,
             NB: the circle perimeter is expected to be cached by the Circle instance
             """
-        circle = self.get_enclosing_circle()
+        circle = self.get_enclosing_circle(mode)
         return circle.perimeter()
 
     def trim_edges(self):
@@ -406,10 +401,11 @@ class Blob:
         a blob has access to the underlying image (unlike a Contour)
         """
 
-    def __init__(self, label: int, image, inverted: bool):
+    def __init__(self, label: int, image, inverted: bool, mode):
         self.label: int = label
         self.image = image  # the binary image buffer the blob was found within
         self.inverted = inverted  # True if its a balck blob, else a white blob
+        self.mode = mode  # what type of circle radius required (one of Contour.RADIUS...)
         self.external: Contour = None
         self.internal: [Contour] = []
         self.rejected = REJECT_UNKNOWN
@@ -469,7 +465,7 @@ class Blob:
             return None
         if self.circle_black is not None:
             return self.circle_black, self.circle_white
-        self.circle_black, self.circle_white = count_pixels(self.image, self.external.get_circle_perimeter())
+        self.circle_black, self.circle_white = count_pixels(self.image, self.external.get_circle_perimeter(self.mode))
         return self.circle_black, self.circle_white
 
     def get_blob_pixels(self):
@@ -582,6 +578,7 @@ class Targets:
     binary = None                        # the binarized blurred image buffer
     box = None                           # when not None the box within the image to process, else all of it
     inverted = False                     # if True look for black blobs, else white blobs
+    mode = const.RADIUS_MODE_MEAN        # what type of circle radius mode to use
     integration_width: int = 48          # width of integration area as fraction of image width
     integration_height: int = None       # height of integration area as fraction of image height (None==same as width)
     black_threshold: float = 0.01        # make +ve to get more white, -ve to get more black, range +100%..-100%
@@ -932,7 +929,7 @@ def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
 
     return points
 
-def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = False) -> [Blob]:
+def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, debug=False) -> [Blob]:
     """ find_blobs in the given image,
         if inverted is True look for black blobs, else white
         returns a list of Blob's or None if failed
@@ -978,7 +975,7 @@ def find_blobs(image, direct: bool = True, inverted: bool=False, debug: bool = F
             if here_label == 0 and above_in == find_outside:
                 # found a new start
                 label += 1               # assign next label
-                blob = Blob(label, image, inverted)
+                blob = Blob(label, image, inverted, mode)
                 blob.add_contour(contour_trace(image, buffer, label, x, y,
                                                external=True, direct=direct, inverted=inverted))
                 blobs.append(blob)
@@ -1074,8 +1071,6 @@ def find_targets(source, params: Targets, logger=None):
         distances not shapes, so this is fine,
         NB: The presence of a logger implies we are debugging
         """
-    if logger is not None:
-        logger.push("find_targets")
     params.source  = source
     params.blurred = blur_image(source, params.blur_kernel_size)
     params.binary  = make_binary(params.blurred,
@@ -1085,28 +1080,31 @@ def find_targets(source, params: Targets, logger=None):
                                  params.black_threshold,
                                  params.white_threshold)
     if logger is None:
-        blobs = find_blobs(params.binary, params.direct_neighbours, inverted=params.inverted)
+        blobs = find_blobs(params.binary, params.direct_neighbours, mode=params.mode, inverted=params.inverted)
     else:
-        blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours,
+        blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours, mode=params.mode,
                                            inverted=params.inverted, debug=True)
     passed = filter_blobs(blobs, params, logger=logger)
     params.targets = []
     for blob in passed:
-        circle = blob.external.get_enclosing_circle()
+        circle = blob.external.get_enclosing_circle(params.mode)
         params.targets.append([circle.centre.x, circle.centre.y, circle.radius, blob.label])
     if logger is None:
         return params.targets
     else:
-        logger.pop()
         return params.binary, blobs, buffer, labels, params.targets
 
 def get_targets(source, params=None, logger=None) -> [tuple]:
-    """ find targets in the given image using default parameters """
+    """ find targets in the given image using given or default parameters """
+    if logger is not None:
+        logger.push("find_blobs")
+        logger.log('')
     if params is None:
         params = Targets()  # use defaults
     result = find_targets(source, params, logger)
     if logger is not None:
         show_result(params, result, logger)
+        logger.pop()
     return params.targets, params.binary
 
 def extract_box(image, box: ((int, int), (int, int))):
@@ -1171,7 +1169,7 @@ def show_result(params, result, logger):
     for blob in blobs:
         if blob.rejected != REJECT_NONE:
             continue
-        circle = blob.external.get_enclosing_circle()
+        circle = blob.external.get_enclosing_circle(params.mode)
         points = circumference(circle.centre.x, circle.centre.y, circle.radius)
         draw_good = plot(draw_good, points, const.BLUE)
 
@@ -1290,6 +1288,10 @@ def load_image(src):
 def _test(src, size, proximity, black, inverted, blur, logger, params=None):
     """ ************** TEST **************** """
 
+    if logger.depth() > 1:
+        logger.push(context='contours/_test')
+    else:
+        logger.push(context='_test')
     logger.log("\nPreparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
     source = load_image(src)
     # Downsize it (to simulate low quality smartphone cameras)
@@ -1302,9 +1304,10 @@ def _test(src, size, proximity, black, inverted, blur, logger, params=None):
     params.black_threshold = black
     params.inverted = inverted
     params.blur_kernel_size = blur
+    params.mode = const.RADIUS_MODE_MEAN
     # do the actual detection
     result = get_targets(shrunk, params, logger=logger)
-
+    logger.pop()
     return params
 
 
@@ -1355,7 +1358,6 @@ if __name__ == "__main__":
     # endregion
 
     logger = utils.Logger('contours.log', 'contours')
-    logger.log('_test')
 
     _test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
           inverted=True, blur=3, logger=logger)

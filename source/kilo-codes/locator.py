@@ -109,7 +109,7 @@ class Locator:
         self._dropped    = None
 
     @staticmethod
-    def is_same(a, b, limit) -> bool:
+    def is_same(a, b, limit=0.0) -> bool:
         """ determine if the two given numbers are considered equal within the given limit,
             if they are, return their ratio, else return None
             """
@@ -178,6 +178,11 @@ class Locator:
                 there_r = there[Locator.R_COORD]
                 if Locator.is_same(here_r, there_r, Locator.MIN_RADIUS_RATIO) is None:
                     # sizes too dis-similar
+                    if self.logger is not None:
+                        ratio = Locator.is_same(here_r, there_r)
+                        self.logger.log('Neighbours: Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                                        ' sizes too dis-similar (ratio is {:.2f}, limit is {:.2f})'.
+                                        format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
                     continue
                 # size OK, now check distance
                 max_distance = max(here_r, there_r) * Locator.MAX_LOCATOR_DISTANCE
@@ -187,6 +192,11 @@ class Locator:
                 distance = Locator.distance(here, there)
                 if distance > max_distance or distance < min_distance:
                     # length out of range
+                    if self.logger is not None:
+                        self.logger.log('Neighbours: Here blob {}, there blob {}:'
+                                        ' distance ({:.2f}) out of range {:.2f}..{:.2f}'.
+                                        format(blob, candidate,
+                                               math.sqrt(distance), math.sqrt(max_distance), math.sqrt(min_distance)))
                     continue
                 neighbour.append((candidate, distance))
             if len(neighbour) >= Locator.MIN_NEIGHBOURS:
@@ -217,6 +227,10 @@ class Locator:
                         if Locator.is_same(a2b, b2c, Locator.MIN_LENGTH_RATIO) is None:
                             if Locator.is_same(c2a, b2c, Locator.MIN_LENGTH_RATIO) is None:
                                 # no two sides the same, so not a corner
+                                if self.logger is not None:
+                                    self.logger.log('Corners: neighbours a:{}, b:{}, c:{} have no two sides the same length'
+                                                    ' a->b {:.2f}, c->a {:.2f}, b->c {:.2f}'.
+                                                    format(a, b, c, math.sqrt(a2b), math.sqrt(c2a), math.sqrt(b2c)))
                                 continue
                             else:
                                 # c2a==b2c, c is 'primary' corner, so a2b is the long side, it should be c2a+b2c
@@ -236,13 +250,11 @@ class Locator:
                     squareness = Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO)
                     if squareness is None:
                         # not required distance
-                        # if self.logger is not None:
-                        #     drop_x, drop_y, drop_r, _ = self.blobs[primary]
-                        #     ratio = Locator.is_same(expected_length, actual_length, 0)
-                        #     self.logger('Dropping triplet at {:.2f}x{:.2f}y ({:.2f}r) as not being square enough, '
-                        #                 'expected diagonal length:{:.2f}, actual:{:.2f} (ratio is {:.2f}, limit is {})'.
-                        #                 format(drop_x, drop_y, drop_r,
-                        #                        expected_length, actual_length, ratio, Locator.MIN_DIAGONAL_RATIO))
+                        if self.logger is not None:
+                            self.logger('Corners: primary blob {} diagonal (actual length {:.2f}) squareness {:.2f}'
+                                        ' not within {:.2f} of expected (expected length {:.2f})'.
+                                        format(primary, math.sqrt(actual_length), squareness,
+                                               Locator.MIN_DIAGONAL_RATIO, math.sqrt(expected_length)))
                         continue
                     # found a qualifying corner set
                     # save corner in blob number order so can easily find duplicates
@@ -436,25 +448,27 @@ def locate_targets(image, params: Params, logger=None) -> [Detection]:
         returns a (possibly empty) list of detections
         NB: params are modified
         """
-    locator = Locator(params.targets, logger.log)
+    if logger is not None:
+        logger.push('locate_targets')
+        logger.log('')
+    locator = Locator(params.targets, logger)
     max_x = image.shape[1]  # NB: x is columns and y is rows in the array
     max_y = image.shape[0]  # ..
     detections = locator.detections(max_x, max_y)
     if logger is not None:
         show_results(params, locator, logger)
+        logger.pop()
     params.locator = locator  # for upstream diagnostics
     return detections
 
 def show_results(params, locator, logger):
     """ diagnostic aid - log stats and draw images """
-    blobs  = params.targets
     source = params.source
     max_x  = source.shape[1]  # NB: x, y are reversed in numpy arrays
     max_y  = source.shape[0]  # ..
     image  = cv2.merge([source, source, source])  # make into a colour image
 
-    logger.log('\n\nLocator:')
-    blobs.sort(key=lambda k: (k[0], k[1]))  # put in x,y order purely to help diagnostics
+    logger.log('Locator:')
     neighbours = locator.neighbours()
     logger.log('{} blobs with {} or more neighbours:'.format(len(neighbours), Locator.MIN_NEIGHBOURS))
     for blob, neighbour in neighbours:
@@ -538,6 +552,11 @@ def _test(src, proximity, logger, blur=3, create_new=True):
     # create_new_blobs=True to create new blobs, False to re-use existing blobs
     import pickle
 
+    if logger.depth() > 1:
+        logger.push('locator/_test')
+    else:
+        logger.push('_test')
+
     if create_new:
         # this is very slow
         params = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
@@ -552,7 +571,7 @@ def _test(src, proximity, logger, blur=3, create_new=True):
 
     params.source_file = src
     locate_targets(params.source, params, logger)
-
+    logger.pop()
     return params  # for upstream test harness
 
 
@@ -565,6 +584,5 @@ if __name__ == "__main__":
     #proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('locator.log', 'locator')
-    logger.log('_test')
 
     _test(src, proximity, logger, blur=3, create_new=True)
