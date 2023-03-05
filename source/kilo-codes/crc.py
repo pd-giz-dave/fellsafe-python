@@ -261,6 +261,14 @@ class CRC:
         distance = synonym >> self.payload_bits
         return payload, distance
 
+def make_codec(logger=None):
+    """ make a codec for encoding/decoding bits """
+    if logger is not None:
+        logger.log('Preparing codec...')
+    codec = CRC(const.PAYLOAD_BITS, const.POLYNOMIAL, logger)
+    codec.prepare()
+    return codec
+
 def find_best_poly(poly_bits: int, payload_bits: int, logger=None) -> [(int, int)]:
     """ find best CRC polynomial (by doing an exhaustive search of all possible polynomials),
         returns a list of the best polynomials and their Hamming distance
@@ -298,12 +306,12 @@ if __name__ == "__main__":
     """ test harness """
     logger = utils.Logger('crc.logger')
     logger.log('CRC test harness')
-    PAYLOAD_BITS = const.PAYLOAD_BITS
-    POLY_BITS    = const.POLY_BITS
+    PAYLOAD_BITS  = const.PAYLOAD_BITS
+    POLY_BITS     = const.POLY_BITS
+    PAYLOAD_RANGE = const.PAYLOAD_RANGE
     # find best CRC polynomial (by doing an exhaustive search of all poly-bit polynomials)
     # best_candidates = find_best_poly(POLY_BITS, PAYLOAD_BITS, logger)
     # POLYNOMIAL     = best_candidates[0][0]
-    PAYLOAD_RANGE  = const.PAYLOAD_RANGE
     POLYNOMIAL     = const.POLYNOMIAL
     codec = CRC(PAYLOAD_BITS, POLYNOMIAL, logger)
     logger.log('CRC spec: payload bits: {}, crc bits: {}, polynomial: {:b}, payload range: 1..{}, code range 0..{}'.

@@ -79,15 +79,16 @@ class Detection:
 
 class Locator:
 
-    # region geometry...
-    STRETCH_FACTOR       = 1.3  # how much image 'stretch' to allow for (as a result of distortion and viewing angle)
-    MIN_RADIUS_RATIO     = 0.7  # min size ratio between blobs for them to be considered of similar size
-    MAX_LOCATOR_DISTANCE = codes.Codes.LOCATOR_SPACING * STRETCH_FACTOR  # max distance between corner locators
-    MIN_LOCATOR_DISTANCE = codes.Codes.LOCATOR_SPACING / STRETCH_FACTOR  # min distance between corner locators
-    MIN_NEIGHBOURS       = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per 'major' locator
-    MIN_LENGTH_RATIO     = 0.7  # min length ratio of two triangle sides to be considered equal
-    MIN_DIAGONAL_RATIO   = 0.8  # min diagonal ratio between expected and actual length to be considered equal
-    NEAR_CORNER_SCALE    = 1.0  # scaling factor to consider two corners as overlapping
+    # region geometry contraints...
+    LOCATOR_DISTANCE    = codes.Codes.LOCATOR_SPACING  # distance between locators in units of locator radius
+    LOCATOR_DISTANCE   *= LOCATOR_DISTANCE             # ..squared to be units compatible with distance squared
+    MIN_NEIGHBOURS      = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per 'primary' locator
+    MIN_DISTANCE_RATIO  = 0.5  # min distance ratio (actual/expected) between locators to be considered neighbours
+    MIN_DISTANCE_RATIO *= MIN_DISTANCE_RATIO  # ..squared to be units compatible with distance squared (1==best)
+    MIN_RADIUS_RATIO    = 0.6  # min size ratio between blobs for them to be considered of similar size (1==best)
+    MIN_LENGTH_RATIO    = 0.7  # min length ratio of two triangle sides to be considered equal (1==best)
+    MIN_DIAGONAL_RATIO  = 0.8  # min diagonal ratio between expected and actual length to be considered equal (1==best)
+    NEAR_CORNER_SCALE   = 1.0  # scaling factor to consider two corners as overlapping
     # endregion
 
     # blob tuple indexes
@@ -107,9 +108,13 @@ class Locator:
         self._width      = None
         self._height     = None
         self._dropped    = None
+        self._neighbour_size_stats = None
+        self._neighbour_dist_stats = None
+        self._corner_side_stats = None
+        self._corner_diag_stats = None
 
     @staticmethod
-    def is_same(a, b, limit=0.0) -> bool:
+    def is_same(a, b, limit=0.0) -> float:
         """ determine if the two given numbers are considered equal within the given limit,
             if they are, return their ratio, else return None
             """
@@ -167,6 +172,8 @@ class Locator:
 
         # this is a crude O(N^2) algorithm, I'm sure there are better ways!, eg. a k-d tree
         self._neighbours = []
+        self._neighbour_size_stats = [utils.Stats(20), utils.Stats(20)]  # good and bad
+        self._neighbour_dist_stats = [utils.Stats(20), utils.Stats(20)]  # ..
         for blob, here in enumerate(self.blobs):
             neighbour = []
             for candidate, there in enumerate(self.blobs):
@@ -179,28 +186,58 @@ class Locator:
                 if Locator.is_same(here_r, there_r, Locator.MIN_RADIUS_RATIO) is None:
                     # sizes too dis-similar
                     if self.logger is not None:
+                        # log bad ones
                         ratio = Locator.is_same(here_r, there_r)
-                        self.logger.log('Neighbours: Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
-                                        ' sizes too dis-similar (ratio is {:.2f}, limit is {:.2f})'.
-                                        format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
+                        # self.logger.log('Neighbours (bad): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                        #                 ' sizes too dis-similar (ratio is {:.2f}, limit is {:.2f})'.
+                        #                 format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
+                        self._neighbour_size_stats[1].count(ratio)
                     continue
+                if self.logger is not None:
+                    # log good ones
+                    ratio = Locator.is_same(here_r, there_r)
+                    # self.logger.log('Neighbours (good): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                    #                 ' sizes match (ratio is {:.2f}, limit is {:.2f})'.
+                    #                 format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
+                    self._neighbour_size_stats[0].count(ratio)
                 # size OK, now check distance
-                max_distance = max(here_r, there_r) * Locator.MAX_LOCATOR_DISTANCE
-                min_distance = min(here_r, there_r) * Locator.MIN_LOCATOR_DISTANCE
-                max_distance *= max_distance
-                min_distance *= min_distance
-                distance = Locator.distance(here, there)
-                if distance > max_distance or distance < min_distance:
-                    # length out of range
+                distance   = Locator.distance(here, there)
+                one_unit   = (here_r + there_r) / 2  # one locator distance unit
+                one_unit  *= one_unit                # square it to be compatible with distance
+                separation = distance / one_unit     # this locator pair separation in distance units squared
+                if Locator.is_same(separation, Locator.LOCATOR_DISTANCE, Locator.MIN_DISTANCE_RATIO) is None:
+                    # distance out of range
                     if self.logger is not None:
-                        self.logger.log('Neighbours: Here blob {}, there blob {}:'
-                                        ' distance ({:.2f}) out of range {:.2f}..{:.2f}'.
-                                        format(blob, candidate,
-                                               math.sqrt(distance), math.sqrt(max_distance), math.sqrt(min_distance)))
+                        # log bad ones
+                        ratio = Locator.is_same(separation, Locator.LOCATOR_DISTANCE)
+                        # self.logger.log('Neighbours (bad): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                        #                 ' distance ({:.2f}) too far from expected (ratio is {:.2f}, limit is {:.2f})'.
+                        #                 format(blob, here_r, candidate, there_r, math.sqrt(separation),
+                        #                        math.sqrt(ratio), math.sqrt(Locator.MIN_DISTANCE_RATIO)))
+                        self._neighbour_dist_stats[1].count(ratio)
                     continue
+                # log good ones
+                ratio = Locator.is_same(separation, Locator.LOCATOR_DISTANCE)
+                # self.logger.log('Neighbours (good): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                #                 ' distance ({:.2f}) close to expected (ratio is {:.2f}, limit is {:.2f})'.
+                #                 format(blob, here_r, candidate, there_r, math.sqrt(separation),
+                #                        math.sqrt(ratio), math.sqrt(Locator.MIN_DISTANCE_RATIO)))
+                self._neighbour_dist_stats[0].count(ratio)
+                # size and distance OK
                 neighbour.append((candidate, distance))
             if len(neighbour) >= Locator.MIN_NEIGHBOURS:
                 self._neighbours.append((blob, neighbour))
+        if self.logger is not None:
+            self.logger.log('')
+            self.logger.log('Neighbour bad size ratio stats')
+            self.logger.log('  ' + self._neighbour_size_stats[1].show())
+            self.logger.log('Neighbour good size ratio stats')
+            self.logger.log('  ' + self._neighbour_size_stats[0].show())
+            self.logger.log('')
+            self.logger.log('Neighbour bad distance ratio stats')
+            self.logger.log('  ' + self._neighbour_dist_stats[1].show())
+            self.logger.log('Neighbour good distance ratio stats (across {} neighbours)'.format(len(self._neighbours)))
+            self.logger.log('  ' + self._neighbour_dist_stats[0].show())
         return self._neighbours
 
     def corners(self):
@@ -213,6 +250,8 @@ class Locator:
             return self._corners
 
         self._corners = []
+        self._corner_side_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
+        self._corner_diag_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
         for a, neighbour in self.neighbours():
             pivot_x, pivot_y, _, _ = self.blobs[a]
             for b, a2b in neighbour:
@@ -228,9 +267,14 @@ class Locator:
                             if Locator.is_same(c2a, b2c, Locator.MIN_LENGTH_RATIO) is None:
                                 # no two sides the same, so not a corner
                                 if self.logger is not None:
-                                    self.logger.log('Corners: neighbours a:{}, b:{}, c:{} have no two sides the same length'
-                                                    ' a->b {:.2f}, c->a {:.2f}, b->c {:.2f}'.
-                                                    format(a, b, c, math.sqrt(a2b), math.sqrt(c2a), math.sqrt(b2c)))
+                                    # log bad ones
+                                    ac_ratio = Locator.is_same(a2b, c2a)
+                                    ab_ratio = Locator.is_same(a2b, b2c)
+                                    cb_ratio = Locator.is_same(c2a, b2c)
+                                    # self.logger.log('Corners (bad): neighbours a:{}, b:{}, c:{} have no two sides the same length'
+                                    #                 ' a2b/c2a={:.2f}, a2b/b2c={:.2f}, c2a/b2c={:.2f}, limit is {:.2f}'.
+                                    #                 format(a, b, c, ac_ratio, ab_ratio, cb_ratio, Locator.MIN_LENGTH_RATIO))
+                                    self._corner_side_stats[1].count(max(ac_ratio, ab_ratio, cb_ratio))
                                 continue
                             else:
                                 # c2a==b2c, c is 'primary' corner, so a2b is the long side, it should be c2a+b2c
@@ -247,15 +291,35 @@ class Locator:
                         primary         = a
                         actual_length   = b2c
                         expected_length = a2b + c2a
+                    # log good ones
+                    if self.logger is not None:
+                        ac_ratio = Locator.is_same(a2b, c2a)
+                        ab_ratio = Locator.is_same(a2b, b2c)
+                        cb_ratio = Locator.is_same(c2a, b2c)
+                        # self.logger.log('Corners (good): neighbours a:{}, b:{}, c:{} has two sides the same length'
+                        #                 ' a2b/c2a={:.2f}, a2b/b2c={:.2f}, c2a/b2c={:.2f}, limit is {:.2f}'.
+                        #                 format(a, b, c, ac_ratio, ab_ratio, cb_ratio, Locator.MIN_LENGTH_RATIO))
+                        self._corner_side_stats[0].count(max(ac_ratio, ab_ratio, cb_ratio))
                     squareness = Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO)
                     if squareness is None:
                         # not required distance
                         if self.logger is not None:
-                            self.logger('Corners: primary blob {} diagonal (actual length {:.2f}) squareness {:.2f}'
-                                        ' not within {:.2f} of expected (expected length {:.2f})'.
-                                        format(primary, math.sqrt(actual_length), squareness,
-                                               Locator.MIN_DIAGONAL_RATIO, math.sqrt(expected_length)))
+                            # log bad ones
+                            squareness = Locator.is_same(expected_length, actual_length)
+                            # self.logger.log('Corners (bad): primary blob {} (of {}, {}, {}) diagonal '
+                            #                 '(actual_length/expected_length) '
+                            #                 'too far from square at {:.2f} (limit is {:.2f})'.
+                            #                 format(primary, a, b, c, squareness, Locator.MIN_DIAGONAL_RATIO))
+                            self._corner_diag_stats[1].count(squareness)
                         continue
+                    # log good ones
+                    if self.logger is not None:
+                        squareness = Locator.is_same(expected_length, actual_length)
+                        # self.logger.log('Corners (good): primary blob {} (of {}, {}, {}) diagonal '
+                        #                 '(actual_length/expected_length) '
+                        #                 'is square at {:.2f} (limit is {:.2f})'.
+                        #                 format(primary, a, b, c, squareness, Locator.MIN_DIAGONAL_RATIO))
+                        self._corner_diag_stats[0].count(squareness)
                     # found a qualifying corner set
                     # save corner in blob number order so can easily find duplicates
                     corners = [a, b, c]
@@ -263,6 +327,17 @@ class Locator:
                     corners.append(primary)
                     corners.append(squareness)  # this is used to filter duplicate rectangles, the closer to 1 the better
                     self._corners.append(corners)
+        if self.logger is not None:
+            self.logger.log('')
+            self.logger.log('Corner bad side stats')
+            self.logger.log('  ' + self._corner_side_stats[1].show())
+            self.logger.log('Corner good side stats')
+            self.logger.log('  ' + self._corner_side_stats[0].show())
+            self.logger.log('')
+            self.logger.log('Corner bad diagonal stats')
+            self.logger.log('  ' + self._corner_diag_stats[1].show())
+            self.logger.log('Corner good diagonal stats (across {} corners)'.format(len(self._corners)))
+            self.logger.log('  ' + self._corner_diag_stats[0].show())
         if len(self._corners) > 0:
             # remove duplicates (NB: relying on blobs within corners being sorted into blob order)
             self._corners.sort(key=lambda k: (k[0], k[1], k[2]))
@@ -468,6 +543,7 @@ def show_results(params, locator, logger):
     max_y  = source.shape[0]  # ..
     image  = canvas.colourize(source)  # make into a colour image
 
+    logger.log('')
     logger.log('Locator:')
     neighbours = locator.neighbours()
     logger.log('{} blobs with {} or more neighbours:'.format(len(neighbours), Locator.MIN_NEIGHBOURS))
@@ -578,10 +654,10 @@ def _test(src, proximity, logger, blur=3, create_new=True):
 if __name__ == "__main__":
     """ test harness """
 
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    proximity = const.PROXIMITY_CLOSE
-    #proximity = const.PROXIMITY_FAR
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
+    #proximity = const.PROXIMITY_CLOSE
+    proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('locator.log', 'locator')
 

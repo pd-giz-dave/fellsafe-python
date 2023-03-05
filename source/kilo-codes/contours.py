@@ -586,14 +586,14 @@ class Targets:
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
     max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
-    min_size: float = 3                  # min number of pixels across width/height
+    min_size: float = 2                  # min number of pixels across width/height
     max_size: float = 128                # max number of pixels across width/height
     blur_kernel_size = 3                 # blur kernel size to apply, must be odd, None or < 3 == do not blur
     # all these 'ness' parameters are in the range 0..1, where 0 is perfect and 1 is utter crap
-    max_squareness = 0.25                # how close to square the bounding box has to be (0.5 is a 2:1 rectangle)
-    max_wavyness   = 0.25                # how close to not wavy a contour perimeter must be
+    max_squareness = 0.5                 # how close to square the bounding box has to be (0.5 is a 2:1 rectangle)
+    max_wavyness   = 0.35                # how close to not wavy a contour perimeter must be
     max_offsetness = 0.03                # how close the centroid has to be to the enclosing box centre
-    max_whiteness  = 0.25                # whiteness of the enclosing circle
+    max_whiteness  = 0.4                 # whiteness of the enclosing circle
     max_blackness  = 0.5                 # whiteness of the enclosing box (0.5 is worst case for a 45 deg rotated sq)
     targets: [tuple]  = None             # the result
 
@@ -1051,11 +1051,11 @@ def filter_blobs(blobs: [Blob], params: Targets, logger=None) -> [Blob]:
             break
         blob.quality = quality
         blob.rejected = reason_code
-        if logger is not None and reason_code != REJECT_NONE:
-            logger.log("Rejected:{}, {}".format(reason_code, blob.show(verbose=True)))
+        # if logger is not None and reason_code != REJECT_NONE:
+        #     logger.log("Rejected:{}, {}".format(reason_code, blob.show(verbose=True)))
     if logger is not None:
         rejected = len(blobs) - len(good_blobs)
-        logger.log("Accepted blobs: {}, rejected {}({:.2f}%) of {}".
+        logger.log("Accepted blobs: {}, rejected {} ({:.2f}%) of {}".
                    format(len(good_blobs), rejected, (rejected / len(blobs)) * 100, len(blobs)))
         logger.pop()
     return good_blobs
@@ -1170,41 +1170,32 @@ def show_result(params, result, logger):
         canvas.circle(draw, (target[0], target[1]), target[2], const.GREEN, 1)
     logger.draw(draw, file='blobs')
 
-    logger.log("\nAll accepted blobs:")
-    stats_range = 20
-    stats_span = 100 / stats_range / 100
-    all_squareness_stats = [0 for _ in range(stats_range + 1)]
-    all_wavyness_stats = [0 for _ in range(stats_range + 1)]
-    all_whiteness_stats = [0 for _ in range(stats_range + 1)]
-    all_blackness_stats = [0 for _ in range(stats_range + 1)]
-    all_offsetness_stats = [0 for _ in range(stats_range + 1)]
-    squareness_stats = [0 for _ in range(stats_range + 1)]
-    wavyness_stats = [0 for _ in range(stats_range + 1)]
-    whiteness_stats = [0 for _ in range(stats_range + 1)]
-    blackness_stats = [0 for _ in range(stats_range + 1)]
-    offsetness_stats = [0 for _ in range(stats_range + 1)]
-    reject_stats = {}
+    logger.log('\n')
+    logger.log("All accepted blobs:")
+    stats_buckets = 20
+    all_squareness_stats = utils.Stats(stats_buckets)
+    all_wavyness_stats = utils.Stats(stats_buckets)
+    all_whiteness_stats = utils.Stats(stats_buckets)
+    all_blackness_stats = utils.Stats(stats_buckets)
+    all_offsetness_stats = utils.Stats(stats_buckets)
+    squareness_stats = utils.Stats(stats_buckets)
+    wavyness_stats = utils.Stats(stats_buckets)
+    whiteness_stats = utils.Stats(stats_buckets)
+    blackness_stats = utils.Stats(stats_buckets)
+    offsetness_stats = utils.Stats(stats_buckets)
+    reject_stats = utils.Frequencies()
     good_blobs = 0
     blobs.sort(key=lambda k: (k.external.top_left.x, k.external.top_left.y))
 
     def update_count(stats, value):
-        if value is None:
-            return
-        stats[int(value * stats_range)] += 1
+        stats.count(value)
 
     def log_stats(name, stats):
-        msg = ''
-        for i, num in enumerate(stats):
-            if num == 0:
-                continue
-            msg = '{}, {:.2f}-{}'.format(msg, i * stats_span, num)
-        logger.log('  {:10}: {}'.format(name, msg[2:]))
+        msg = stats.show()
+        logger.log('  {:10}: {}'.format(name, msg))
 
     for b, blob in enumerate(blobs):
-        if reject_stats.get(blob.rejected) is None:
-            reject_stats[blob.rejected] = 1
-        else:
-            reject_stats[blob.rejected] += 1
+        reject_stats.count(blob.rejected)
         squareness, wavyness, whiteness, blackness, offsetness = blob.get_quality_stats()
         update_count(all_squareness_stats, squareness)
         update_count(all_wavyness_stats, wavyness)
@@ -1221,30 +1212,31 @@ def show_result(params, result, logger):
         update_count(offsetness_stats, offsetness)
         logger.log("  {}: {}".format(b, blob.show(verbose=True)))
     # show stats
-    logger.log("\nAll reject frequencies (across {} blobs):".format(len(blobs)))
-    for reason, count in reject_stats.items():
-        logger.log("  {}: {} ({:.2f}%)".format(reason, count, (count / len(blobs)) * 100))
-    logger.log("\nAll blobs stats (across {} blobs):".format(len(blobs)))
+    logger.log('\n')
+    logger.log("All reject frequencies (across {} blobs):".format(len(blobs)))
+    logger.log('  ' + reject_stats.show())
+    logger.log('\n')
+    logger.log("All blobs stats (across {} blobs):".format(len(blobs)))
     log_stats("squareness", all_squareness_stats)
     log_stats("wavyness", all_wavyness_stats)
     log_stats("whiteness", all_whiteness_stats)
     log_stats("blackness", all_blackness_stats)
     log_stats("offsetness", all_offsetness_stats)
-
-    logger.log("\nAll accepted blobs stats (across {} blobs):".format(good_blobs))
+    logger.log('\n')
+    logger.log("All accepted blobs stats (across {} blobs):".format(good_blobs))
     log_stats("squareness", squareness_stats)
     log_stats("wavyness", wavyness_stats)
     log_stats("whiteness", whiteness_stats)
     log_stats("blackness", blackness_stats)
     log_stats("offsetness", offsetness_stats)
-
-    logger.log("\nAll detected targets:")
+    logger.log('\n')
+    logger.log("All detected targets:")
     params.targets.sort(key=lambda k: (k[0], k[1]))
     for t, target in enumerate(params.targets):
         logger.log("  {}: centre: {:.2f}, {:.2f}  radius: {:.2f}  label: {}".
                    format(t, target[0], target[1], target[2], target[3]))
-
-    logger.log("\nBlob colours:")
+    logger.log('\n')
+    logger.log("Blob colours:")
     for reason, (_, name) in colours.items():
         logger.log('  {}: {}'.format(name, reason))
 
@@ -1255,11 +1247,11 @@ def _test(src, size, proximity, black, inverted, blur, logger, params=None):
         logger.push(context='contours/_test')
     else:
         logger.push(context='_test')
-    logger.log("\nPreparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
+    logger.log("Preparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
     source = canvas.load(src)
     # Downsize it (to simulate low quality smartphone cameras)
     shrunk = canvas.downsize(source, size)
-    logger.log("\nDetecting blobs")
+    logger.log("Detecting blobs")
     if params is None:
         params = Targets()
     params.source_file = src
@@ -1298,9 +1290,10 @@ if __name__ == "__main__":
     #src = "/home/dave/precious/fellsafe/fellsafe-image/codes/test-code-101.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/close-101-111-124-172-222-281-333-337-354-444-555-594-655-666-710-740-777-819-888-900.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    proximity = const.PROXIMITY_CLOSE
-    #proximity = const.PROXIMITY_FAR
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
+    #proximity = const.PROXIMITY_CLOSE
+    proximity = const.PROXIMITY_FAR
 
     # region test shape...
     # shape = [[0,0,0,0,0,0,0,0,0,0],

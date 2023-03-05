@@ -45,7 +45,7 @@
               |||||                                           |||||
               +++++--------------- row markers ---------------+++++
 
-    xx..xx are the 'major locator' blobs
+    xx..xx are the 'major locator' blobs, top-left is the 'primary' locator,
     mm..mm is the 'minor locator' blob that is the same size as a marker blob
     **** are the row/column 'marker' blobs
     all locator and marker blobs are detected by their contour
@@ -61,8 +61,11 @@
           still aligns with bottom-left and top-right 'major locator' blobs
 """
 
+import random
 import canvas
 import const
+import utils
+import crc
 
 class Codes:
 
@@ -186,10 +189,32 @@ class Codes:
 if __name__ == "__main__":
     """ test harness """
 
-    CELL_WIDTH  = 42
-    CELL_HEIGHT = 42
+    CELL_WIDTH  = 42  # creates an image that fits on A5
+    CELL_HEIGHT = 42  # ..
 
-    image = canvas.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
-    codec = Codes(image)
-    codec.draw_codeword(0b010_01010_10101_01010_010, 'TEST01...')
-    canvas.unload(image, 'test-alt-bits.png')
+    TEST_PATTERN = 0b010_01010_10101_01010_010
+    TEST_CODES   = 10  # how many test codes to make
+
+    TEST_PATTERN_NAME  = 'test-alt-bits'
+    TEST_PATTERN_LABEL = 'Alt zero and one'
+
+    logger = utils.Logger('codes.log', 'codes')
+    logger.log('Creating {} codes and the test pattern with cells {} x {}'.format(TEST_CODES, CELL_WIDTH, CELL_HEIGHT))
+
+    codec = crc.make_codec(logger)
+
+    def draw_code(code, label, name):
+        logger.log('\nCreating code {:21b}...'.format(code))
+        image = canvas.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
+        codes = Codes(image)
+        codes.draw_codeword(code, label)
+        logger.draw(image, file=name)
+
+    draw_code(TEST_PATTERN, TEST_PATTERN_LABEL, TEST_PATTERN_NAME)
+
+    for test in range(TEST_CODES):
+        code = random.randrange(101, 999+1)
+        codeword = codec.encode(code)
+        draw_code(codeword, '{:03d}'.format(code), 'test-code-{:03d}'.format(code))
+
+    logger.log('\nDone')

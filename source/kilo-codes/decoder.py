@@ -4,6 +4,7 @@
     The bit strings provided are LSB first.
     Each None bit is interpreted as a 0 and a 1 to test for a valid code with a bit missing unless there are too many.
 """
+
 import math
 import random  # only used for testing
 import canvas  # only used for diagnostics
@@ -26,7 +27,7 @@ class Decoder:
         self.decodes = None
         self.best_codes = None
         if codec is None:
-            self.codec = make_codec(logger)
+            self.codec = crc.make_codec(logger)
         else:
             self.codec = codec
         self.max_options = 1 << self.codec.error_bits  # limit the number of None bits we will tolerate
@@ -142,14 +143,6 @@ class Decoder:
         else:
             return None
 
-def make_codec(logger=None):
-    """ make the codec for decoding our bits """
-    if logger is not None:
-        logger.log('Preparing codec...')
-    codec = crc.CRC(const.PAYLOAD_BITS, const.POLYNOMIAL, logger)
-    codec.prepare()
-    return codec
-
 def decode_bits(bits, source=None, image=None, origins=None, logger=None, codec=None):
     """ decode the given bit strings into all its options """
     decoder = Decoder(bits, logger=logger, codec=codec)
@@ -213,7 +206,7 @@ def _test_decoder(logger):
     FLIPPED_ERRORS = (0, 3)  # range of flipped bits to apply (random within this) (should not exceed error bits)
 
     logger.log('Testing decoder with {} missing and {} flipped bits'.format(MISSING_ERRORS, FLIPPED_ERRORS))
-    codec = make_codec(logger)
+    codec = crc.make_codec(logger)
     # generate codewords with random missing bits and random flipped bits
     logger.log('Testing all possible codes...')
     good = 0
@@ -281,7 +274,7 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-782.png"
     proximity = const.PROXIMITY_CLOSE
     #proximity = const.PROXIMITY_FAR
 
