@@ -18,7 +18,7 @@ class Decoder:
 
     GOOD_OPTIONS_THRESHOLD = 1.0  # when got multiple decode options, min ratio of good to overall to be acceptable
                                   # must be > 0.5 else becomes ambiguous (only one option must qualify)
-                                  # anything less than 1 creates false positives
+                                  # anything less than 1 creates false positives, so don't
 
     def __init__(self, bits, codec=None, logger=None):
         self.bits = bits
@@ -143,53 +143,60 @@ class Decoder:
         else:
             return None
 
-def decode_bits(bits, source=None, image=None, origins=None, logger=None, codec=None):
+def decode_bits(bits, source=None, image=None, circles=None, logger=None, codec=None):
     """ decode the given bit strings into all its options """
     decoder = Decoder(bits, logger=logger, codec=codec)
     decodes = decoder.get_codes()
     if logger is not None:
         logger.push('decode_bits')
+        logger.log('')
         draw = None
         for detection, decode in enumerate(decodes):
-            if origins is not None:
-                origin, size = origins[detection]
+            if circles is not None:
+                centre, radius, origin = circles[detection]
                 folder = utils.image_folder(target=origin)
                 logger.push(folder, folder)
                 if image is not None:
                     if draw is None:
                         draw = canvas.colourize(image)
-                    top_left = (origin[0], origin[1])
-                    bottom_right = (top_left[0]+128, top_left[1]+16)
                     if decode is None:
                         colour = const.RED
-                        text = 'INVALID ({:.0f})'.format(size)
+                        text = 'INVALID ({:.0f})'.format(radius)
                     else:
                         colour = const.GREEN
-                        text = '{}.{} ({:.0f})'.format(decode[0], decode[1], size)
-                    canvas.rectangle(draw, top_left, bottom_right, colour, 1)
-                    canvas.settext(draw, text, (top_left[0]+3, bottom_right[1]-3), colour=colour)
-            logger.log('{} decodes as {}'.format(bits, decode))
-            if origins is not None:
+                        text = '{}.{} ({:.0f})'.format(decode[0], decode[1], radius)
+                    canvas.circle(draw, centre, radius, colour)
+                    canvas.settext(draw, text, centre, colour=colour)
+            logger.log('Detection {}: {} from {}'.format(detection, decode, bits[detection]))
+            if circles is not None:
                 logger.pop()
         if draw is not None:
             logger.draw(draw, file='decodes')
         logger.pop()
     return decodes
 
-def _test_pipeline(src, proximity, blur=3, logger=None, create_new=True):
+def _test_pipeline(src, proximity, blur, mode, logger=None, create_new=True):
     """ ************** TEST **************** """
 
     if logger.depth() > 1:
         logger.push('decoder/_test_pipeline')
     else:
         logger.push('_test_pipeline')
-    logger.log("\nDecoding code bits from the pipeline")
+    logger.log('')
+    logger.log('Decoding code bits from the pipeline')
 
     # get the code bits
-    bits, image, origins = extractor._test(src, proximity, blur=blur, logger=logger, create_new=create_new)
+    params = extractor._test(src, proximity, blur=blur, mode=mode, logger=logger, create_new=create_new)
+    if params is None:
+        logger.log('Extractor failed on {}'.format(src))
+        logger.pop()
+        return None
+    bits = params.extractor.get_bits()
+    image = params.finder.image
+    circles = params.finder.circles()
 
     # process the code areas
-    codes = decode_bits(bits, source=src, image=image, origins=origins, logger=logger)
+    codes = decode_bits(bits, source=src, image=image, circles=circles, logger=logger)
 
     logger.pop()
     return codes
@@ -273,10 +280,10 @@ def _test_decoder(logger):
 if __name__ == "__main__":
     """ test harness """
 
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-782.png"
-    proximity = const.PROXIMITY_CLOSE
-    #proximity = const.PROXIMITY_FAR
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
+    #proximity = const.PROXIMITY_CLOSE
+    proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('decoder.log', 'decoder/{}'.format(utils.image_folder(src)))
 
@@ -284,4 +291,4 @@ if __name__ == "__main__":
     #_test_decoder(logger)
 
     # test whole pipeline
-    _test_pipeline(src, proximity, blur=3, logger=logger, create_new=True)
+    _test_pipeline(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)

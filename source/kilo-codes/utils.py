@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import dill
 import canvas
 
 class Logger:
@@ -25,10 +26,12 @@ class Logger:
             self.log_handle.close()
             self.log_handle = None
 
+    def close(self):
+        self.log_handle.close()
+        self.log_handle = None
+
     def log(self, msg: str=None):
         if msg is None:
-            self.log_handle.close()
-            self.log_handle = None
             return
         if self.log_handle is None:
             self.log_handle = open(self.log_file, 'w')
@@ -62,7 +65,7 @@ class Logger:
     def depth(self):
         return len(self.context)
 
-    def draw(self, image, folder='', file=''):
+    def draw(self, image, folder='', file='', ext='png'):
         """ unload the given image into the given folder and file,
             folder, iff given, is a sub-folder to save it in (its created as required),
             the parent folder is that given when the logger was created,
@@ -70,8 +73,18 @@ class Logger:
             file is the file name to use, blank==invent one,
             """
 
+        filename = self.makepath(folder, file, ext)
+
+        # save the image
+        canvas.unload(image, filename)
+
+        self.log('{}: image saved as: {}'.format(file, filename))
+        
+    def makepath(self, folder='', file='', ext='png'):
+        """ make the required folder and return the fully qualified file name """
+        
         if file == '':
-            file = 'draw-{}'.format(self.count)
+            file = 'logger-{}'.format(self.count)
             self.count += 1
 
         if folder == '':
@@ -80,13 +93,39 @@ class Logger:
         # make sure the destination folder exists
         pathlib.Path(folder).mkdir(parents=True, exist_ok=True)
 
-        filename = '{}/{}.png'.format(folder, file)
-
-        # save the image
-        canvas.unload(image, filename)
-
-        self.log('{}: image saved as: {}'.format(file, filename))
-
+        filename = '{}/{}.{}'.format(folder, file, ext)
+        return filename
+        
+    def save(self, object, folder='', file='', ext='object'):
+        """ save the given object to the given file (so it can be restored later), 
+            returns the fully qualified file name used
+            """
+        
+        filename = self.makepath(folder, file, ext)
+        dump_file = open(filename, 'wb')
+        dill.dump(object, dump_file)
+        dump_file.close()
+        
+        self.log('{}: object saved as: {}'.format(file, filename))
+        
+        return filename
+        
+    def restore(self, folder='', file='', ext='object', filename=None):
+        """ restore a previously saved object, returning the object or None if it does not exist,
+            NB: the logger context must be the same as when the object was saved if no filename is given
+            """
+        if filename is None:
+            filename = self.makepath(folder, file, ext)
+        try:
+            dump_file = open(filename, 'rb')
+            object = dill.load(dump_file)
+            dump_file.close()
+            self.log('Restored object from {}'.format(filename))
+        except:
+            object = None
+            self.log('Restore of object from {} failed'.format(filename))
+        return object
+        
 class Stats:
     """ log quantized value statistics """
 
@@ -201,3 +240,15 @@ def image_folder(source=None, target=(0,0)):
         _, basename = os.path.split(pathname)
         folder = '{}{}'.format(basename, folder)
     return folder
+
+def distance(here, there) -> float:
+    """ calculate the distance between the two given points,
+        returns the distance squared,
+        we use squared result so we do not need to do a square root (which is slow)
+        """
+    distance_x  = here[0] - there[0]
+    distance_x *= distance_x
+    distance_y  = here[1] - there[1]
+    distance_y *= distance_y
+    distance    = distance_x + distance_y
+    return distance

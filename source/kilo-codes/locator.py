@@ -36,12 +36,13 @@ import const     # for the proximity constants
 import utils     # for the logger
 import contours  # for providing a test source of blobs
 
-class Params(contours.Targets):
+class Params(contours.Params):
     def __init__(self):
         self.locator = None
 
 get_targets = contours.get_targets  # only here to hide contours from upstream
 extract_box = contours.extract_box  # ..
+make_binary = contours.make_binary  # ....
 
 class Detection:
     """ a 'detection' is the four points of a rectangle formed from the three detected corners, and its
@@ -50,7 +51,7 @@ class Detection:
         the code area (equivalent to the radius of the biggest blob)
         """
 
-    MARGIN_SCALE = 1.7  # scale factor from the maximum blob radius to the enclosing box edges
+    MARGIN_SCALE = 1.2  # scale factor from the maximum blob radius to the enclosing box edges
 
     @staticmethod
     def constrain(value, min_value, max_value):
@@ -67,14 +68,30 @@ class Detection:
         self.tr = rectangle[1]
         self.br = rectangle[2]
         self.bl = rectangle[3]
-        self.squareness = rectangle[5]  # maybe used as a discriminator downstream
-        margin = max(rectangle[0][2], rectangle[1][2], rectangle[2][2], rectangle[3][2]) * Detection.MARGIN_SCALE
-        min_x = Detection.constrain(min(self.tl[0], self.tr[0], self.br[0], self.bl[0]) - margin, 0, image_width-1)
-        max_x = Detection.constrain(max(self.tl[0], self.tr[0], self.br[0], self.bl[0]) + margin, 0, image_width-1)
-        min_y = Detection.constrain(min(self.tl[1], self.tr[1], self.br[1], self.bl[1]) - margin, 0, image_height-1)
-        max_y = Detection.constrain(max(self.tl[1], self.tr[1], self.br[1], self.bl[1]) + margin, 0, image_height-1)
+        self.sq = rectangle[5]  # maybe used as a discriminator downstream
+        min_x = self.min_image_xy(image_width,  Locator.X_COORD)
+        max_x = self.max_image_xy(image_width,  Locator.X_COORD)
+        min_y = self.min_image_xy(image_height, Locator.Y_COORD)
+        max_y = self.max_image_xy(image_height, Locator.Y_COORD)
         self.box_tl = (min_x, min_y)
         self.box_br = (max_x, max_y)
+
+    def apply_margin(self, base, scale):
+        return base + (scale * Detection.MARGIN_SCALE)
+
+    def min_image_xy(self, limit, xy):
+        min_tl = self.apply_margin(self.tl[xy], -self.tl[Locator.R_COORD]) - 1
+        min_tr = self.apply_margin(self.tr[xy], -self.tr[Locator.R_COORD]) - 1
+        min_br = self.apply_margin(self.br[xy], -self.br[Locator.R_COORD]) - 1
+        min_bl = self.apply_margin(self.bl[xy], -self.bl[Locator.R_COORD]) - 1
+        return Detection.constrain(min(min_tl, min_tr, min_br, min_bl), 0, limit-1)
+
+    def max_image_xy(self, limit, xy):
+        max_tl = self.apply_margin(self.tl[xy], self.tl[Locator.R_COORD])
+        max_tr = self.apply_margin(self.tr[xy], self.tr[Locator.R_COORD])
+        max_br = self.apply_margin(self.br[xy], self.br[Locator.R_COORD])
+        max_bl = self.apply_margin(self.bl[xy], self.bl[Locator.R_COORD])
+        return Detection.constrain(max(max_tl, max_tr, max_br, max_bl), 0, limit-1)
 
 
 class Locator:
@@ -83,6 +100,9 @@ class Locator:
     LOCATOR_DISTANCE    = codes.Codes.LOCATOR_SPACING  # distance between locators in units of locator radius
     LOCATOR_DISTANCE   *= LOCATOR_DISTANCE             # ..squared to be units compatible with distance squared
     MIN_NEIGHBOURS      = codes.Codes.LOCATORS_PER_CODE - 1  # expected neighbours per 'primary' locator
+    MIN_PIXELS_PER_CELL = 1.4  # minimum number of pixels across a cell to be useful
+    MIN_PIXEL_DISTANCE  = codes.Codes.LOCATOR_SPAN * MIN_PIXELS_PER_CELL  # min pixels between locators
+    MIN_PIXEL_DISTANCE *= MIN_PIXEL_DISTANCE  # ..squared to be units compatible with distance squared
     MIN_DISTANCE_RATIO  = 0.5  # min distance ratio (actual/expected) between locators to be considered neighbours
     MIN_DISTANCE_RATIO *= MIN_DISTANCE_RATIO  # ..squared to be units compatible with distance squared (1==best)
     MIN_RADIUS_RATIO    = 0.6  # min size ratio between blobs for them to be considered of similar size (1==best)
@@ -109,6 +129,7 @@ class Locator:
         self._height     = None
         self._dropped    = None
         self._neighbour_size_stats = None
+        self._neighbour_clse_stats = None
         self._neighbour_dist_stats = None
         self._corner_side_stats = None
         self._corner_diag_stats = None
@@ -125,24 +146,11 @@ class Locator:
             return ratio
 
     @staticmethod
-    def distance(here, there) -> float:
-        """ calculate the distance between the two given blobs,
-            returns the distance squared,
-            we use squared result so we do not need to do a square root (which is slow)
-            """
-        distance_x  = here[Locator.X_COORD] - there[Locator.X_COORD]
-        distance_x *= distance_x
-        distance_y  = here[Locator.Y_COORD] - there[Locator.Y_COORD]
-        distance_y *= distance_y
-        distance    = distance_x + distance_y
-        return distance
-
-    @staticmethod
     def is_near(a, b) -> bool:
         """ determine if corner a is near corner b, 'near' is when their areas overlap,
             i.e. the distance between them is less than the sum of their radii times some scaling constant
             """
-        gap = Locator.distance(a, b)
+        gap = utils.distance(a, b)
         limit = (a[Locator.R_COORD] + b[Locator.R_COORD]) * Locator.NEAR_CORNER_SCALE
         limit *= limit  # gap is distance squared, so the limit must be too
         return gap < limit
@@ -152,7 +160,7 @@ class Locator:
         """ return a measure of the quality of the given rectangle,
             a high quality rectangle is more square and has more evenly sized locators
             """
-        tl, tr, br, bl, _, squareness = rectangle
+        tl, tr, br, bl, _, sq = rectangle
         tl_r = tl[Locator.R_COORD]
         tr_r = tr[Locator.R_COORD]
         # don't look at br radius as that is an estimate (so no quality information in it)
@@ -162,7 +170,7 @@ class Locator:
         tr_ratio = tr_r / max_r
         bl_ratio = bl_r / max_r
         ratio = tl_ratio * tr_ratio * bl_ratio  # range 0..1, 0==bad, 1==good
-        return ratio * squareness               # range 0..1, 0==bad, 1==good
+        return ratio * sq               # range 0..1, 0==bad, 1==good
 
     def neighbours(self):
         """ return a list of similar size near neighbours for each blob """
@@ -173,7 +181,8 @@ class Locator:
         # this is a crude O(N^2) algorithm, I'm sure there are better ways!, eg. a k-d tree
         self._neighbours = []
         self._neighbour_size_stats = [utils.Stats(20), utils.Stats(20)]  # good and bad
-        self._neighbour_dist_stats = [utils.Stats(20), utils.Stats(20)]  # ..
+        self._neighbour_clse_stats = [utils.Stats(20, value_range=(1,100)), utils.Stats(20)]  # ..
+        self._neighbour_dist_stats = [utils.Stats(20), utils.Stats(20)]  # ....
         for blob, here in enumerate(self.blobs):
             neighbour = []
             for candidate, there in enumerate(self.blobs):
@@ -201,7 +210,24 @@ class Locator:
                     #                 format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
                     self._neighbour_size_stats[0].count(ratio)
                 # size OK, now check distance
-                distance   = Locator.distance(here, there)
+                distance   = utils.distance(here, there)
+                if distance < Locator.MIN_PIXEL_DISTANCE:
+                    # locators too close
+                    if self.logger is not None:
+                        # log bad ones
+                        ratio = distance / Locator.MIN_PIXEL_DISTANCE
+                        # self.logger.log('Neighbours (bad): Here blob {} too close to there blob {}:'
+                        #                 ' distance is {:.2f}, limit is {} (ratio is {:.2f})'.
+                        #                 format(blob, candidate, distance, Locator.MIN_PIXEL_DISTANCE, ratio))
+                        self._neighbour_clse_stats[1].count(ratio)
+                    continue
+                if self.logger is not None:
+                    # log good ones
+                    ratio = distance / Locator.MIN_PIXEL_DISTANCE
+                    # self.logger.log('Neighbours (good): Here blob {} not too close to there blob {}:'
+                    #                 ' distance is {:.2f}, limit is {} (ratio is {:.2f})'.
+                    #                 format(blob, candidate, distance, Locator.MIN_PIXEL_DISTANCE, ratio))
+                    self._neighbour_clse_stats[0].count(ratio)
                 one_unit   = (here_r + there_r) / 2  # one locator distance unit
                 one_unit  *= one_unit                # square it to be compatible with distance
                 separation = distance / one_unit     # this locator pair separation in distance units squared
@@ -234,6 +260,11 @@ class Locator:
             self.logger.log('Neighbour good size ratio stats')
             self.logger.log('  ' + self._neighbour_size_stats[0].show())
             self.logger.log('')
+            self.logger.log('Neighbour bad closeness ratio stats')
+            self.logger.log('  ' + self._neighbour_clse_stats[1].show())
+            self.logger.log('Neighbour good closeness ratio stats')
+            self.logger.log('  ' + self._neighbour_clse_stats[0].show())
+            self.logger.log('')
             self.logger.log('Neighbour bad distance ratio stats')
             self.logger.log('  ' + self._neighbour_dist_stats[1].show())
             self.logger.log('Neighbour good distance ratio stats (across {} neighbours)'.format(len(self._neighbours)))
@@ -259,7 +290,7 @@ class Locator:
                     if c == b:
                         # ignore self
                         continue
-                    b2c = Locator.distance(self.blobs[b], self.blobs[c])
+                    b2c = utils.distance(self.blobs[b], self.blobs[c])
                     # a2b is side ab length, c2a is side ac length, b2c is side bc length
                     # we want two sides to be d^2 and the other to be 2d^2
                     if Locator.is_same(a2b, c2a, Locator.MIN_LENGTH_RATIO) is None:
@@ -300,32 +331,32 @@ class Locator:
                         #                 ' a2b/c2a={:.2f}, a2b/b2c={:.2f}, c2a/b2c={:.2f}, limit is {:.2f}'.
                         #                 format(a, b, c, ac_ratio, ab_ratio, cb_ratio, Locator.MIN_LENGTH_RATIO))
                         self._corner_side_stats[0].count(max(ac_ratio, ab_ratio, cb_ratio))
-                    squareness = Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO)
-                    if squareness is None:
+                    sq = Locator.is_same(expected_length, actual_length, Locator.MIN_DIAGONAL_RATIO)
+                    if sq is None:
                         # not required distance
                         if self.logger is not None:
                             # log bad ones
-                            squareness = Locator.is_same(expected_length, actual_length)
+                            sq = Locator.is_same(expected_length, actual_length)
                             # self.logger.log('Corners (bad): primary blob {} (of {}, {}, {}) diagonal '
                             #                 '(actual_length/expected_length) '
                             #                 'too far from square at {:.2f} (limit is {:.2f})'.
-                            #                 format(primary, a, b, c, squareness, Locator.MIN_DIAGONAL_RATIO))
-                            self._corner_diag_stats[1].count(squareness)
+                            #                 format(primary, a, b, c, sq, Locator.MIN_DIAGONAL_RATIO))
+                            self._corner_diag_stats[1].count(sq)
                         continue
                     # log good ones
                     if self.logger is not None:
-                        squareness = Locator.is_same(expected_length, actual_length)
+                        sq = Locator.is_same(expected_length, actual_length)
                         # self.logger.log('Corners (good): primary blob {} (of {}, {}, {}) diagonal '
                         #                 '(actual_length/expected_length) '
                         #                 'is square at {:.2f} (limit is {:.2f})'.
-                        #                 format(primary, a, b, c, squareness, Locator.MIN_DIAGONAL_RATIO))
-                        self._corner_diag_stats[0].count(squareness)
+                        #                 format(primary, a, b, c, sq, Locator.MIN_DIAGONAL_RATIO))
+                        self._corner_diag_stats[0].count(sq)
                     # found a qualifying corner set
                     # save corner in blob number order so can easily find duplicates
                     corners = [a, b, c]
                     corners.sort()
                     corners.append(primary)
-                    corners.append(squareness)  # this is used to filter duplicate rectangles, the closer to 1 the better
+                    corners.append(sq)  # this is used to filter duplicate rectangles, the closer to 1 the better
                     self._corners.append(corners)
         if self.logger is not None:
             self.logger.log('')
@@ -373,7 +404,7 @@ class Locator:
             return (qa==1 and qb==2) or (qa==2 and qb==3) or (qa==3 and qb==4) or (qa==4 and qb==1)
 
         self._triangles = []
-        for a, b, c, primary, squareness in self.corners():
+        for a, b, c, primary, sq in self.corners():
             # primary is the corner where the right-angle is (one of a or b or c)
             # if we know A is a right-angle it means B and C will be in adjacent quadrants
             # clockwise means B is 'before' C in this:
@@ -419,7 +450,7 @@ class Locator:
             tl = self.blobs[triangle[0]]
             tr = self.blobs[triangle[1]]
             bl = self.blobs[triangle[2]]
-            self._triangles.append((tl, tr, bl, triangle, squareness))
+            self._triangles.append((tl, tr, bl, triangle, sq))
         self.triangles().sort(key=lambda k: (k[3][0], k[3][1], k[3][2]))  # put into blob order purely to help debugging
         return self._triangles
 
@@ -440,7 +471,7 @@ class Locator:
             # already done it
             return self._rectangles
         self._rectangles = []
-        for tl, tr, bl, triangle, squareness in self.triangles():
+        for tl, tr, bl, triangle, sq in self.triangles():
             Ax, Ay, Ar, _ = tl
             Bx, By, _ , _ = tr
             Cx, Cy, _ , _ = bl
@@ -449,7 +480,7 @@ class Locator:
             Dx = ((Ex - Ax) * 2) + Ax
             Dy = ((Ey - Ay) * 2) + Ay
             br = [Dx, Dy, Ar, None]  # build a blob for the 'bottom-right' corner (same size as 'top-left')
-            self._rectangles.append([tl, tr, br, bl, triangle, squareness])
+            self._rectangles.append([tl, tr, br, bl, triangle, sq])
         return self._rectangles
 
     def detections(self, width=None, height=None):
@@ -526,15 +557,16 @@ def locate_targets(image, params: Params, logger=None) -> [Detection]:
     if logger is not None:
         logger.push('locate_targets')
         logger.log('')
+        logger.log('Locate targets')
     locator = Locator(params.targets, logger)
     max_x = image.shape[1]  # NB: x is columns and y is rows in the array
     max_y = image.shape[0]  # ..
-    detections = locator.detections(max_x, max_y)
+    locator.detections(max_x, max_y)
+    params.locator = locator  # for upstream access
     if logger is not None:
         show_results(params, locator, logger)
         logger.pop()
-    params.locator = locator  # for upstream diagnostics
-    return detections
+    return params
 
 def show_results(params, locator, logger):
     """ diagnostic aid - log stats and draw images """
@@ -544,7 +576,7 @@ def show_results(params, locator, logger):
     image  = canvas.colourize(source)  # make into a colour image
 
     logger.log('')
-    logger.log('Locator:')
+    logger.log('Locator results:')
     neighbours = locator.neighbours()
     logger.log('{} blobs with {} or more neighbours:'.format(len(neighbours), Locator.MIN_NEIGHBOURS))
     for blob, neighbour in neighbours:
@@ -604,19 +636,27 @@ def show_results(params, locator, logger):
                           detection.bl[0], detection.bl[1]))
         logger.log('    enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
                    format(detection.box_tl[0], detection.box_tl[1], detection.box_br[0], detection.box_br[1],
-                          detection.squareness))
+                          detection.sq))
         canvas.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+        src_image = canvas.colourize(source)
+        origin = (detection.box_tl[0], detection.box_tl[1])
+        canvas.rectangle(src_image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+        canvas.settext(src_image, '{}x{}y'.format(origin[0], origin[1]), (origin[0],origin[1]-2), colour=const.GREEN)
+        folder = utils.image_folder(target=origin)
+        logger.push(folder=folder)
+        logger.draw(src_image, file='source')
+        logger.pop()
     logger.draw(image, file='locators')
 
-def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
+def draw_rectangle(image, tl, tr, br, bl, origin=(0,0), scale=1.0):
     """ draw the given located code rectangle corner points on the given image for diagnostic purposes,
         origin is the co-ordinate reference for the given corner points, this is subtracted to gain the
         equivalent co-ordinates in the image (the image may be a 'box' extracted from a larger image)
         """
-    ax, ay = tl[0] - origin[0], tl[1] - origin[1]
-    bx, by = tr[0] - origin[0], tr[1] - origin[1]
-    cx, cy = bl[0] - origin[0], bl[1] - origin[1]
-    dx, dy = br[0] - origin[0], br[1] - origin[1]
+    (ax, ay), _ = canvas.translate(tl, 1.0, origin, scale)
+    (bx, by), _ = canvas.translate(tr, 1.0, origin, scale)
+    (cx, cy), _ = canvas.translate(bl, 1.0, origin, scale)
+    (dx, dy), _ = canvas.translate(br, 1.0, origin, scale)
     canvas.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), const.GREEN , 1)
     canvas.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), const.YELLOW, 1)
     canvas.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), const.RED   , 1)
@@ -624,10 +664,9 @@ def draw_rectangle(image, tl, tr, br, bl, origin=(0,0)):
     return image
 
 
-def _test(src, proximity, logger, blur=3, create_new=True):
+def _test(src, proximity, blur, mode, logger, params=None, create_new=True):
     # create_new_blobs=True to create new blobs, False to re-use existing blobs
-    import pickle
-
+    
     if logger.depth() > 1:
         logger.push('locator/_test')
     else:
@@ -635,15 +674,17 @@ def _test(src, proximity, logger, blur=3, create_new=True):
 
     if create_new:
         # this is very slow
+        if params is None:
+            params = Params()
         params = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
-                                inverted=True, blur=blur, logger=logger, params=Params())
-        blobs_dump = open('locator.blobs','wb')
-        pickle.dump(params, blobs_dump)
-        blobs_dump.close()
+                                inverted=True, blur=blur, mode=mode, params=params, logger=logger)
+        if params is None:
+            logger.log('Contours failed on {}'.format(src))
+            logger.pop()
+            return None
+        logger.save(params, file='locator', ext='params')
     else:
-        blobs_dump = open('locator.blobs', 'rb')
-        params = pickle.load(blobs_dump)
-        blobs_dump.close()
+        params = logger.restore(file='locator', ext='params')
 
     params.source_file = src
     locate_targets(params.source, params, logger)
@@ -655,10 +696,10 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('locator.log', 'locator')
 
-    _test(src, proximity, logger, blur=3, create_new=True)
+    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)

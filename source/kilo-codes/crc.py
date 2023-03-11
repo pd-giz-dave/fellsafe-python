@@ -413,4 +413,4 @@ if __name__ == "__main__":
         logger.log('  {}-bit flips: {} good ({:.0f}%), {} bad ({:.0f}%)'.format(N, good, (good/total)*100,
                                                                          bad, (bad/total)*100))
     logger.log('Done')
-    logger.log()  # close logger file
+    logger.close()

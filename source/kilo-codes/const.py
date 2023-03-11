@@ -60,7 +60,7 @@ DEBUG_VERBOSE = 2  # do everything - generates a *lot* of output
 PROXIMITY_FAR = 48  # suitable for most images (photos and videos)
 PROXIMITY_CLOSE = 3  # suitable for print images
 # black threshold for binarising contours
-BLACK_LEVEL = {PROXIMITY_FAR: 30, PROXIMITY_CLOSE: -0.01}
+BLACK_LEVEL = {PROXIMITY_FAR: 25, PROXIMITY_CLOSE: -0.01}
 # endregion
 
 # region Blob circle radius modes...

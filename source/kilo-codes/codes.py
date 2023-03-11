@@ -112,15 +112,24 @@ class Codes:
     # These cell positions are relative to the 'active' area of the code (see visualisation above)
     TIMING_CELLS  = [3, 5]               # timing mark cell positions along a line between locators (all 4 sides)
     DATA_CELLS    = DATA_BITS            # public face of the data bits (same as internal as it happens)
-    BLACK_CELLS   = [(0,0),(3,0),(5,0),(8,0),       # active cell areas guaranteed to be black
-                     (0,3),None, None, (8,3),
-                     (0,5),None, None, (8,5),
-                     (0,8),(3,8),(5,8),(8,8)]
-    WHITE_CELLS   = [None, (2,0),(4,0),(6,0),None,  # active cell areas guaranteed to be white
-                     (0,2),None, None, None, (8,2),
-                     (0,4),None, None, None, (8,4),
-                     (0,6),None, None, None, (8,6),
-                     None, (2,8),(4,8),(6,8),None]
+    BLACK_CELLS   = [(0,0),None,None,(3,0),None,(5,0),None,None,(8,0),  # active cell areas guaranteed to be black
+                     None,
+                     None,
+                     (0,3),None,None,None ,None,None ,None,None,(8,3),
+                     None,
+                     (0,5),None,None,None ,None,None ,None,None,(8,5),
+                     None,
+                     None,
+                     (0,8),None,None,(3,8),None,(5,8),None,None,(8,8)]
+    WHITE_CELLS   = [None ,None,(2,0),None,(4,0),None,(6,0),None,None,  # active cell areas guaranteed to be white
+                     None,
+                     (0,2),None,None ,None,None ,None,None ,None,(8,2),
+                     None,
+                     (0,4),None,None ,None,None ,None,None ,None,(8,4),
+                     None,
+                     (0,6),None,None ,None,None ,None,None ,None,(8,6),
+                     None,
+                     None ,None,(2,8),None,(4,8),None,(6,8),None,None]
     # endregion
 
     def __init__(self, image_buffer):
@@ -204,7 +213,8 @@ if __name__ == "__main__":
     codec = crc.make_codec(logger)
 
     def draw_code(code, label, name):
-        logger.log('\nCreating code {:21b}...'.format(code))
+        logger.log('')
+        logger.log('Creating code {:21b}...'.format(code))
         image = canvas.new((Codes.MAX_X_CELL + 1) * CELL_WIDTH, (Codes.MAX_Y_CELL + 1) * CELL_HEIGHT)
         codes = Codes(image)
         codes.draw_codeword(code, label)
@@ -217,4 +227,5 @@ if __name__ == "__main__":
         codeword = codec.encode(code)
         draw_code(codeword, '{:03d}'.format(code), 'test-code-{:03d}'.format(code))
 
-    logger.log('\nDone')
+    logger.log('')
+    logger.log('Done')

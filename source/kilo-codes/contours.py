@@ -114,7 +114,8 @@ class Contour:
         NB: most of the metrics of a contour are in the range 0..1 where 0 is good and 1 is very bad
         """
 
-    def __init__(self):
+    def __init__(self, small=4):
+        self.small = small  # contour perimeter of this or less is considered to be small (affects wavyness function)
         self.points: [Point] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
         self.top_left: Point = None
         self.bottom_right: Point = None
@@ -160,8 +161,8 @@ class Contour:
             """
         if self.points is None:
             return "None"
-        first_line = 'start:{}, box:{}..{}, size:{}, points:{}'.\
-                     format(self.points[0], self.top_left, self.bottom_right, self.get_size(), len(self.points))
+        first_line = 'start:{}, box:{}..{}, size:{}, points:{}, small:{}'.\
+                     format(self.points[0], self.top_left, self.bottom_right, self.get_size(), len(self.points), self.small)
         if not verbose:
             return first_line
         second_line = 'centroid:{}, offsetness:{:.2f}, squareness:{:.2f}, wavyness:{:.2f}'.\
@@ -169,15 +170,22 @@ class Contour:
                              self.get_squareness(), self.get_wavyness())
         return '{}\n{}{}'.format(first_line, prefix, second_line)
 
-    def get_wavyness(self):
+    def get_wavyness(self, small=None):
         """ wavyness is a measure of how different the length of the perimeter is to the number of contour points,
             result is in range 0..1, where 0 is not wavy and 1 is very wavy,
-            this is a very cheap metric that can be used to quickly drop junk
+            this is a very cheap metric that can be used to quickly drop junk,
+            if small is given it overwrites that given to the Contour constructor
             """
         if self.points is None:
             return 1.0
+        perimeter = len(self.get_blob_perimeter())
+        if small is not None:
+            self.small = small
+        if perimeter <= self.small:
+            # too small to be measurable
+            return 0.0
         # NB: number of points is always more than the perimeter length
-        return 1 - (len(self.get_blob_perimeter()) / len(self.points))
+        return 1 - (perimeter / len(self.points))
 
     def get_size(self) -> Point:
         """ the size is the maximum width and height of the contour,
@@ -306,11 +314,16 @@ class Contour:
                 min_distance_squared = distance
             if max_distance_squared is None or max_distance_squared < distance:
                 max_distance_squared = distance
-        if len(perimeter) > 0:
+        if len(perimeter) <= self.small:
+            # too small to do anything but outer
+            outside_r = max(math.sqrt(max_distance_squared), 0.5)
+            inside_r = outside_r
+            mean_r = outside_r
+        else:
             mean_distance_squared /= len(perimeter)
-        mean_r    = max(math.sqrt(mean_distance_squared), 1.0)
-        inside_r  = max(math.sqrt(min_distance_squared) , 1.0)
-        outside_r = max(math.sqrt(max_distance_squared) , 1.0)
+            mean_r    = max(math.sqrt(mean_distance_squared), 0.5)
+            inside_r  = max(math.sqrt(min_distance_squared) , 0.5)
+            outside_r = max(math.sqrt(max_distance_squared) , 0.5)
         # cache all results
         self.radius[const.RADIUS_MODE_INSIDE ] = inside_r
         self.radius[const.RADIUS_MODE_OUTSIDE] = outside_r
@@ -401,11 +414,12 @@ class Blob:
         a blob has access to the underlying image (unlike a Contour)
         """
 
-    def __init__(self, label: int, image, inverted: bool, mode):
+    def __init__(self, label: int, image, inverted: bool, mode, small: int):
         self.label: int = label
         self.image = image  # the binary image buffer the blob was found within
         self.inverted = inverted  # True if its a balck blob, else a white blob
         self.mode = mode  # what type of circle radius required (one of Contour.RADIUS...)
+        self.small = small  # any blob with a perimeter of this or less is considered to be 'small'
         self.external: Contour = None
         self.internal: [Contour] = []
         self.rejected = REJECT_UNKNOWN
@@ -506,7 +520,7 @@ class Blob:
         """ this allows for filtering very irregular blobs """
         if self.external is None:
             return None
-        return self.external.get_wavyness()
+        return self.external.get_wavyness(self.small)
 
     def get_offsetness(self) -> float:
         """ this measure how far the centre of mass is from the centre of the enclosing box,
@@ -528,6 +542,9 @@ class Blob:
         if self.external is None:
             return None
         black, white = self.get_circle_pixels()
+        if (black + white) <= self.small:
+            # too small to measure
+            return 0.0
         if self.inverted:
             return white / (black + white)
         else:
@@ -545,6 +562,9 @@ class Blob:
         if self.external is None:
             return None
         black, white = self.get_box_pixels()
+        if (black + white) <= self.small:
+            # too small to measure
+            return 0.0
         if self.inverted:
             return white / (black + white)
         else:
@@ -570,7 +590,7 @@ class Labels:
             return None
 
 
-class Targets:
+class Params:
     """ a holder for the parameters required by find_targets and its result """
     source_file = None                   # file name of originating source image (for diagnostic naming purposes only)
     source = None                        # the source greyscale image buffer
@@ -578,6 +598,7 @@ class Targets:
     binary = None                        # the binarized blurred image buffer
     box = None                           # when not None the box within the image to process, else all of it
     inverted = False                     # if True look for black blobs, else white blobs
+    small = 4                            # contour perimeter small threshold
     mode = const.RADIUS_MODE_MEAN        # what type of circle radius mode to use
     integration_width: int = 48          # width of integration area as fraction of image width
     integration_height: int = None       # height of integration area as fraction of image height (None==same as width)
@@ -929,7 +950,7 @@ def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
 
     return points
 
-def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, debug=False) -> [Blob]:
+def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, small=4, debug=False) -> [Blob]:
     """ find_blobs in the given image,
         if inverted is True look for black blobs, else white
         returns a list of Blob's or None if failed
@@ -970,12 +991,13 @@ def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, 
             above_in = image[y-1, x]
             below_in = image[y+1, x]
             here_label = buffer[y, x]
+            above_label = buffer[y-1, x]
             before_label = buffer[y, x-1]
             below_label = buffer[y+1, x]
             if here_label == 0 and above_in == find_outside:
                 # found a new start
                 label += 1               # assign next label
-                blob = Blob(label, image, inverted, mode)
+                blob = Blob(label, image, inverted, mode, small)
                 blob.add_contour(contour_trace(image, buffer, label, x, y,
                                                external=True, direct=direct, inverted=inverted))
                 blobs.append(blob)
@@ -984,10 +1006,13 @@ def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, 
                 # found a new internal contour (a hole)
                 if before_label < 1:
                     # this means its a hole in 'here'
-                    before_label = here_label
+                    if here_label == 0:
+                        before_label = above_label
+                    else:
+                        before_label = here_label
                 current_blob = labels.get_blob(before_label)
                 if current_blob is None:
-                    raise Exception('Cannot find current blob when before label is {} at {}x{}'.
+                    raise Exception('Cannot find current blob when before label is {} at {}x{}y'.
                                     format(before_label, x, y))
                 current_blob.add_contour(contour_trace(image, buffer, before_label, x, y,
                                                        external=False, direct=direct, inverted=inverted))
@@ -1000,7 +1025,7 @@ def find_blobs(image, direct=True, inverted=False, mode=const.RADIUS_MODE_MEAN, 
     else:
         return blobs
 
-def filter_blobs(blobs: [Blob], params: Targets, logger=None) -> [Blob]:
+def filter_blobs(blobs: [Blob], params: Params, logger=None) -> [Blob]:
     """ filter out blobs that do no meet the target criteria,
         marks *all* blobs with an appropriate reject code and returns a list of good ones
         """
@@ -1060,7 +1085,7 @@ def filter_blobs(blobs: [Blob], params: Targets, logger=None) -> [Blob]:
         logger.pop()
     return good_blobs
 
-def find_targets(source, params: Targets, logger=None):
+def find_targets(source, params: Params, logger=None):
     """ given a monochrome image find all potential targets,
         returns a list of targets where each is a tuple of x:float, y:float, radius:float, label:int
         x,y is the pixel address of the centre of the target and radius is its radius in pixels,
@@ -1083,7 +1108,7 @@ def find_targets(source, params: Targets, logger=None):
         blobs = find_blobs(params.binary, params.direct_neighbours, mode=params.mode, inverted=params.inverted)
     else:
         blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours, mode=params.mode,
-                                           inverted=params.inverted, debug=True)
+                                           inverted=params.inverted, small=params.small, debug=True)
     passed = filter_blobs(blobs, params, logger=logger)
     params.targets = []
     for blob in passed:
@@ -1100,7 +1125,7 @@ def get_targets(source, params=None, logger=None) -> [tuple]:
         logger.push("find_blobs")
         logger.log('')
     if params is None:
-        params = Targets()  # use defaults
+        params = Params()  # use defaults
     result = find_targets(source, params, logger)
     if logger is not None:
         show_result(params, result, logger)
@@ -1240,26 +1265,30 @@ def show_result(params, result, logger):
     for reason, (_, name) in colours.items():
         logger.log('  {}: {}'.format(name, reason))
 
-def _test(src, size, proximity, black, inverted, blur, logger, params=None):
+def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None):
     """ ************** TEST **************** """
 
     if logger.depth() > 1:
         logger.push(context='contours/_test')
     else:
         logger.push(context='_test')
-    logger.log("Preparing image: size={}, proximity={}, blur={}".format(size, proximity, blur))
+    logger.log("Preparing image: size={}, proximity={}, blur={} from {}".format(size, proximity, blur, src))
     source = canvas.load(src)
+    if source is None:
+        logger.log('Cannot load {}'.format(src))
+        logger.pop()
+        return None
     # Downsize it (to simulate low quality smartphone cameras)
     shrunk = canvas.downsize(source, size)
     logger.log("Detecting blobs")
     if params is None:
-        params = Targets()
+        params = Params()
     params.source_file = src
     params.integration_width = proximity
     params.black_threshold = black
     params.inverted = inverted
     params.blur_kernel_size = blur
-    params.mode = const.RADIUS_MODE_MEAN
+    params.mode = mode
     # do the actual detection
     result = get_targets(shrunk, params, logger=logger)
     logger.pop()
@@ -1316,4 +1345,4 @@ if __name__ == "__main__":
     logger = utils.Logger('contours.log', 'contours')
 
     _test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
-          inverted=True, blur=3, logger=logger)
+          inverted=True, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger)
