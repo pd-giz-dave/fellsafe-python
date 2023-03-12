@@ -67,6 +67,9 @@ import const
 import utils
 import crc
 
+# ToDo: can we filter out codewords we don't want and still have enough codes?
+#       e.g. all 1's, all 0's, all 1's except one 0, all 0's except one 1, etc
+
 class Codes:
 
     WHITE = const.MAX_LUMINANCE

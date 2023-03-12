@@ -70,6 +70,32 @@ RADIUS_MODE_OUTSIDE = 2
 RADIUS_MODES        = 3  # count of the number of modes
 # endregion
 
+# region Reject codes for blobs being ignored...
+REJECT_NONE       = 'accepted'
+REJECT_UNKNOWN    = 'unknown'
+REJECT_TOO_SMALL  = 'size below minimum'
+REJECT_TOO_BIG    = 'size above maximum'
+REJECT_INTERNALS  = 'too many internal contours'
+REJECT_WHITENESS  = 'not enough circle white'
+REJECT_BLACKNESS  = 'not enough box white'
+REJECT_SQUARENESS = 'not square enough'
+REJECT_WAVYNESS   = 'perimeter too wavy'
+REJECT_OFFSETNESS = 'centroid too offset'
+# region and their colours when being drawn...
+REJECT_COLOURS = {REJECT_NONE:       (LIME, 'lime'),
+                  REJECT_UNKNOWN:    (RED, 'red'),
+                  REJECT_TOO_SMALL:  (YELLOW, 'yellow'),
+                  REJECT_TOO_BIG:    (YELLOW, 'yellow'),
+                  REJECT_WHITENESS:  (MAROON, 'maroon'),
+                  REJECT_BLACKNESS:  (CYAN, 'cyan'),
+                  REJECT_INTERNALS:  (OLIVE, 'olive'),
+                  REJECT_SQUARENESS: (NAVY, 'navy'),
+                  REJECT_WAVYNESS:   (MAGENTA, 'magenta'),
+                  REJECT_OFFSETNESS: (ORANGE, 'orange'),
+                 }
+# endregion
+# endregion
+
 # region CRC parameters
 PAYLOAD_BITS  = 10
 PAYLOAD_RANGE = 1 << PAYLOAD_BITS

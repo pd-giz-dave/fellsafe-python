@@ -3,14 +3,12 @@
 """
 
 import math
-
 import const
 import utils
 import codes
 import locator
-import canvas      # only for diagnostics
+import canvas
 
-make_binary = locator.make_binary  # only here to hide locator from upstream
 
 class Params(locator.Params):
     def __init__(self):
@@ -28,11 +26,11 @@ class Finder:
     MIN_IMAGE_SIZE = 128  # min target image size, smaller ones are upsized to at least this
     # these ratio's can be quite loose, they just filter out obvious junk, its benign not to have them at all
     # with very low resolution images, where one pixel is significant, the ratios can get quite big
-    MAX_RADIUS_RATIO = 1.5  # max locator radius diff between actual and expected size as a fraction of expected radius
+    MAX_RADIUS_RATIO = 1/4  # max actual to expected radius ratio of a timing mark to be considered valid, 0==close
     MAX_RADIUS_RATIO *= MAX_RADIUS_RATIO  # squared
     MAX_DISTANCE_RATIO = 4.0  # max dist between actual and expected mark as a fraction of expected radius
     MAX_DISTANCE_RATIO *= MAX_DISTANCE_RATIO  # squared
-    MIN_MARK_HITS = 4/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_MARK_HITS = 5/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
@@ -61,7 +59,7 @@ class Finder:
         if self.sub_images is None:
             self.sub_images = []
             for d in self.detections:
-                image = locator.extract_box(self.image, box=(d.box_tl, d.box_br))
+                image = canvas.extract(self.image, box=(d.box_tl, d.box_br))
                 max_x, max_y = canvas.size(image)
                 size = max(max_x, max_y)
                 if size < Finder.MIN_IMAGE_SIZE:
@@ -125,7 +123,7 @@ class Finder:
                 if mark is None or len(mark) == 0:
                     # nothing here
                     continue
-                x, y, r, _ = found_timing[0][mark[0][0]]  # ToDo: euch! all these [0]'s
+                x, y, r, _ = found_timing[mark[0][0]]  # ToDo: euch! all these [0]'s
                 image = canvas.circle(image, (x, y), r, const.GREEN, 1)
             return image
 
@@ -257,14 +255,14 @@ class Finder:
         for i, detection in enumerate(self.detections):
             # do the timing mark detection
             image, _ = self.get_grayscale(i)
-            if self.logger is None:
-                self.found_timing[i] = locator.get_targets(image, params)
-            else:
+            if self.logger is not None:
                 folder = utils.image_folder(target=detection.box_tl)
                 self.logger.push(context='find_timing/{}'.format(folder), folder=folder)
                 self.logger.log('')
                 self.logger.log('Looking for timing marks...')
-                self.found_timing[i] = locator.get_targets(image, params, logger=self.logger)
+            params = locator.get_blobs(image, params, logger=self.logger)
+            self.found_timing[i] = params.targets
+            if self.logger is not None:
                 self.logger.pop()
         return self.found_timing
 
@@ -405,7 +403,7 @@ class Finder:
             return False
 
         self.matched_timing = [None for _ in range(len(self.detections))]  # create slot per detection
-        for detection, (found_timing, _) in enumerate(self.find_timing()):
+        for detection, found_timing in enumerate(self.find_timing()):
             for candidate, (fx, fy, fr, _) in enumerate(found_timing):
                 if is_locator(detection, (fx, fy, fr)):
                     # ignore locators
@@ -477,7 +475,7 @@ class Finder:
             candidate, distance, size, r = tick
             size_ratio = size / r
             gap_ratio = distance / r
-            actual   = self.found_timing[detection][0][candidate]
+            actual   = self.found_timing[detection][candidate]
             expected = self.expected_timing[detection][edge][mark]
             self.logger.log('    {}: {:.2f}x, {:.2f}y, {:.2f}r'
                             ' (expected {:.2f}x, {:.2f}y, {:.2f}r)'
@@ -509,8 +507,7 @@ class Finder:
                         closest_gap = None
                         closest_size = None
                         for m, tick in enumerate(marks[mark]):
-                            candidate, distance, size, r = tick
-                            size_ratio = size / r
+                            candidate, distance, size_ratio, r = tick
                             gap_ratio = distance / r
                             if gap_ratio > Finder.MAX_DISTANCE_RATIO:
                                 # distance too far from expected - ignore it
@@ -604,7 +601,7 @@ class Finder:
                 # there isn't one here
                 return None
             found_mark_number = found_marks[mark][0][0]
-            found = self.found_timing[detection][0][found_mark_number]
+            found = self.found_timing[detection][found_mark_number]
             return found
 
         def make_columns(detection, found_marks, found_locators):
@@ -792,7 +789,7 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

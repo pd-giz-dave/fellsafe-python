@@ -93,10 +93,10 @@ class Extractor:
         if self.tertiary is None:
             self.tertiary = []
             for image, _ in self.images:
-                self.tertiary.append(finder.make_binary(image,
-                                                        width=Extractor.INTEGRATION_WIDTH,
-                                                        black=Extractor.BLACK_THRESHOLD,
-                                                        white=Extractor.WHITE_THRESHOLD))
+                self.tertiary.append(canvas.binarize(image,
+                                                     width=Extractor.INTEGRATION_WIDTH,
+                                                     black=Extractor.BLACK_THRESHOLD,
+                                                     white=Extractor.WHITE_THRESHOLD))
             if self.logger is not None:
                 self.draw_tertiary()
         if detection is None:
@@ -300,7 +300,7 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
 if __name__ == "__main__":
     """ test harness """
 
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR

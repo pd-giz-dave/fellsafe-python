@@ -34,15 +34,13 @@ import canvas    # purely for diagnostic aids
 import codes     # for the geometry constants
 import const     # for the proximity constants
 import utils     # for the logger
-import contours  # for providing a test source of blobs
+import blobs     # for providing a test source of blobs
 
-class Params(contours.Params):
+class Params(blobs.Params):
     def __init__(self):
         self.locator = None
 
-get_targets = contours.get_targets  # only here to hide contours from upstream
-extract_box = contours.extract_box  # ..
-make_binary = contours.make_binary  # ....
+get_blobs = blobs.get_blobs  # only here to hide blobs from upstream
 
 class Detection:
     """ a 'detection' is the four points of a rectangle formed from the three detected corners, and its
@@ -676,7 +674,7 @@ def _test(src, proximity, blur, mode, logger, params=None, create_new=True):
         # this is very slow
         if params is None:
             params = Params()
-        params = contours._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
+        params = blobs._test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
                                 inverted=True, blur=blur, mode=mode, params=params, logger=logger)
         if params is None:
             logger.log('Contours failed on {}'.format(src))
@@ -696,7 +694,7 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

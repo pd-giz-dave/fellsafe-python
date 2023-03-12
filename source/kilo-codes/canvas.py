@@ -5,8 +5,6 @@
 
 import numpy as np
 import cv2
-import os
-import pathlib
 import const
 
 """ WARNING
@@ -57,6 +55,160 @@ def downsize(buffer, new_size):
         new_width = new_size
         new_height = int(height / (width / new_size))
     return cv2.resize(buffer, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+
+def integrate(buffer, box=None):
+    """ generate the integral of the given box within the given image buffer """
+
+    if box is None:
+        box_min_x, box_min_y = (0, 0)
+        box_max_x, box_max_y = size(buffer)
+    else:
+        box_min_x = box[0][0]
+        box_max_x = box[1][0] + 1
+        box_min_y = box[0][1]
+        box_max_y = box[1][1] + 1
+    box_width  = box_max_x - box_min_x
+    box_height = box_max_y - box_min_y
+
+    # make an empty buffer to accumulate our integral in
+    integral = np.zeros((box_height, box_width), np.int32)
+
+    for y in range(box_min_y, box_max_y):
+        for x in range(box_min_x, box_max_x):
+            if x == box_min_x:
+                acc = int(buffer[y, x])  # start a new row (# NB: need int 'cos source is uint8, i.e. unsigned)
+            else:
+                acc += int(buffer[y, x])  # extend existing row (# NB: need int 'cos source is uint8, i.e. unsigned)
+            ix = x - box_min_x
+            iy = y - box_min_y
+            if iy == 0:
+                integral[iy][ix] = acc  # start a new column
+            else:
+                integral[iy][ix] = acc + integral[iy - 1][ix]  # extend existing column
+
+    return integral
+
+def blur(buffer, kernel_size):
+    """ return the blurred image as a mean blur over the given kernel size """
+    # we do this by integrating then calculating the average via integral differences,
+    # this means we only visit each pixel once irrespective of the kernel size
+    if kernel_size is not None:
+        kernel_size = kernel_size | 1  # must be odd (so there is a centre)
+    else:
+        kernel_size = 0
+    if kernel_size < 3:
+        return buffer  # pointless
+
+    # integrate the image
+    integral = integrate(buffer)
+
+    # get image geometry
+    width  = len(integral[0])
+    height = len(integral)
+
+    # set kernel geometry
+    kernel_plus  = kernel_size >> 1  # offset for going forward
+    kernel_minus = kernel_size - 1   # offset for going backward
+
+    # blur the image by averaging over the given kernel size
+    blurred = np.zeros((height, width), np.uint8)
+    for x in range(width):
+        x1 = int(max(x - kernel_minus, 0))
+        x2 = int(min(x + kernel_plus, width - 1))
+        for y in range(height):
+            y1 = int(max(y - kernel_minus, 0))
+            y2 = int(min(y + kernel_plus, height - 1))
+            count = int((x2 - x1) * (y2 - y1))  # how many samples in the integration area
+            # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
+            # where all but bottom right are *outside* the integration window
+            average = int((integral[y2][x2] + integral[y1][x1] - integral[y1][x2] - integral[y2][x1]) / count)
+            blurred[y][x] = average
+
+    return blurred
+
+def binarize(buffer, box=None, width: float=8, height: float=None, black: float=15, white: float=None):
+    """ create a binary (or tertiary) image of the source image within the box using an adaptive threshold,
+        if box is None the whole image is processed, otherwise just the area within the given box,
+        width is the fraction of the source/box width to use as the integration area,
+        height is the fraction of the source/box height to use as the integration area (None==same as width in pixels)
+        black is the % below the average that is considered to be the black/grey boundary,
+        white is the % above the average that is considered to be the grey/white boundary,
+        white of None means same as black and will yield a binary image,
+        See the adaptive-threshold-algorithm.pdf paper for algorithm details.
+        the image returned is the same size as the box (or the source iff no box given)
+        """
+
+    # region get the source and box metrics...
+    buffer_min_x, buffer_min_y = (0, 0)
+    buffer_max_x, buffer_max_y = size(buffer)
+    if box is None:
+        box_min_x = buffer_min_x
+        box_max_x = buffer_max_x
+        box_min_y = buffer_min_y
+        box_max_y = buffer_max_y
+    else:
+        box_min_x = box[0][0]
+        box_max_x = box[1][0] + 1
+        box_min_y = box[0][1]
+        box_max_y = box[1][1] + 1
+    box_width  = box_max_x - box_min_x
+    box_height = box_max_y - box_min_y
+    # endregion
+
+    # region set the integration size...
+    width_pixels = int(box_width / width)            # we want this to be odd so that there is a centre
+    width_plus   = max(width_pixels >> 1, 2)         # offset for going forward
+    width_minus  = width_plus - 1                    # offset for going backward
+    if height is None:
+        height_pixels = width_pixels                 # make it square
+    else:
+        height_pixels = int(box_height / height)     # we want this to be odd so that there is a centre
+    height_plus  = max(height_pixels >> 1, 2)        # offset for going forward
+    height_minus = height_plus - 1                   # offset for going backward
+    # endregion
+
+    # integrate the image
+    integral = integrate(buffer, box)
+
+    # region do the threshold on a new image buffer...
+    binary = np.zeros((box_height, box_width), np.uint8)
+    black_limit = (100-black)/100    # convert % to a ratio
+    if white is None:
+        white_limit = black_limit
+    else:
+        white_limit = (100+white)/100  # convert % to a ratio
+    for x in range(box_width):
+        x1 = int(max(x - width_minus, 0))
+        x2 = int(min(x + width_plus, box_width - 1))
+        for y in range(box_height):
+            y1 = int(max(y - height_minus, 0))
+            y2 = int(min(y + height_plus, box_height - 1))
+            count = int((x2 - x1) * (y2 - y1))  # how many samples in the integration area
+            # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
+            # where all but bottom right are *outside* the integration window
+            acc = integral[y2][x2] + integral[y1][x1] - integral[y1][x2] - integral[y2][x1]
+            src = int(buffer[box_min_y + y, box_min_x + x]) * count  # NB: need int 'cos source is uint8 (unsigned)
+            if src >= (acc * white_limit):
+                binary[y, x] = const.MAX_LUMINANCE
+            elif src <= (acc * black_limit):
+                binary[y, x] = const.MIN_LUMINANCE
+            else:
+                binary[y, x] = const.MID_LUMINANCE
+    # endregion
+
+    return binary
+
+def extract(image, box: ((int, int), (int, int))):
+    """ extract a box from the given image """
+    tl_x, tl_y = box[0]
+    br_x, br_y = box[1]
+    width  = br_x - tl_x + 1
+    height = br_y - tl_y + 1
+    buffer = np.zeros((height, width), np.uint8)
+    for x in range(width):
+        for y in range(height):
+            buffer[y, x] = image[tl_y + y, tl_x + x]
+    return buffer
 
 def upsize(buffer, scale: float):
     """ return a buffer that is scale times bigger in width and height than that given,
