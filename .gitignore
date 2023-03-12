@@ -3,6 +3,12 @@
 /codes/
 /logs/
 /media/
+/source/kilo-codes/codes/
+/source/kilo-codes/contours/
+/source/kilo-codes/decoder/
+/source/kilo-codes/extractor/
+/source/kilo-codes/finder/
+/source/kilo-codes/locator/
 /lib/
 /lib64/
 /bin/

@@ -105,6 +105,7 @@ class Codes:
     # endregion
     # region Public constants...
     LOCATORS_PER_CODE = 3  # how many 'major' locators there are per code
+    TIMING_PER_CODE   = 9  # how mnay 'timing' marks there are per code (including the 'minor' locator)
     LOCATOR_SCALE = 3  # size of major locators relative to markers (so radius of enclosing circle is half this)
     TIMING_SCALE  = 1 / LOCATOR_SCALE  # size of timing marks relative to locators
     LOCATOR_SPAN = 8  # distance between locator centres in units of *marker width*

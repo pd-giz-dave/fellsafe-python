@@ -62,9 +62,9 @@ class Extractor:
                 if data_cell is None: breakpoint()
                 data_bit  = data_bits[bit_num]
                 if data_bit == 0:
-                    colour = const.OLIVE
-                elif data_bit == 1:
                     colour = const.GREEN
+                elif data_bit == 1:
+                    colour = const.BLUE
                 else:
                     colour = const.RED
                 bit_num  += 1
@@ -300,11 +300,11 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
 if __name__ == "__main__":
     """ test harness """
 
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('extractor.log', 'extractor/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)

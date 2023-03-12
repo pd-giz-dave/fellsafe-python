@@ -19,9 +19,10 @@ class Params(locator.Params):
 class Finder:
 
     # region geometry...
-    CELL_SPAN     = codes.Codes.LOCATOR_SPAN      # number of cell units between locators
-    TIMING_CELLS  = codes.Codes.TIMING_CELLS      # physical timing mark cell positions between locators
-    TIMING_SCALE  = codes.Codes.TIMING_SCALE      # size of timing marks relative to locators
+    CELL_SPAN    = codes.Codes.LOCATOR_SPAN      # number of cell units between locators
+    TIMING_CELLS = codes.Codes.TIMING_CELLS      # physical timing mark cell positions between locators
+    TIMING_SCALE = codes.Codes.TIMING_SCALE      # size of timing marks relative to locators
+    TIMING_MARKS = codes.Codes.TIMING_PER_CODE   # how many timing marks per code
     # endregion
     # region tuning...
     MIN_IMAGE_SIZE = 128  # min target image size, smaller ones are upsized to at least this
@@ -29,9 +30,9 @@ class Finder:
     # with very low resolution images, where one pixel is significant, the ratios can get quite big
     MAX_RADIUS_RATIO = 1.5  # max locator radius diff between actual and expected size as a fraction of expected radius
     MAX_RADIUS_RATIO *= MAX_RADIUS_RATIO  # squared
-    MAX_DISTANCE_RATIO = 5.0  # max dist between actual and expected mark as a fraction of expected radius
+    MAX_DISTANCE_RATIO = 4.0  # max dist between actual and expected mark as a fraction of expected radius
     MAX_DISTANCE_RATIO *= MAX_DISTANCE_RATIO  # squared
-    MIN_MARK_HITS = 4/9  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_MARK_HITS = 4/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
@@ -355,6 +356,13 @@ class Finder:
             break  # they are all the same, so just do the first detection
         return expected
 
+    def translate_locator(self, detection, locator):
+        """ translate the given locator co-ordinates from the main image to its sub-image """
+        origin = self.detections[detection].box_tl
+        _, scale = self.get_colour_image(detection)
+        centre, radius = canvas.translate(locator, locator[2], origin, scale)
+        return centre, radius
+
     def match_timing(self):
         """ match candidate timing marks with those expected, matching is done on a proximity and size basis,
             result: for each detection, for each candidate the indices of the closest expectation,
@@ -379,9 +387,29 @@ class Finder:
             result = 1 - (min(a, b) / max(a, b))  # range 0..1, 0=close, 1=distant
             return result * result
 
+        def is_locator(detection, locator):
+            """ return True iff the given locator is one of the locators for the given detection,
+                its a locator if it is inside one of the detection locators or vice-versa,
+                to be inside the distance between the centres is less than the largest radius
+                """
+            tl = self.translate_locator(detection, self.detections[detection].tl)
+            tr = self.translate_locator(detection, self.detections[detection].tr)
+            bl = self.translate_locator(detection, self.detections[detection].bl)
+            l_x, l_y, l_r = locator
+            for (x, y), r in (tl, tr, bl):
+                separation = utils.distance((x, y), (l_x, l_y))
+                inside = max(l_r, r)
+                inside *= inside
+                if separation <= inside:
+                    return True
+            return False
+
         self.matched_timing = [None for _ in range(len(self.detections))]  # create slot per detection
         for detection, (found_timing, _) in enumerate(self.find_timing()):
             for candidate, (fx, fy, fr, _) in enumerate(found_timing):
+                if is_locator(detection, (fx, fy, fr)):
+                    # ignore locators
+                    continue
                 # find the best expectation to give this candidate to
                 best_edge = None
                 best_mark = None
@@ -445,13 +473,22 @@ class Finder:
             # already done it
             return self.filtered_timing
 
-        def log_tick(detection, edge, mark, candidate):
+        def log_tick(detection, edge, mark, tick):
+            candidate, distance, size, r = tick
+            size_ratio = size / r
+            gap_ratio = distance / r
             actual   = self.found_timing[detection][0][candidate]
             expected = self.expected_timing[detection][edge][mark]
             self.logger.log('    {}: {:.2f}x, {:.2f}y, {:.2f}r'
-                            ' (expected {:.2f}x, {:.2f}y, {:.2f}r)'.
+                            ' (expected {:.2f}x, {:.2f}y, {:.2f}r)'
+                            ' distance ratio {:.2f}, size ratio {:.2f}'.
                             format(candidate, actual[0], actual[1], actual[2],
-                                   expected[0], expected[1], expected[2]))
+                                   expected[0], expected[1], expected[2],
+                                   math.sqrt(gap_ratio), math.sqrt(size_ratio)))
+
+        def log_locator(detection, locator, name):
+            centre, radius = self.translate_locator(detection, locator)
+            self.logger.log('  Locator ({}): {:.2f}x, {:.2f}y, {:.2f}r'.format(name, centre[0], centre[1], radius))
 
         self.filtered_timing = []
         max_hits = self.expected_marks()  # maximum possible marks per detection
@@ -471,7 +508,8 @@ class Finder:
                         closest_mark = None
                         closest_gap = None
                         closest_size = None
-                        for m, (candidate, distance, size, r) in enumerate(marks[mark]):
+                        for m, tick in enumerate(marks[mark]):
+                            candidate, distance, size, r = tick
                             size_ratio = size / r
                             gap_ratio = distance / r
                             if gap_ratio > Finder.MAX_DISTANCE_RATIO:
@@ -480,7 +518,7 @@ class Finder:
                                     self.logger.log('Detection {}, edge {}, mark {}: Distance ratio ({:.2f}) too high,'
                                                     ' limit is {}'.format(detection, edge, mark, math.sqrt(gap_ratio),
                                                                           math.sqrt(Finder.MAX_DISTANCE_RATIO)))
-                                    log_tick(detection, edge, mark, candidate)
+                                    log_tick(detection, edge, mark, tick)
                                 continue
                             if size_ratio > Finder.MAX_RADIUS_RATIO:
                                 # size too divergent from expected - ignore it
@@ -488,7 +526,7 @@ class Finder:
                                     self.logger.log('Detection {}, edge {}, mark {}: Size ratio ({:.2f}) too high,'
                                                     ' limit is {}'.format(detection, edge, mark, math.sqrt(size_ratio),
                                                                           math.sqrt(Finder.MAX_RADIUS_RATIO)))
-                                    log_tick(detection, edge, mark, candidate)
+                                    log_tick(detection, edge, mark, tick)
                                 continue
                             if closest_mark is None:
                                 closest_mark = m
@@ -517,9 +555,9 @@ class Finder:
             if (got_hits / max_hits) < Finder.MIN_MARK_HITS:
                 # not enough mark hits for this detection to qualify
                 if self.logger is not None:
-                    self.logger.log('Detection {}: Has too few detectable timing marks - require {}, '
-                                    'only found {} ({:.2f}%, threshold is {:.2f}%):'.
-                                    format(detection, max_hits, got_hits,
+                    self.logger.log('Detection {}: Has too few detectable timing marks - require at least {:.0f} of {},'
+                                    ' only found {} ({:.2f}%, threshold is {:.2f}%):'.
+                                    format(detection, Finder.MIN_MARK_HITS * max_hits, max_hits, got_hits,
                                            (got_hits / max_hits) * 100, Finder.MIN_MARK_HITS * 100))
             else:
                 self.filtered_timing.append(detection)
@@ -527,14 +565,17 @@ class Finder:
                     self.logger.log('Detection {}: Found {} (of {}, {:.2f}%) timing marks:'.
                                     format(detection, got_hits, max_hits, (got_hits / max_hits) * 100))
             if self.logger is not None:
+                log_locator(detection, self.detections[detection].tl, 'top-left')
+                log_locator(detection, self.detections[detection].tr, 'top-right')
+                log_locator(detection, self.detections[detection].bl, 'bottom-left')
                 if edges is not None:
                     for edge, marks in enumerate(edges):
                         self.logger.log('  Edge {} targets:'.format(edge))
                         for mark, ticks in enumerate(marks):
                             if ticks is None:
                                 continue  # no ticks here
-                            for (candidate, distance, size, r) in ticks:
-                                log_tick(detection, edge, mark, candidate)
+                            for tick in ticks:
+                                log_tick(detection, edge, mark, tick)
                 else:
                     self.logger.log('  No blobs detected!')
                 self.logger.pop()
@@ -751,7 +792,7 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
