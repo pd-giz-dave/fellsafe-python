@@ -24,51 +24,86 @@ class Finder:
     # endregion
     # region tuning...
     MIN_IMAGE_SIZE = 128  # min target image size, smaller ones are upsized to at least this
-    # these ratio's can be quite loose, they just filter out obvious junk, its benign not to have them at all
-    # with very low resolution images, where one pixel is significant, the ratios can get quite big
-    MAX_RADIUS_RATIO = 1/4  # max actual to expected radius ratio of a timing mark to be considered valid, 0==close
-    MAX_RADIUS_RATIO *= MAX_RADIUS_RATIO  # squared
-    MAX_DISTANCE_RATIO = 4.0  # max dist between actual and expected mark as a fraction of expected radius
-    MAX_DISTANCE_RATIO *= MAX_DISTANCE_RATIO  # squared
+    # distant=30 or less, far=40 or less, near=50 or less, close=100 or less, native=300+
+    SMALL_IMAGE_SIZE = 40  # threshold for a small detection image
+    LARGE_IMAGE_SIZE = 80  # ditto for a big one
+    # these ratios have to be sloppy for small images 'cos 1 pixel diff can be huge with low resolution images
+    # these ratios are indexed by the image size index (0=small, 1=medium, 2=large)
+    MIN_RADIUS_RATIO = (0.4, 0.6, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
+    MAX_DISTANCE_RATIO = (5*5, 3*3, 3*3)  # max distance (squared) between actual and expected mark as a multiple of expected radius
     MIN_MARK_HITS = 5/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
     Y_COORD = locator.Locator.Y_COORD
     R_COORD = locator.Locator.R_COORD
-    L_COORD = locator.Locator.L_COORD
     # endregion
 
     def __init__(self, source, image, detections, logger=None):
-        self.source           = source      # originating image file name (for diagnostics)
-        self.image            = image       # grayscale image the detections were detected within (and co-ordinates apply to)
-        self.detections       = detections  # qualifying detections
-        self.logger           = logger      # for diagnostics
-        self.sub_images       = None        # grayscale extractions of all detections and their scale
-        self.good_images      = None        # grayscale extractions of all accepted detections and their scale
-        self.found_timing     = None        # candidate timing marks discovered for each detection (random ordering)
-        self.expected_timing  = None        # expected timing mark centres for each detection (clockwise from top-left)
-        self.matched_timing   = None        # shouldbe_timing's matched with closest maybe_timing's
-        self.filtered_timing  = None        # list of detections that pass the qualification filter
-        self.code_grids       = None        # list of detected code grids
-        self.code_cells       = None        # list of cell co-ords inside the locators
-        self.code_circles     = None        # list of all code 'circles' (max enclosed circle within detected locators)
+        self.source             = source      # originating image file name (for diagnostics)
+        self.image              = image       # grayscale image the detections were detected within (and co-ordinates apply to)
+        self.detections         = detections  # qualifying detections
+        self.logger             = logger      # for diagnostics
+        self.sub_images         = None        # grayscale extractions of all detections and their scale
+        self.good_images        = None        # grayscale extractions of all accepted detections and their scale
+        self.found_timing       = None        # candidate timing marks discovered for each detection (random ordering)
+        self.expected_timing    = None        # expected timing mark centres for each detection (clockwise from top-left)
+        self.matched_timing     = None        # shouldbe_timing's matched with closest maybe_timing's
+        self.filtered_timing    = None        # list of detections that pass the qualification filter
+        self.code_grids         = None        # list of detected code grids
+        self.code_cells         = None        # list of cell co-ords inside the locators
+        self.code_circles       = None        # list of all code 'circles' (max enclosed circle within detected locators)
+        self.min_radius_ratio   = None        # appropriate radius ratio for each sub-image size
+        self.max_distance_ratio = None        # appropriate distance ratio for each sub-image size
 
     def get_grayscale(self, detection=None):
         """ extract the grayscale sub-image of the given, or all, detection """
+
+        def log_size(detection, size, size_name):
+            if self.logger is not None:
+                self.logger.log('Detection {} is {} ({} pixels, small limit is {}, large limit is {}), '
+                                'min_radius_ratio={:.2f}, max_distance_ratio={:.2f}'.
+                                format(detection, size_name, size, Finder.SMALL_IMAGE_SIZE, Finder.LARGE_IMAGE_SIZE,
+                                       self.min_radius_ratio[detection], math.sqrt(self.max_distance_ratio[detection])))
+
         if self.sub_images is None:
-            self.sub_images = []
-            for d in self.detections:
+            self.sub_images         = []
+            self.min_radius_ratio   = []
+            self.max_distance_ratio = []
+            for d_num, d in enumerate(self.detections):
+                if self.logger is not None:
+                    folder = utils.image_folder(target=d.box_tl)
+                    self.logger.push(context=folder)
                 image = canvas.extract(self.image, box=(d.box_tl, d.box_br))
                 max_x, max_y = canvas.size(image)
                 size = max(max_x, max_y)
+                if size <= Finder.SMALL_IMAGE_SIZE:
+                    self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[0])
+                    self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[0])
+                    if self.logger is not None:
+                        log_size(d_num, size, 'small')
+                elif size >= Finder.LARGE_IMAGE_SIZE:
+                    self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[2])
+                    self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[2])
+                    if self.logger is not None:
+                        log_size(d_num, size, 'large')
+                else:  # medium
+                    self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[1])
+                    self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[1])
+                    if self.logger is not None:
+                        log_size(d_num, size, 'medium')
                 if size < Finder.MIN_IMAGE_SIZE:
                     # too small, upsize it
+                    if self.logger is not None:
+                        self.logger.log('  Upsizing detection {} image from {} pixels to {}'.
+                                        format(d_num, size, Finder.MIN_IMAGE_SIZE))
                     scale = Finder.MIN_IMAGE_SIZE / size
                     image = canvas.upsize(image, scale)
                 else:
                     scale = 1.0
                 self.sub_images.append((image, scale))
+                if self.logger is not None:
+                    self.logger.pop()
         if detection is None:
             return self.sub_images
         return self.sub_images[detection]
@@ -378,12 +413,12 @@ class Finder:
             return (ab_x * ab_x) + (ab_y * ab_y)
 
         def ratio(a, b):
-            """ return the squared 1 - ratio of a/b or b/a whichever is smaller,
+            """ return the ratio of a/b or b/a whichever is smaller,
                 this provides a measure of how close to each other the two numbers are,
-                the nearer to 0 the ratio is the closer the numbers are to each other
+                the nearer to 1 the ratio is the closer the numbers are to each other
                 """
-            result = 1 - (min(a, b) / max(a, b))  # range 0..1, 0=close, 1=distant
-            return result * result
+            result = min(a, b) / max(a, b)  # range 0..1, 0=distant, 1=close
+            return result
 
         def is_locator(detection, locator):
             """ return True iff the given locator is one of the locators for the given detection,
@@ -429,7 +464,7 @@ class Finder:
                         if self.matched_timing[detection][edge][mark] is None:
                             self.matched_timing[detection][edge][mark] = []  # create empty mark list
                         gap = distance((x, y), (fx, fy))
-                        size = ratio(r, fr)  # closer to 0 means closer radius match (used when equi-distant to expected)
+                        size = ratio(r, fr)  # closer to 1 means closer radius match
                         if best_edge is None:
                             best_edge = edge
                             best_mark = mark
@@ -446,7 +481,7 @@ class Finder:
                         elif gap > best_gap:
                             # this one is further away in distance
                             continue
-                        elif size < best_size:
+                        elif size > best_size:
                             # this one is same distance but is closer in size
                             best_edge = edge
                             best_mark = mark
@@ -471,26 +506,50 @@ class Finder:
             # already done it
             return self.filtered_timing
 
+        if self.logger is not None:
+            size_good_stats = utils.Stats(10, (0, 1))
+            size_bad_stats  = utils.Stats(10, (0, 1))
+            span = math.sqrt(max(Finder.MAX_DISTANCE_RATIO))+1
+            slots = int(span / 0.1)  # want each slot to be 0.1
+            dist_good_stats = utils.Stats(slots, (0, span))
+            dist_bad_stats  = utils.Stats(slots, (0, span))
+
         def log_tick(detection, edge, mark, tick):
-            candidate, distance, size, r = tick
-            size_ratio = size / r
-            gap_ratio = distance / r
-            actual   = self.found_timing[detection][candidate]
-            expected = self.expected_timing[detection][edge][mark]
+            if self.logger is None:
+                return
+            candidate, distance, size_ratio, rr = tick
+            actual    = self.found_timing[detection][candidate]
+            expected  = self.expected_timing[detection][edge][mark]
+            gap_ratio = distance / rr  # convert units of pixels^2 into expected radius^2
+            gap_bad   = gap_ratio > self.max_distance_ratio[detection]
+            size_bad  = size_ratio < self.min_radius_ratio[detection]
+            gap_ratio = math.sqrt(gap_ratio)
             self.logger.log('    {}: {:.2f}x, {:.2f}y, {:.2f}r'
                             ' (expected {:.2f}x, {:.2f}y, {:.2f}r)'
                             ' distance ratio {:.2f}, size ratio {:.2f}'.
                             format(candidate, actual[0], actual[1], actual[2],
                                    expected[0], expected[1], expected[2],
-                                   math.sqrt(gap_ratio), math.sqrt(size_ratio)))
+                                   gap_ratio, size_ratio))
+            if size_bad:
+                size_bad_stats.count(size_ratio)
+            else:
+                size_good_stats.count(size_ratio)
+            if gap_bad:
+                dist_bad_stats.count(gap_ratio)
+            else:
+                dist_good_stats.count(gap_ratio)
 
         def log_locator(detection, locator, name):
+            if self.logger is None:
+                return
             centre, radius = self.translate_locator(detection, locator)
             self.logger.log('  Locator ({}): {:.2f}x, {:.2f}y, {:.2f}r'.format(name, centre[0], centre[1], radius))
 
         self.filtered_timing = []
         max_hits = self.expected_marks()  # maximum possible marks per detection
         for detection, edges in enumerate(self.match_timing()):
+            max_distance_ratio = self.max_distance_ratio[detection]
+            min_size_ratio     = self.min_radius_ratio  [detection]
             if self.logger is not None:
                 folder = utils.image_folder(target=self.detections[detection].box_tl)
                 self.logger.push(context='filter_timing/{}'.format(folder), folder=folder)
@@ -507,22 +566,22 @@ class Finder:
                         closest_gap = None
                         closest_size = None
                         for m, tick in enumerate(marks[mark]):
-                            candidate, distance, size_ratio, r = tick
-                            gap_ratio = distance / r
-                            if gap_ratio > Finder.MAX_DISTANCE_RATIO:
+                            candidate, distance, size_ratio, rr = tick
+                            gap_ratio = distance / rr  # convert units of pixels^2 into expected radius^2
+                            if gap_ratio > max_distance_ratio:
                                 # distance too far from expected - ignore it
                                 if self.logger is not None:
                                     self.logger.log('Detection {}, edge {}, mark {}: Distance ratio ({:.2f}) too high,'
                                                     ' limit is {}'.format(detection, edge, mark, math.sqrt(gap_ratio),
-                                                                          math.sqrt(Finder.MAX_DISTANCE_RATIO)))
+                                                                          math.sqrt(max_distance_ratio)))
                                     log_tick(detection, edge, mark, tick)
                                 continue
-                            if size_ratio > Finder.MAX_RADIUS_RATIO:
+                            if size_ratio < min_size_ratio:
                                 # size too divergent from expected - ignore it
                                 if self.logger is not None:
-                                    self.logger.log('Detection {}, edge {}, mark {}: Size ratio ({:.2f}) too high,'
-                                                    ' limit is {}'.format(detection, edge, mark, math.sqrt(size_ratio),
-                                                                          math.sqrt(Finder.MAX_RADIUS_RATIO)))
+                                    self.logger.log('Detection {}, edge {}, mark {}: Size ratio ({:.2f}) too low,'
+                                                    ' limit is {}'.format(detection, edge, mark,
+                                                                          size_ratio, min_size_ratio))
                                     log_tick(detection, edge, mark, tick)
                                 continue
                             if closest_mark is None:
@@ -578,7 +637,13 @@ class Finder:
                 self.logger.pop()
 
         if self.logger is not None:
-            self.logger.push('timing')
+            self.logger.push(context='filter_timing')
+            self.logger.log('')
+            self.logger.log('Size ratio good stats: {}'.format(size_good_stats.show()))
+            self.logger.log('Size ratio bad stats: {}'.format(size_bad_stats.show()))
+            self.logger.log('Distance ratio good stats: {}'.format(dist_good_stats.show()))
+            self.logger.log('Distance ratio bad stats: {}'.format(dist_bad_stats.show()))
+            self.logger.log('')
             self.draw_timing()
             self.logger.pop()
 
@@ -777,7 +842,7 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
 
     located = params.locator
     image = params.source
-    detections = located.detections()
+    detections = located.get_detections()
 
     # process the detections
     params = find_codes(src, params, image, detections, logger)
@@ -788,11 +853,11 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
 if __name__ == "__main__":
     """ test harness """
 
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
+    #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('finder.log', 'finder/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)

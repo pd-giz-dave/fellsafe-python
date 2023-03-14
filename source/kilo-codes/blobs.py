@@ -226,7 +226,7 @@ if __name__ == "__main__":
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
-    logger = utils.Logger('blobs.log', 'blobs')
+    logger = utils.Logger('blobs.log', 'blobs/{}'.format(utils.image_folder(src)))
 
     _test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
           inverted=True, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
