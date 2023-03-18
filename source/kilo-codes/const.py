@@ -26,7 +26,6 @@ DARK_BLUE  = ( 64,   0,   0)
 YELLOW     = (  0, 255, 255)
 PURPLE     = (255,   0, 255)
 PINK       = (128,   0, 128)
-CYAN       = (128, 128,   0)
 PALE_RED   = (  0,   0, 128)
 PALE_BLUE  = (128,   0,   0)
 PALE_GREEN = (  0, 128,   0)
@@ -72,7 +71,7 @@ RADIUS_MODES        = 3  # count of the number of modes
 
 # region Reject codes for blobs being ignored...
 REJECT_NONE       = 'accepted'
-REJECT_UNKNOWN    = 'unknown'
+REJECT_SPLIT      = 'split at bottleneck'
 REJECT_TOO_SMALL  = 'size below minimum'
 REJECT_TOO_BIG    = 'size above maximum'
 REJECT_INTERNALS  = 'too many internal contours'
@@ -82,16 +81,16 @@ REJECT_SQUARENESS = 'not square enough'
 REJECT_WAVYNESS   = 'perimeter too wavy'
 REJECT_OFFSETNESS = 'centroid too offset'
 # region and their colours when being drawn...
-REJECT_COLOURS = {REJECT_NONE:       (LIME, 'lime'),
-                  REJECT_UNKNOWN:    (RED, 'red'),
-                  REJECT_TOO_SMALL:  (YELLOW, 'yellow'),
-                  REJECT_TOO_BIG:    (YELLOW, 'yellow'),
-                  REJECT_WHITENESS:  (MAROON, 'maroon'),
-                  REJECT_BLACKNESS:  (CYAN, 'cyan'),
-                  REJECT_INTERNALS:  (OLIVE, 'olive'),
-                  REJECT_SQUARENESS: (NAVY, 'navy'),
+REJECT_COLOURS = {REJECT_NONE:       (LIME   , 'lime'   ),
+                  REJECT_SPLIT:      (RED    , 'red'    ),
+                  REJECT_TOO_SMALL:  (YELLOW , 'yellow' ),
+                  REJECT_TOO_BIG:    (YELLOW , 'yellow' ),
+                  REJECT_WHITENESS:  (MAROON , 'maroon' ),
+                  REJECT_BLACKNESS:  (CYAN   , 'cyan'   ),
+                  REJECT_INTERNALS:  (OLIVE  , 'olive'  ),
+                  REJECT_SQUARENESS: (NAVY   , 'navy'   ),
                   REJECT_WAVYNESS:   (MAGENTA, 'magenta'),
-                  REJECT_OFFSETNESS: (ORANGE, 'orange'),
+                  REJECT_OFFSETNESS: (ORANGE , 'orange' ),
                  }
 # endregion
 # endregion

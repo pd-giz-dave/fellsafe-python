@@ -2,6 +2,7 @@
 
 import math
 import const
+import utils
 
 def count_pixels(image, perimeter):
     """ count how many pixels in the area bounded by perimeter within image are black and how many are white,
@@ -129,19 +130,68 @@ def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
 
     return points
 
-class Point:
+def line(x0: int, y0: int, x1: int, y1: int) -> [(int, int)]:
+    """ return a list of points that represent all pixels between x0,y0 and x1,y1 in the order x0,x0 -> x1,y1 """
 
-    def __init__(self, x: float, y: float):
-        self.x: float = x
-        self.y: float = y
+    # see https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm for the algorithm implemented here
 
-    def __str__(self):
-        return "({:.2f}, {:.2f})".format(self.x, self.y)
+    points = []
 
+    def line_low(x0, y0, x1, y1):
+        # x0 <= x1 and slope <=1 guaranteed to get here
+        dx = x1 - x0
+        dy = y1 - y0
+        yi = 1
+        if dy < 0:
+            yi = -1
+            dy = -dy
+        D = (2 * dy) - dx
+        y = y0
+        for x in range(x0, x1+1):
+            points.append((x, y))
+            if D > 0:
+                y = y + yi
+                D = D + (2 * (dy - dx))
+            else:
+                D = D + 2 * dy
+    def line_high(x0, y0, x1, y1):
+        # y0 <= y1 and slope <=1 guaranteed to get here
+        dx = x1 - x0
+        dy = y1 - y0
+        xi = 1
+        if dx < 0:
+            xi = -1
+            dx = -dx
+        D = (2 * dx) - dy
+        x = x0
+        for y in range(y0, y1+1):
+            points.append((x, y))
+            if D > 0:
+                x = x + xi
+                D = D + (2 * (dx - dy))
+            else:
+                D = D + 2 * dx
+
+    if abs(y1 - y0) < abs(x1 - x0):
+        if x0 > x1:
+            line_low(x1, y1, x0, y0)
+            points.reverse()
+        else:
+            line_low(x0, y0, x1, y1)
+    else:
+        if y0 > y1:
+            line_high(x1, y1, x0, y0)
+            points.reverse()
+        else:
+            line_high(x0, y0, x1, y1)
+    return points
+
+def show_point(point):
+    return "({:.2f}, {:.2f})".format(point[0], point[1])
 
 class Circle:
 
-    def __init__(self, centre: Point, radius: float):
+    def __init__(self, centre: (float, float), radius: float):
         self.centre = centre
         self.radius = radius
         self.points = None  # will become perimeter points on-demand
@@ -162,7 +212,7 @@ class Circle:
             # already done it
             return self.points
         # this is expensive, so only do it once
-        points = circumference(self.centre.x, self.centre.y, self.radius)
+        points = circumference(self.centre[0], self.centre[1], self.radius)
         # we want a min_y/max_y value pair for every x
         y_limits = {}
         min_x = None
@@ -200,9 +250,7 @@ class Contour:
 
     def __init__(self, small=4):
         self.small = small  # contour perimeter of this or less is considered to be small (affects wavyness function)
-        self.points: [Point] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
-        self.top_left: Point = None
-        self.bottom_right: Point = None
+        self.points: [(int, int)] = None  # points that make up the contour (NB: contours are a 'closed' set of points)
         self.reset()
 
     def __str__(self):
@@ -210,33 +258,40 @@ class Contour:
 
     def reset(self):
         """ reset the cached stuff """
-        self.blob_perimeter: {Point} = None
+        self.enclosing_box: ((int, int), (int, int)) = None
+        self.blob_perimeter: {(int, int): int} = None
         self.x_slices: [tuple] = None
         self.y_slices: [tuple] = None
-        self.centroid: Point = None
+        self.centroid: (float, float) = None
         self.radius: [float] = [None for _ in range(const.RADIUS_MODES)]
         self.offset: float = None
 
-    def add_point(self, point: Point):
+    def add_point(self, point: (int, int)):
         """ add a point to the contour """
         if self.points is None:
             self.points = [point]
         else:
             self.points.append(point)
-        if self.top_left is None:
-            self.top_left = Point(point.x, point.y)
-        else:
-            if point.x < self.top_left.x:
-                self.top_left.x = point.x
-            if point.y < self.top_left.y:
-                self.top_left.y = point.y
-        if self.bottom_right is None:
-            self.bottom_right = Point(point.x, point.y)
-        else:
-            if point.x > self.bottom_right.x:
-                self.bottom_right.x = point.x
-            if point.y > self.bottom_right.y:
-                self.bottom_right.y = point.y
+
+    def get_enclosing_box(self):
+        """ get the minimum sized box that encloses the contour """
+        if self.enclosing_box is not None:
+            return self.enclosing_box
+        top_left_x     = None
+        top_left_y     = None
+        bottom_right_x = None
+        bottom_right_y = None
+        for x, y in self.points:
+            if top_left_x is None or x < top_left_x:
+                top_left_x = x
+            if top_left_y is None or y < top_left_y:
+                top_left_y = y
+            if bottom_right_x is None or x > bottom_right_x:
+                bottom_right_x = x
+            if bottom_right_y is None or y > bottom_right_y:
+                bottom_right_y = y
+        self.enclosing_box = ((top_left_x, top_left_y), (bottom_right_x, bottom_right_y))
+        return self.enclosing_box
 
     def show(self, verbose: bool = False, prefix: str = '    '):
         """ produce a string describing the contour for printing purposes,
@@ -246,11 +301,13 @@ class Contour:
         if self.points is None:
             return "None"
         first_line = 'start:{}, box:{}..{}, size:{}, points:{}, small:{}'.\
-                     format(self.points[0], self.top_left, self.bottom_right, self.get_size(), len(self.points), self.small)
+                     format(show_point(self.points[0]),
+                            show_point(self.get_enclosing_box()[0]), show_point(self.get_enclosing_box()[1]),
+                            show_point(self.get_size()), len(self.points), self.small)
         if not verbose:
             return first_line
         second_line = 'centroid:{}, offsetness:{:.2f}, squareness:{:.2f}, wavyness:{:.2f}'.\
-                      format(self.get_centroid(), self.get_offsetness(),
+                      format(show_point(self.get_centroid()), self.get_offsetness(),
                              self.get_squareness(), self.get_wavyness())
         return '{}\n{}{}'.format(first_line, prefix, second_line)
 
@@ -271,22 +328,23 @@ class Contour:
         # NB: number of points is always more than the perimeter length
         return 1 - (perimeter / len(self.points))
 
-    def get_size(self) -> Point:
+    def get_size(self) -> (int, int):
         """ the size is the maximum width and height of the contour,
             i.e. the size of the enclosing box
             this is a very cheap metric that can be used to quickly drop junk
             """
-        width: float = self.bottom_right.x - self.top_left.x + 1
-        height: float = self.bottom_right.y - self.top_left.y + 1
-        return Point(width, height)
+        (tl_x, tl_y), (br_x, br_y) = self.get_enclosing_box()
+        width  = br_x - tl_x + 1
+        height = br_y - tl_y + 1
+        return width, height
 
     def get_squareness(self) -> float:
         """ squareness is a measure of how square the enclosing box is,
             result is in range 0..1, where 0 is perfect square, 1 is very thin rectangle,
             this is a very cheap metric that can be used to quickly drop junk
             """
-        size = self.get_size()
-        ratio = min(size.x, size.y) / max(size.x, size.y)  # in range 0..1, 0=bad, 1=good
+        x, y = self.get_size()
+        ratio = min(x, y) / max(x, y)  # in range 0..1, 0=bad, 1=good
         return 1 - ratio  # in range 0..1, 0=square, 1=very thin rectangle
 
     def get_offsetness(self) -> float:
@@ -294,15 +352,18 @@ class Contour:
             result is in range 0..1, where 0 is exactly coincident, 1 is very far apart
             """
         if self.offset is None:
-            box_size = self.get_size()
-            box_centre = Point(self.top_left.x + (box_size.x / 2), self.top_left.y + (box_size.y / 2))
+            (box_top_left_x, box_top_left_y), _ = self.get_enclosing_box()
+            box_size_x, box_size_y = self.get_size()
+            box_centre = (box_top_left_x + (box_size_x / 2), box_top_left_y + (box_size_y / 2))
             centroid = self.get_centroid()  # NB: this cannot be outside the enclosing box
-            x_diff = box_centre.x - centroid.x  # max this can be is box_size.x
+            x_diff = box_centre[0] - centroid[0]  # max this can be is box_size_x/2
             x_diff *= x_diff
-            y_diff = box_centre.y - centroid.y  # max this can be is box_size.y
+            y_diff = box_centre[1] - centroid[1]  # max this can be is box_size_y/2
             y_diff *= y_diff
-            distance = x_diff + y_diff  # most this can be is box_size.x^2 + box_size.y^2
-            limit = max((box_size.x * box_size.x) + (box_size.y * box_size.y), 1)
+            distance = x_diff + y_diff  # most this can be is (box_size_x/2)^2 + (box_size_y/2)^2
+            max_x = box_size_x / 2
+            max_y = box_size_y / 2
+            limit = max((max_x * max_x) + (max_y * max_y), 1)
             self.offset = distance / limit
         return self.offset
 
@@ -311,15 +372,14 @@ class Contour:
             for every unique x co-ord find the y extent at that x,
             this function is lazy
             """
-        # ToDo: extend to remove 1 pixel gaps
         if self.x_slices is not None:
             # already been done
             return self.x_slices
         x_slices = {}
-        for point in self.points:
-            if x_slices.get(point.x) is None:
-                x_slices[point.x] = {}
-            x_slices[point.x][point.y] = True
+        for (x, y) in self.points:
+            if x_slices.get(x) is None:
+                x_slices[x] = {}
+            x_slices[x][y] = True
         self.x_slices = []
         for x in x_slices:
             min_y = None
@@ -337,15 +397,14 @@ class Contour:
             for every unique y co-ord find the x extent at that y,
             this function is lazy
             """
-        # ToDo: extend to remove 1 pixel gaps
         if self.y_slices is not None:
             # already been done
             return self.y_slices
         y_slices = {}
-        for point in self.points:
-            if y_slices.get(point.y) is None:
-                y_slices[point.y] = {}
-            y_slices[point.y][point.x] = True
+        for (x, y) in self.points:
+            if y_slices.get(y) is None:
+                y_slices[y] = {}
+            y_slices[y][x] = True
         self.y_slices = []
         for y in y_slices:
             min_x = None
@@ -365,8 +424,9 @@ class Contour:
         if self.blob_perimeter is not None:
             return self.blob_perimeter
         self.blob_perimeter = {}
-        for point in self.points:
-            self.blob_perimeter[(point.x, point.y)] = True  # NB: do NOT use point as the key, its an object not a tuple
+        for p, (x, y) in enumerate(self.points):
+            # NB: points are in clockwise order, we want that preserved, we're relying on Python dict doing that
+            self.blob_perimeter[(x, y)] = p  # NB: do NOT use point as the key, its an object not a tuple
         return self.blob_perimeter
 
     def get_blob_radius(self, mode) -> float:
@@ -379,7 +439,7 @@ class Contour:
         if self.radius[mode] is not None:
             # already done it
             return self.radius[mode]
-        centre = self.get_centroid()  # the centre of mass of the blob (assuming its solid)
+        centre_x, centre_y = self.get_centroid()  # the centre of mass of the blob (assuming its solid)
         # the perimeter points are the top-left of a 1x1 pixel square, we want their centre, so we add 0.5
         perimeter = self.get_blob_perimeter()
         mean_distance_squared = 0
@@ -388,9 +448,9 @@ class Contour:
         for x, y in perimeter:
             x += 0.5
             y += 0.5
-            x_distance = centre.x - x
+            x_distance = centre_x - x
             x_distance *= x_distance
-            y_distance = centre.y - y
+            y_distance = centre_y - y
             y_distance *= y_distance
             distance = x_distance + y_distance
             mean_distance_squared += distance
@@ -426,53 +486,7 @@ class Contour:
         circle = self.get_enclosing_circle(mode)
         return circle.perimeter()
 
-    def trim_edges(self):
-        """ remove single pixel extension or indentation in x or y slices at the x or y extremes,
-            e.g: XXX                            XXXX
-                  XX                            XXX   <-- x indentation
-                  XX                            XXXX
-                   X  <-- y extension           X XX
-                ^                                ^
-                |                                |
-                +-- x extension                  +-- y indentation
-            the algorithm is iterative eating away at the edges until there are no extensions or indentations
-            the result may be nothing when dealing with small blobs!
-            this is intended to tidy up target edges
-            """
-        # ToDo: implement the above then hook it into the properties (in particular wavyness)
-        #       indentation is better done in x_slices and y_slices
-        # an indentation is a slice with
-        dropped = True
-        while dropped:
-            dropped = False
-            x_slices = self.get_x_slices()
-            while len(x_slices) > 0:
-                _, min_y, max_y = x_slices[0]
-                if min_y == max_y:
-                    # got a protrusion at min-x, drop it
-                    del x_slices[0]
-                    dropped = True
-            while len(x_slices) > 0:
-                _, min_y, max_y = x_slices[-1]
-                if min_y == max_y:
-                    # got a protrusion at max-x, drop it
-                    del x_slices[-1]
-                    dropped = True
-            y_slices = self.get_y_slices()
-            while len(y_slices) > 0:
-                _, min_x, max_x = y_slices[0]
-                if min_x == max_x:
-                    # got a protrusion at min-y, drop it
-                    del y_slices[0]
-                    dropped = True
-            while len(y_slices) > 0:
-                _, min_x, max_x = y_slices[-1]
-                if min_x == max_x:
-                    # got a protrusion at max-y, drop it
-                    del y_slices[-1]
-                    dropped = True
-
-    def get_centroid(self) -> Point:
+    def get_centroid(self) -> (float, float):
         """ get the centroid of the blob as: sum(points)/num(points) """
         if self.centroid is None:
             sum_x = 0
@@ -489,7 +503,7 @@ class Contour:
                 samples = max_x - min_x + 1
                 sum_y += samples * y
                 num_y += samples
-            self.centroid = Point((sum_x / num_x) + 0.5, (sum_y / num_y) + 0.5)  # +0.5 is to get to the pixel centre
+            self.centroid = ((sum_x / num_x) + 0.5, (sum_y / num_y) + 0.5)  # +0.5 is to get to the pixel centre
         return self.centroid
 
 
@@ -505,7 +519,7 @@ class Blob:
         self.mode = mode  # what type of circle radius required (one of Contour.RADIUS...)
         self.small = small  # any blob with a perimeter of this or less is considered to be 'small'
         self.external: Contour = None
-        self.internal: [Contour] = []
+        self.internal: [Contour] = []  # list of internal contours (NB: we're only interested in how many)
         self.rejected = const.REJECT_NONE  # why it was rejected (if it was)
         self.reset()
 
@@ -524,7 +538,17 @@ class Blob:
     def add_contour(self, contour: Contour):
         """ add a contour to the blob, the first contour is the external one,
             subsequent contours are internal,
+            all contours are guaranteed to have their first and last point the same (needed by later processes)
         """
+        # the first and last point of a contour must be the same, if not add it
+        points = contour.points
+        if points is None or len(points) == 0:
+            breakpoint()
+            raise Exception('Attempt to add a contour with no points')
+        if len(points) > 1:
+            if points[0] != points[-1]:
+                # add a last point same as first (this is important when calculating perimeter directions later)
+                contour.add_point(points[0])
         if self.external is None:
             self.external = contour
         else:
@@ -560,10 +584,11 @@ class Blob:
             return None
         if self.box_black is not None:
             return self.box_black, self.box_white
+        (top_left_x, top_left_y), (bottom_right_x, bottom_right_y) = self.external.get_enclosing_box()
         # build 'x-slices' for the box
         x_slices = []
-        for x in range(self.external.top_left.x, self.external.bottom_right.x + 1):
-            x_slices.append((x, self.external.top_left.y, self.external.bottom_right.y))
+        for x in range(top_left_x, bottom_right_x + 1):
+            x_slices.append((x, top_left_y, bottom_right_y))
         self.box_black, self.box_white = count_pixels(self.image, x_slices)
         return self.box_black, self.box_white
 
@@ -571,8 +596,21 @@ class Blob:
         """ the size of a blob is the average of the width + height of the bounding box """
         if self.external is None:
             return None
-        point = self.external.get_size()
-        return (point.x + point.y) / 2
+        w, h = self.external.get_size()
+        return (w + h) / 2
+
+    def get_perimeter(self):
+        """ get the unique points around the blob perimeter as a list of x,y points in clockwise order """
+        if self.external is None:
+            return None
+        perimeter = self.external.get_blob_perimeter()  # NB: relying on a Python dict preserving the insertion order
+        return [(x, y) for x, y in perimeter.keys()]
+
+    def get_points(self):
+        """ get all the points of the blob contour as a list of x,y points in clockwise order """
+        if self.external is None:
+            return None
+        return self.external.points  # NB: relying on contours being 'clockwise' followed
 
     def get_quality_stats(self):
         """ get all the 'quality' statistics for a blob """
@@ -647,6 +685,36 @@ class Blob:
         else:
             return black / (black + white)
 
+    def extract(self, start, end):
+        """ create a new blob like this one but consisting only of the external points
+            between start and end inclusive, the resulting external contour is made
+            to be closed by joining start to end with a straight line (8-connected).
+            NB: end index may be lower than start, i.e. we're wrapping, that's benign
+                because contours are closed loops.
+            """
+        # make a new contour and populate it with the required points
+        contour = Contour(self.small)
+        points  = self.get_points()
+        point   = start
+        while point != ((end+1) % len(points)):
+            if point == (len(points)-1):
+                # skip the last point as we know its the same as the first (enforced by add_contour())
+                pass
+            else:
+                contour.add_point(points[point])
+            point = (point + 1) % len(points)
+        # join the ends by adding more points from the end to the start
+        start_x, start_y = points[start]
+        end_x  , end_y   = points[end  ]
+        join = line(end_x, end_y, start_x, start_y)
+        # NB: join will contain the first and last point, which we do not want
+        for sample in range(1, len(join)-1):
+            contour.add_point(join[sample])
+        # make a new blob with this contour
+        extracted = Blob(self.label, self.image, self.inverted, self.mode, self.small)
+        extracted.add_contour(contour)  # NB: This will add the final point to be same as the first
+        return extracted
+
 
 class Labels:
     """ label to blob map """
@@ -665,3 +733,36 @@ class Labels:
         else:
             # no such label
             return None
+
+def test_line(x0, y0, x1, y1, name):
+    points = line(x0, y0, x1, y1)
+    if points[0] == (x0, y0) and points[-1] == (x1, y1):
+        prefix = '____pass____'
+    else:
+        prefix = '****FAIL****'
+    logger.log('  {}: {:4} {:3}x, {:3}y  -->  {:3}x, {:3}y = {}'.format(prefix, name, x0, y0, x1, y1, points))
+
+if __name__ == "__main__":
+    """ testing """
+
+    logger = utils.Logger('shapes.log', 'shapes')
+    logger.log('Shapes')
+
+    logger.log('')
+    logger.log('Test line()...')
+    test_line(0,0,   0,-10, 'N')
+    test_line(0,0,   3,-10, 'NNE')
+    test_line(0,0,  10,-10, 'NE')
+    test_line(0,0,  10, -3, 'ENE')
+    test_line(0,0,  10,  0, 'E')
+    test_line(0,0,  10,  3, 'ESE')
+    test_line(0,0,  10, 10, 'SE')
+    test_line(0,0,   3, 10, 'SSE')
+    test_line(0,0,   0, 10, 'S')
+    test_line(0,0,  -3, 10, 'SSW')
+    test_line(0,0, -10,-10, 'SW')
+    test_line(0,0, -10, -3, 'WSW')
+    test_line(0,0, -10,  0, 'W')
+    test_line(0,0, -10, -3, 'WNW')
+    test_line(0,0, -10,-10, 'NW')
+    test_line(0,0,  -3,-10, 'NNW')

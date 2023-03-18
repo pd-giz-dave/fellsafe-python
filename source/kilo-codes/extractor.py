@@ -273,9 +273,14 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
         logger.push('extractor/_test')
     else:
         logger.push('_test')
-    logger.log("\nExtracting code bits")
+    logger.log('')
+    logger.log("Extracting code bits (create new {})".format(create_new))
 
     # get the code areas
+    if not create_new:
+        params = logger.restore(file='extractor', ext='params')
+        if params is None or params.source_file != src:
+            create_new = True
     if create_new:
         if params is None:
             params = Params()
@@ -285,8 +290,6 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
             logger.pop()
             return None
         logger.save(params, file='extractor', ext='params')
-    else:
-        params = logger.restore(file='extractor', ext='params')
 
     # process the code areas
     images = params.finder.images()
@@ -307,4 +310,4 @@ if __name__ == "__main__":
 
     logger = utils.Logger('extractor.log', 'extractor/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)
+    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

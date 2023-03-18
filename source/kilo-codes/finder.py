@@ -29,8 +29,8 @@ class Finder:
     LARGE_IMAGE_SIZE = 80  # ditto for a big one
     # these ratios have to be sloppy for small images 'cos 1 pixel diff can be huge with low resolution images
     # these ratios are indexed by the image size index (0=small, 1=medium, 2=large)
-    MIN_RADIUS_RATIO = (0.4, 0.6, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
-    MAX_DISTANCE_RATIO = (5*5, 3*3, 3*3)  # max distance (squared) between actual and expected mark as a multiple of expected radius
+    MIN_RADIUS_RATIO = (0.2, 0.25, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
+    MAX_DISTANCE_RATIO = (7*7, 4*4, 3*3)  # max distance (squared) between actual and expected mark as a multiple of expected radius
     MIN_MARK_HITS = 5/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     # endregion
     # region field offsets in a blob...
@@ -158,7 +158,7 @@ class Finder:
                 if mark is None or len(mark) == 0:
                     # nothing here
                     continue
-                x, y, r, _ = found_timing[mark[0][0]]  # ToDo: euch! all these [0]'s
+                x, y, r, _ = found_timing[mark[0][0]]
                 image = canvas.circle(image, (x, y), r, const.GREEN, 1)
             return image
 
@@ -271,7 +271,7 @@ class Finder:
             return self.found_timing
         self.found_timing = [None for _ in range(len(self.detections))]
         # setup fixed parameters
-        params = locator.Params()
+        params = Params()
         params.source_file = self.source
         params.box = None
         params.integration_width = 2
@@ -294,7 +294,7 @@ class Finder:
                 folder = utils.image_folder(target=detection.box_tl)
                 self.logger.push(context='find_timing/{}'.format(folder), folder=folder)
                 self.logger.log('')
-                self.logger.log('Looking for timing marks...')
+                self.logger.log('Looking for timing marks in detection {}...'.format(i))
             params = locator.get_blobs(image, params, logger=self.logger)
             self.found_timing[i] = params.targets
             if self.logger is not None:
@@ -783,6 +783,7 @@ class Finder:
                 for col in range(1, len(top)-1):
                     cell = intersect(top[col], bottom[col], left[row], right[row])  # cell is at intersection
                     radius = (top[col][2] + bottom[col][2] + left[row][2] + right[row][2]) / 4  # radius is average
+                    # ToDo: is average the best option? what about min? what about cells that overlap?
                     cells.append([cell[0], cell[1], radius, None])
                 cells.append(right[row])  # last cell is right edge
                 code_rows.append(cells)
@@ -824,9 +825,13 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
     else:
         logger.push('_test')
     logger.log('')
-    logger.log('Finding targets')
+    logger.log('Finding targets (create new {})'.format(create_new))
 
     # get the detections
+    if not create_new:
+        params = logger.restore(file='finder', ext='params')
+        if params is None or params.source_file != src:
+            create_new = True
     if create_new:
         # this is very slow
         if params is None:
@@ -837,8 +842,6 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
             logger.pop()
             return None
         logger.save(params, file='finder', ext='params')
-    else:
-        params = logger.restore(file='finder', ext='params')
 
     located = params.locator
     image = params.source
@@ -854,10 +857,10 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png'
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('finder.log', 'finder/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)
+    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

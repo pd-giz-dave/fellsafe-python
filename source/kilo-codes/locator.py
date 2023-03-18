@@ -704,7 +704,12 @@ def _test(src, proximity, blur, mode, logger, params=None, create_new=True):
         logger.push('locator/_test')
     else:
         logger.push('_test')
-
+    logger.log('')
+    logger.log("Locating targets (create new {})".format(create_new))
+    if not create_new:
+        params = logger.restore(file='locator', ext='params')
+        if params is None or params.source_file != src:
+            create_new = True
     if create_new:
         # this is very slow
         if params is None:
@@ -716,8 +721,6 @@ def _test(src, proximity, blur, mode, logger, params=None, create_new=True):
             logger.pop()
             return None
         logger.save(params, file='locator', ext='params')
-    else:
-        params = logger.restore(file='locator', ext='params')
 
     params.source_file = src
     locate_targets(params.source, params, logger)

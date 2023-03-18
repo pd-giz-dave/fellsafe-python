@@ -183,14 +183,21 @@ def _test_pipeline(src, proximity, blur, mode, logger=None, create_new=True):
     else:
         logger.push('_test_pipeline')
     logger.log('')
-    logger.log('Decoding code bits from the pipeline')
+    logger.log('Decoding code bits from the pipeline (create new {})'.format(create_new))
 
     # get the code bits
-    params = extractor._test(src, proximity, blur=blur, mode=mode, logger=logger, create_new=create_new)
-    if params is None:
-        logger.log('Extractor failed on {}'.format(src))
-        logger.pop()
-        return None
+    if not create_new:
+        params = logger.restore(file='decoder', ext='params')
+        if params is None or params.source_file != src:
+            create_new = True
+    if create_new:
+        params = extractor._test(src, proximity, blur=blur, mode=mode, logger=logger, create_new=create_new)
+        if params is None:
+            logger.log('Extractor failed on {}'.format(src))
+            logger.pop()
+            return None
+        logger.save(params, file='decoder', ext='params')
+
     bits = params.extractor.get_bits()
     image = params.finder.image
     circles = params.finder.circles()
@@ -291,4 +298,4 @@ if __name__ == "__main__":
     #_test_decoder(logger)
 
     # test whole pipeline
-    _test_pipeline(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=True)
+    _test_pipeline(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

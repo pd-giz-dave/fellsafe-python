@@ -8,6 +8,7 @@
     It is also extended to compute the area of the components found and various other properties.
     Blame the original for any weird looking logic in here!
 """
+import random
 
 import const
 import utils
@@ -42,9 +43,6 @@ class Params:
                                          # NB: Make a small +ve number to ensure totally white stays white
     white_threshold: float = None        # grey/white threshold, None == same as black (i.e. binary)
     direct_neighbours: bool = True       # True == 4-connected, False == 8-connected
-    min_size: float = 2                  # min number of pixels across the contour box
-    max_size: float = 128                # max number of pixels across the contour box
-    max_internals: int = 1               # max number of internal contours that is tolerated to be a blob
     blobs: [()]    = None                # all detected contours
     contours       = None                # the contours buffer
     labels: shapes.Labels = None         # the label to blob map for all the contours detected
@@ -56,7 +54,7 @@ def contour_trace(image, buffer, label: int, x: int, y: int,
         if external is True follow an external contour, else internal,
         if direct is True use 4-connected neighbours else 8,
         if inverted is True follow black contours, else white,
-        both image and buffer must be the same shape, have a zero border and x,y must never be in it
+        both image and buffer must be the same shape, have an 'outside' border and x,y must never be in it,
         """
     if inverted:
         follow = BLACK
@@ -79,7 +77,7 @@ def contour_trace(image, buffer, label: int, x: int, y: int,
     contour: shapes.Contour = shapes.Contour()
     done: bool = False
     while not done:
-        contour.add_point(shapes.Point(x0, y0))
+        contour.add_point((x0, y0))
         # scan around current pixel in clockwise order starting after last white hit
         j: int = 0
         while j < 8:
@@ -203,34 +201,20 @@ def find_contours(source, params: Params, logger=None):
                                      params.integration_height,
                                      params.black_threshold,
                                      params.white_threshold)
-    all_blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours, mode=params.mode,
-                                           inverted=params.inverted, small=params.small)
-    # filter out the obvious junk
-    good_blobs = []
-    for blob in all_blobs:
-        if len(blob.internal) > params.max_internals:
-            reason_code = const.REJECT_INTERNALS
-        else:
-            size = blob.get_size()
-            if size < params.min_size:
-                reason_code = const.REJECT_TOO_SMALL
-            elif size > params.max_size:
-                reason_code = const.REJECT_TOO_BIG
-            else:
-                reason_code = const.REJECT_NONE
-                good_blobs.append(blob)
-        blob.rejected = reason_code
-    params.blobs    = good_blobs
+    blobs, buffer, labels = find_blobs(params.binary, params.direct_neighbours, mode=params.mode,
+                                       inverted=params.inverted, small=params.small)
+    params.blobs    = blobs
     params.contours = buffer
     params.labels   = labels
     if logger is not None:
         # show what happened
-        show_results(params, all_blobs, good_blobs, logger)
+        show_results(params, logger)
         logger.pop()
     return params
 
-def show_results(params, all_blobs, good_blobs, logger):
+def show_results(params, logger):
     # show what happened
+
     if params.blur_kernel_size is not None and params.blur_kernel_size >= 3:
         logger.draw(params.blurred, file='blurred')
     logger.draw(params.binary, file='binary')
@@ -239,30 +223,21 @@ def show_results(params, all_blobs, good_blobs, logger):
     else:
         source_part = params.source
     logger.draw(source_part, file='grayscale')
-    draw_bad = canvas.colourize(source_part)
-    draw_good = canvas.colourize(source_part)
-    colours = const.REJECT_COLOURS
-    max_x, max_y = canvas.size(source_part)
-    for x in range(max_x):
-        for y in range(max_y):
-            label = params.contours[y, x]
-            if label > 0:
-                blob = params.labels.get_blob(label)
-                colour, _ = colours[blob.rejected]
-                if blob.rejected == const.REJECT_NONE:
-                    draw_good[y, x] = colour
-                else:
-                    draw_bad[y, x] = colour
-    logger.draw(draw_good, file='contours_accepted')
-    logger.draw(draw_bad, file='contours_rejected')
+
+    colours = (const.OLIVE, const.GREEN, const.BLUE, const.YELLOW, const.PURPLE, const.CYAN, const.ORANGE, const.PINK)
+    draw = canvas.colourize(source_part)
+    for blob in params.blobs:
+        for internal in blob.internal:
+            for (x, y) in internal.points:
+                draw[y, x] = const.RED
+        colour = colours[random.randrange(0, len(colours))]
+        for (x, y) in blob.external.points:
+            draw[y, x] = colour
+    logger.draw(draw, file='contours')
+
     logger.log('')
-    logger.log("Contour colours:")
-    for reason, (_, name) in colours.items():
-        logger.log('  {}: {}'.format(name, reason))
-    rejected = len(all_blobs) - len(good_blobs)
-    logger.log('')
-    logger.log("Accepted blobs: {}, rejected {} ({:.2f}%) of {}".
-               format(len(good_blobs), rejected, (rejected / len(all_blobs)) * 100, len(all_blobs)))
+    logger.log("Detected contours: {}".format(len(params.blobs)))
+    logger.log('  Red contours are internals, externals are shown in a random colour')
 
 def set_params(src, proximity, black, inverted, blur, mode, params=None):
     if params is None:
@@ -292,6 +267,7 @@ def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None
         logger.push(context='contours/_test')
     else:
         logger.push(context='_test')
+    logger.log('')
     logger.log("Detecting contours")
     shrunk = prepare_image(src, size, logger)
     if shrunk is None:
