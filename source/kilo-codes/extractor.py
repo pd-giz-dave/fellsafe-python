@@ -46,7 +46,7 @@ class Extractor:
         self.data_bits       = None        # data bits extracted from the cells
 
     def draw_bits(self):
-        """ draw circle for 0 bits, 1 bits and None bits in distinct colours for the given detection """
+        """ draw circle for 0 bits, 1 bits and None bits in distinct colours for all detections """
         if self.logger is None:
             return
         for detection in range(len(self.cells)):
@@ -67,8 +67,11 @@ class Extractor:
                     colour = const.BLUE
                 else:
                     colour = const.RED
-                bit_num  += 1
+                if bit_num == 0:
+                    # mark the first bit so can see the orientation
+                    image = canvas.circle(image,(data_cell[0], data_cell[1]), 1, const.RED)
                 image = canvas.circle(image, (data_cell[0], data_cell[1]), data_cell[2], colour)
+                bit_num  += 1
             folder = utils.image_folder(target=self.get_origin(detection))
             self.logger.push(folder=folder)
             self.logger.draw(image, file='bits')
@@ -246,7 +249,8 @@ class Extractor:
                     self.logger.push(context='get_bits/{}'.format(folder), folder=folder)
                     self.logger.log('Detection {}: bits={}'.format(detection, bits))
                     self.logger.pop()
-            self.draw_bits()
+            if self.logger is not None:
+                self.draw_bits()
         if target is None:
             return self.data_bits
         else:
@@ -310,4 +314,4 @@ if __name__ == "__main__":
 
     logger = utils.Logger('extractor.log', 'extractor/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test(src, proximity, blur=const.BLUR_KERNEL_SIZE, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

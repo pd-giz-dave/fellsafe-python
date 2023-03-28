@@ -14,6 +14,8 @@ class Params(locator.Params):
     def __init__(self):
         self.finder = None
 
+# ToDo: split this module in two - find-timing, then the rest
+
 class Finder:
 
     # region geometry...
@@ -23,15 +25,20 @@ class Finder:
     TIMING_MARKS = codes.Codes.TIMING_PER_CODE   # how many timing marks per code
     # endregion
     # region tuning...
-    MIN_IMAGE_SIZE = 128  # min target image size, smaller ones are upsized to at least this
+    MIN_IMAGE_SIZE = 96  # min target image size, smaller ones are upsized to at least this
     # distant=30 or less, far=40 or less, near=50 or less, close=100 or less, native=300+
     SMALL_IMAGE_SIZE = 40  # threshold for a small detection image
     LARGE_IMAGE_SIZE = 80  # ditto for a big one
     # these ratios have to be sloppy for small images 'cos 1 pixel diff can be huge with low resolution images
     # these ratios are indexed by the image size index (0=small, 1=medium, 2=large)
-    MIN_RADIUS_RATIO = (0.2, 0.25, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
-    MAX_DISTANCE_RATIO = (7*7, 4*4, 3*3)  # max distance (squared) between actual and expected mark as a multiple of expected radius
-    MIN_MARK_HITS = 5/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_RADIUS_RATIO = (0.2, 0.4, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
+    MAX_DISTANCE_RATIO = (3.6, 3.5, 2.5)  # max distance between actual and expected mark as a multiple of expected radius
+    MIN_QUALITY_RATIO = (0.3, 0.3, 0.4)  # 'quality' is radius-error (1..0) times distance-error (1..0), 1 is best, 0 is worst
+    DISTANCE_QUALITY_WEIGHT = 0.5  # weighting factor for the distance component of quality (must be <= 1)
+    SIZE_QUALITY_WEIGHT = 1.0  # weighting factor for the size component of quality (must be <= 1)
+    MATCH_METRIC_SCALE = 2  # the scale factor to apply to the above when matching (scale is 1 when filtering)
+    MIN_MARK_HITS = 6/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    LOCATOR_MARGIN = 1 + TIMING_SCALE  # timing marks must be separated from locators by at least 1r
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
@@ -48,13 +55,14 @@ class Finder:
         self.good_images        = None        # grayscale extractions of all accepted detections and their scale
         self.found_timing       = None        # candidate timing marks discovered for each detection (random ordering)
         self.expected_timing    = None        # expected timing mark centres for each detection (clockwise from top-left)
-        self.matched_timing     = None        # shouldbe_timing's matched with closest maybe_timing's
-        self.filtered_timing    = None        # list of detections that pass the qualification filter
-        self.code_grids         = None        # list of detected code grids
-        self.code_cells         = None        # list of cell co-ords inside the locators
+        self.matched_timing     = None        # discovered/expected pairings in best to worst order
+        self.filtered_timing    = None        # list of detections that pass the qualification filter and their matched marks
+        self.code_grids         = None        # list of detected code grids for all filtered timings
+        self.code_cells         = None        # list of cell co-ords inside the locators for all filtered timings
         self.code_circles       = None        # list of all code 'circles' (max enclosed circle within detected locators)
         self.min_radius_ratio   = None        # appropriate radius ratio for each sub-image size
         self.max_distance_ratio = None        # appropriate distance ratio for each sub-image size
+        self.min_quality_ratio  = None        # appropriate quality ratio for each sub-image size
 
     def get_grayscale(self, detection=None):
         """ extract the grayscale sub-image of the given, or all, detection """
@@ -62,14 +70,16 @@ class Finder:
         def log_size(detection, size, size_name):
             if self.logger is not None:
                 self.logger.log('Detection {} is {} ({} pixels, small limit is {}, large limit is {}), '
-                                'min_radius_ratio={:.2f}, max_distance_ratio={:.2f}'.
+                                'min_radius_ratio={:.2f}, max_distance_ratio={:.2f}, min_quality_ratio={:.2f}'.
                                 format(detection, size_name, size, Finder.SMALL_IMAGE_SIZE, Finder.LARGE_IMAGE_SIZE,
-                                       self.min_radius_ratio[detection], math.sqrt(self.max_distance_ratio[detection])))
+                                       self.min_radius_ratio[detection], self.max_distance_ratio[detection],
+                                       self.min_quality_ratio[detection]))
 
         if self.sub_images is None:
             self.sub_images         = []
             self.min_radius_ratio   = []
             self.max_distance_ratio = []
+            self.min_quality_ratio  = []
             for d_num, d in enumerate(self.detections):
                 if self.logger is not None:
                     folder = utils.image_folder(target=d.box_tl)
@@ -80,16 +90,19 @@ class Finder:
                 if size <= Finder.SMALL_IMAGE_SIZE:
                     self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[0])
                     self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[0])
+                    self.min_quality_ratio.append(Finder.MIN_QUALITY_RATIO[0])
                     if self.logger is not None:
                         log_size(d_num, size, 'small')
                 elif size >= Finder.LARGE_IMAGE_SIZE:
                     self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[2])
                     self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[2])
+                    self.min_quality_ratio.append(Finder.MIN_QUALITY_RATIO[2])
                     if self.logger is not None:
                         log_size(d_num, size, 'large')
                 else:  # medium
                     self.min_radius_ratio.append(Finder.MIN_RADIUS_RATIO[1])
                     self.max_distance_ratio.append(Finder.MAX_DISTANCE_RATIO[1])
+                    self.min_quality_ratio.append(Finder.MIN_QUALITY_RATIO[1])
                     if self.logger is not None:
                         log_size(d_num, size, 'medium')
                 if size < Finder.MIN_IMAGE_SIZE:
@@ -112,6 +125,11 @@ class Finder:
         """ extract the grayscale sub-image of the given detection and coliurize it """
         image, scale = self.get_grayscale(detection)
         return canvas.colourize(image), scale
+
+    def get_image_size(self, detection):
+        """ get the size of the sub-image for the given detection """
+        image, _ = self.get_grayscale(detection)
+        return canvas.size(image)
 
     def draw(self, image, file, detection):
         folder = utils.image_folder(target=detection.box_tl)
@@ -154,11 +172,11 @@ class Finder:
 
         def draw_marks(image, found_timing, edge):
             # draw circle of the marks in the given edge in gree
-            for mark in edge:
-                if mark is None or len(mark) == 0:
+            for tick in edge:
+                if tick is None:
                     # nothing here
                     continue
-                x, y, r, _ = found_timing[mark[0][0]]
+                x, y, r, _ = found_timing[tick[0][0]]
                 image = canvas.circle(image, (x, y), r, const.GREEN, 1)
             return image
 
@@ -168,10 +186,10 @@ class Finder:
             centre, radius = canvas.translate(locator, locator[2], self.detections[detection].box_tl, scale)
             return canvas.circle(image, centre, radius, colour)
 
-        for detection in self.filter_timing():
+        for detection, matches in self.filter_timing():
             image, scale = self.get_colour_image(detection)
             found_timing = self.found_timing[detection]
-            top, right, bottom, left, corner = self.matched_timing[detection]
+            top, right, bottom, left, corner = matches
             image = draw_locator(image, detection, scale, self.detections[detection].tl, const.RED)
             image = draw_locator(image, detection, scale, self.detections[detection].tr, const.ORANGE)
             image = draw_locator(image, detection, scale, self.detections[detection].bl, const.ORANGE)
@@ -202,10 +220,9 @@ class Finder:
                     colour = pallete[1]
                 canvas.line(image, (src_x, src_y), (dst_x, dst_y), colour, 1)
 
-        for detection, (top, right, bottom, left) in enumerate(self.grids()):
-            detection = self.filter_timing()[detection]
-            image, _  = self.get_colour_image(detection)
-            detection = self.detections[detection]
+        for detection, (detection, top, right, bottom, left) in enumerate(self.grids()):
+            image, _     = self.get_colour_image(detection)
+            detection    = self.detections[detection]
             draw_grid(image, top, bottom, (const.GREEN, const.BLUE))
             draw_grid(image, left,right, (const.BLUE, const.GREEN))
             tl_x, tl_y, tl_r, _ = top[0]
@@ -218,9 +235,9 @@ class Finder:
             return
 
         for detection, rows in enumerate(self.cells()):
-            detection = self.filter_timing()[detection]
-            image, _  = self.get_colour_image(detection)
-            detection = self.detections[detection]
+            detection, _ = self.filter_timing()[detection]
+            image, _     = self.get_colour_image(detection)
+            detection    = self.detections[detection]
             for row, cells in enumerate(rows):
                 for col, (x, y, r, _) in enumerate(cells):
                     if row == 0 and col == 0:
@@ -245,7 +262,7 @@ class Finder:
         """ get the radius and centre of the maximum enclosed circle of the given, or all, accepted detections """
         if self.code_circles is None:
             self.code_circles = []
-            for accepted in self.filter_timing():
+            for accepted, _ in self.filter_timing():
                 d = self.detections[accepted]
                 # centre is mid-point of the bottom-left (bl) to top-right (br) locator diagonal as:
                 #   centre_x = (tr_x-bl_x)/2 + bl_x and centre_y = (tr_y-bl_y)/2 + bl_y
@@ -262,7 +279,7 @@ class Finder:
             return self.code_circles
         return self.code_circles[detection]
 
-    def find_timing(self):
+    def find_timing(self):  # ToDo: move timing blob tuning params to constants
         """ find candidate timing marks in all the detections,
             the co-ordinates of the found timing marks are relative to the detection box
             """
@@ -275,18 +292,18 @@ class Finder:
         params.source_file = self.source
         params.box = None
         params.integration_width = 2
-        params.black_threshold = 10
+        params.black_threshold = 6  # ToDo: HACK-->10
         params.direct_neighbours = False
         params.inverted = True
         params.mode = const.RADIUS_MODE_MEAN
         params.blur_kernel_size = 0
-        params.min_area = 8
-        params.min_size = 4
-        params.blur_kernel_size = 0
-        params.max_squareness = 0.7
-        params.max_wavyness = 0.4
-        params.max_offsetness = 0.25
-        params.max_whiteness = 0.6
+        params.min_area = 4
+        params.max_squareness = (0.7, 0.7, 0.7)
+        params.max_wavyness = (0.4, 0.4, 0.4)
+        params.max_offsetness = (0.25, 0.25, 0.25)
+        params.max_whiteness = (0.6, 0.6, 0.6)
+        params.max_sameness = (1.0, 0.9, 0.9)
+        # leave thickness, blackness on the defaults
         for i, detection in enumerate(self.detections):
             # do the timing mark detection
             image, _ = self.get_grayscale(i)
@@ -331,7 +348,7 @@ class Finder:
         end     = Finder.make_detection(end, origin, image_scale, radius_scale)
         start_x = start[Finder.X_COORD]
         start_y = start[Finder.Y_COORD]
-        radius  = (start[Finder.R_COORD] + end[Finder.R_COORD]) / 2  # use average of locators as the radius
+        radius  = start[Finder.R_COORD]
         step_x, step_y = Finder.get_step(start, end, steps)
         centres = []
         for step in range(steps + 1):
@@ -360,7 +377,7 @@ class Finder:
             left_rows      = Finder.make_steps(origin, detection.tl, detection.bl, Finder.CELL_SPAN, image_scale)
 
             # make the 'missing' corner 'minor' locator mark (make as a list to be type consistent with the edges)
-            corners = [Finder.make_detection(detection.br, origin, image_scale, Finder.TIMING_SCALE)]
+            corners = [Finder.make_detection(detection.br, origin, image_scale)]
 
             expected_timing = [top_columns, right_rows, bottom_columns, left_rows, corners]
             self.expected_timing.append(expected_timing)
@@ -398,146 +415,197 @@ class Finder:
 
     def match_timing(self):
         """ match candidate timing marks with those expected, matching is done on a proximity and size basis,
-            result: for each detection, for each candidate the indices of the closest expectation,
-            if there are more expectations than candidates, some will not have a match
+            result: for each detection, a list of matching expectations that are 'reasonable', a match is an
+            expected and discovered pair with a distaance and size measure for each,
+            the ordering of the returned list within each detection is closest distance then nearest size,
+            the 'reasonable' thresholds here are expected to be looser than those applied in filter_timing
             """
 
         if self.matched_timing is not None:
             # already done it
             return self.matched_timing
 
-        def distance(a, b):
-            """ return the squared distance between a and b """
-            ab_x = b[0] - a[0]
-            ab_y = b[1] - a[1]
-            return (ab_x * ab_x) + (ab_y * ab_y)
-
-        def ratio(a, b):
-            """ return the ratio of a/b or b/a whichever is smaller,
-                this provides a measure of how close to each other the two numbers are,
-                the nearer to 1 the ratio is the closer the numbers are to each other
+        def is_excluded(exclusions, candidate):
+            """ return True iff the given candidate is near one of the give exclusion zones,
+                its 'near' if the circumference of the candidate touches or overlaps any exclusion
                 """
-            result = min(a, b) / max(a, b)  # range 0..1, 0=distant, 1=close
-            return result
-
-        def is_locator(detection, locator):
-            """ return True iff the given locator is one of the locators for the given detection,
-                its a locator if it is inside one of the detection locators or vice-versa,
-                to be inside the distance between the centres is less than the largest radius
-                """
-            tl = self.translate_locator(detection, self.detections[detection].tl)
-            tr = self.translate_locator(detection, self.detections[detection].tr)
-            bl = self.translate_locator(detection, self.detections[detection].bl)
-            l_x, l_y, l_r = locator
-            for (x, y), r in (tl, tr, bl):
-                separation = utils.distance((x, y), (l_x, l_y))
-                inside = max(l_r, r)
+            c_x, c_y, c_r = candidate
+            for e_x, e_y, e_r in exclusions:
+                separation = utils.distance((e_x, e_y), (c_x, c_y))
+                inside = e_r + c_r
                 inside *= inside
                 if separation <= inside:
                     return True
             return False
 
+        self.expect_timing()  # go set all expectations
+        self.find_timing()    # go find all the timing marks
+
         self.matched_timing = [None for _ in range(len(self.detections))]  # create slot per detection
         for detection, found_timing in enumerate(self.find_timing()):
+            # measure every discovered timing mark against every (relevant) expected mark
+            # make a list of all those that are within spec
+            # NB: the same expected mark may be associated with more than one discovered mark,
+            #     that's OK, filter_timing deals with that
+            if self.logger is not None:
+                folder = utils.image_folder(target=self.detections[detection].box_tl)
+                self.logger.push(context='match_timing/{}'.format(folder), folder=folder)
+                self.logger.log('')
+
+            max_distance, min_size, min_quality = self.get_limits(detection)
+            self.matched_timing[detection] = []
+
+            # setup locator exclusion zones (timing marks cannot be too near a locator)
+            locators = []
+            for locator in (self.detections[detection].tl, self.detections[detection].tr, self.detections[detection].bl):
+                (x, y), r = self.translate_locator(detection, locator)
+                locators.append((x, y, r * Finder.LOCATOR_MARGIN))
+            # find all qualifying timing amrks
             for candidate, (fx, fy, fr, _) in enumerate(found_timing):
-                if is_locator(detection, (fx, fy, fr)):
-                    # ignore locators
+                if is_excluded(locators, (fx, fy, fr)):
+                    # too near a locator
                     continue
-                # find the best expectation to give this candidate to
-                best_edge = None
-                best_mark = None
-                best_gap  = None
-                best_size = None
-                best_r    = None  # used to calculate ratios for filtering, see filter_timing() - all same for an edge
                 expected_timing = self.expect_timing()[detection]
-                if self.matched_timing[detection] is None:
-                    self.matched_timing[detection] = [None for _ in range(len(expected_timing))]  # create edge slots
                 for edge, marks in enumerate(expected_timing):
-                    if self.matched_timing[detection][edge] is None:
-                        self.matched_timing[detection][edge] = [None for _ in range(len(marks))]  # create mark slots
                     for mark, (x, y, r, _) in enumerate(marks):
                         if len(marks) > 1:
-                            # its an edge - must filter for physical ticks
+                            # its an edge (and not a corner) - must filter for physical ticks
                             if mark not in Finder.TIMING_CELLS:
                                 # its not physical - ignore it
                                 continue
-                        if self.matched_timing[detection][edge][mark] is None:
-                            self.matched_timing[detection][edge][mark] = []  # create empty mark list
-                        gap = distance((x, y), (fx, fy))
-                        size = ratio(r, fr)  # closer to 1 means closer radius match
-                        if best_edge is None:
-                            best_edge = edge
-                            best_mark = mark
-                            best_gap = gap
-                            best_size = size
-                            best_r = r * r
-                        elif gap < best_gap:
-                            # this one is closer in distance
-                            best_edge = edge
-                            best_mark = mark
-                            best_gap = gap
-                            best_size = size
-                            best_r = r * r
-                        elif gap > best_gap:
-                            # this one is further away in distance
+                        distance = utils.distance((x, y), (fx, fy))
+                        size = utils.ratio(r, fr)  # closer to 1 means closer radius match
+                        tick = ((candidate, edge, mark), distance / (r * r), size)  # NB: r^2 'cos distance is also squared
+                        # chuck out those out of spec on any metric
+                        _, metric1, metric2, metric3 = Finder.get_metrics(tick,
+                                                                          max_distance, min_size, min_quality,
+                                                                          Finder.MATCH_METRIC_SCALE)
+                        if metric1[0] or metric2[0]:  # ToDo: HACK--> or metric3[0]:
                             continue
-                        elif size > best_size:
-                            # this one is same distance but is closer in size
-                            best_edge = edge
-                            best_mark = mark
-                            best_gap = gap
-                            best_size = size
-                            best_r = r * r
-                    # now get best match along this edge
-                # now got best match along all edges of this detection for this candidate
-                self.matched_timing[detection][best_edge][best_mark].append((candidate, best_gap, best_size, best_r))
-            # now allocated all found marks to expected marks
-            # NB: There maybe multiple matches for each mark, the resultant list is in an arbitrary order
-        # now done all detections
+                        # potentially useful
+                        self.matched_timing[detection].append(tick)
+
+            # put into closest distance then nearest size order
+            # (NB: size is in range 1..0, good to bad, so 1-size is 0..1 good to bad
+            self.matched_timing[detection].sort(key=lambda k: (k[1], 1-k[2]))
+
+            if self.logger is not None:
+                matches = self.matched_timing[detection]
+                self.logger.log('Detection {}: has {} matches'.format(detection, len(matches)))
+                for tick in matches:
+                    self.log_tick(detection, tick)
+
+            if self.logger is not None:
+                self.logger.pop()
 
         return self.matched_timing
 
+    @staticmethod
+    def get_metrics(tick, max_distance, min_size, min_quality, scale=1):
+        """ get the metrics for the given tick and test against the given limits,
+            max_distance is the maximum tolerable distance of the tick position from the expected position (squared)
+            min_size is the minimum actual/expected size ratio tolerated
+            min_quality is the minimum quality tolerated,
+            scale is a scaling factor to apply before testing the limits, 1==as is, >1==be looser, <1==be stricter
+            for each test a tuple of good/bad and number is returned preceded by the found timing mark number
+            """
+        scale_squared = scale * scale  # for use with squared metrics
+        match, distance, size = tick
+        if distance > max_distance:  # NB: do not used scaled numbers here
+            distance_ratio = 0  # quality is 0 if gap too big
+        else:
+            distance_ratio = 1 - distance / max_distance  # 0==bad, 1==perfect
+        # determine quality
+        size_quality     = size * size  # size squared to be compatible with distance which is also squared
+        # we want the weights to 'suppress' the effect of the component, the components are in the range 0..1
+        # where 0 is bad and 1 is good, we want to bias things towards good, so we apply the weight to the
+        # 'badness' to make it less bad, the badness is 1-goodness, the weights are in the range 0..1 so
+        # multiplying the badness by the weight reduces the badness, the 1-thing converts badness into goodness
+        size_quality     = 1 - ((1 - size_quality  ) * Finder.SIZE_QUALITY_WEIGHT    )
+        distance_quality = 1 - ((1 - distance_ratio) * Finder.DISTANCE_QUALITY_WEIGHT)
+        quality          = size_quality * distance_quality
+        # NB: true quality is the square root of the above, 0==bad, 1==perfect
+        distance_bad = distance                  > (max_distance * scale_squared)
+        size_bad     = (size    * scale        ) < min_size
+        quality_bad  = (quality * scale_squared) < min_quality
+        return match, (distance_bad, distance, distance_ratio), (size_bad, size), (quality_bad, quality)
+
+    def log_tick(self, detection, tick, prefix='    '):
+        """ log a tick for diagnostic purposes, returns good/bad state for distance, size and quality """
+        if self.logger is None:
+            return None
+        max_distance, min_size, min_quality = self.get_limits(detection)
+        (candidate, edge, mark), distance, size, quality = Finder.get_metrics(tick, max_distance, min_size, min_quality)
+        actual   = self.found_timing[detection][candidate]
+        expected = self.expected_timing[detection][edge][mark]
+        span     = math.sqrt(utils.distance(actual, expected))
+        if distance[0]:
+            distance_status = '(bad)'
+        else:
+            distance_status = ''
+        if size[0]:
+            size_status = '(bad)'
+        else:
+            size_status = ''
+        if quality[0]:
+            quality_status = '(bad)'
+        else:
+            quality_status = ''
+        self.logger.log('{}Candidate {}: {:.2f}x, {:.2f}y, {:.2f}r  -->  '
+                        ' Edge {}, Mark {}: expected {:.2f}x, {:.2f}y, {:.2f}r'
+                        ' (distance ({:.2f}->{:.2f}) ratio{} {:.2f}, size ratio{} {:.2f}, quality{} {:.2f})'.
+                        format(prefix, candidate, actual[0], actual[1], actual[2],
+                               edge, mark, expected[0], expected[1], expected[2],
+                               span, math.sqrt(distance[1]), distance_status, math.sqrt(distance[2]),
+                               size_status, size[1],
+                               quality_status, math.sqrt(quality[1])))
+        return distance, size, quality
+
+    def get_limits(self, detection):
+        """ get the distance, size and quality limits for the given detection in units required for comparisons """
+        min_quality_ratio   = self.min_quality_ratio[detection]
+        min_quality_ratio  *= min_quality_ratio  # squared 'cos that's what get_metrics produces
+        min_size_ratio      = self.min_radius_ratio[detection]
+        max_distance_ratio  = self.max_distance_ratio[detection]
+        max_distance_ratio *= max_distance_ratio  # squared to be units compatible with matched timing distance
+        return max_distance_ratio, min_size_ratio, min_quality_ratio
+
     def filter_timing(self):
         """ filter candidates that are too distant from expectations and detections with too few matches """
-        # drop all but the closest match for each expectation
-        # drop all those too distant to be considered a potential match (a tuning constant)
+        # the lists we work with here (found_timing) are a list of all expected/discovered pairs that are a
+        # 'reasonable' match, our job is to extract the best set of pairings,
+        # drop all those too distant, or dissimilar in size, to be considered a potential match (tuning constants),
         # if not enough matches (another tuning constant) drop the detection as junk
         if self.filtered_timing is not None:
             # already done it
             return self.filtered_timing
 
         if self.logger is not None:
-            size_good_stats = utils.Stats(10, (0, 1))
-            size_bad_stats  = utils.Stats(10, (0, 1))
-            span = math.sqrt(max(Finder.MAX_DISTANCE_RATIO))+1
+            span  = max(Finder.MAX_DISTANCE_RATIO)+1
             slots = int(span / 0.1)  # want each slot to be 0.1
             dist_good_stats = utils.Stats(slots, (0, span))
             dist_bad_stats  = utils.Stats(slots, (0, span))
+            size_good_stats = utils.Stats(10, (0, 1))
+            size_bad_stats  = utils.Stats(10, (0, 1))
+            qual_good_stats = utils.Stats(10, (0, 1))
+            qual_bad_stats  = utils.Stats(10, (0, 1))
 
-        def log_tick(detection, edge, mark, tick):
+        def log_tick(detection, tick, prefix='    '):
             if self.logger is None:
                 return
-            candidate, distance, size_ratio, rr = tick
-            actual    = self.found_timing[detection][candidate]
-            expected  = self.expected_timing[detection][edge][mark]
-            gap_ratio = distance / rr  # convert units of pixels^2 into expected radius^2
-            gap_bad   = gap_ratio > self.max_distance_ratio[detection]
-            size_bad  = size_ratio < self.min_radius_ratio[detection]
-            gap_ratio = math.sqrt(gap_ratio)
-            self.logger.log('    {}: {:.2f}x, {:.2f}y, {:.2f}r'
-                            ' (expected {:.2f}x, {:.2f}y, {:.2f}r)'
-                            ' distance ratio {:.2f}, size ratio {:.2f}'.
-                            format(candidate, actual[0], actual[1], actual[2],
-                                   expected[0], expected[1], expected[2],
-                                   gap_ratio, size_ratio))
-            if size_bad:
-                size_bad_stats.count(size_ratio)
+            distance, size, quality = self.log_tick(detection, tick, prefix)
+            if size[0]:
+                size_bad_stats.count(size[1])
             else:
-                size_good_stats.count(size_ratio)
-            if gap_bad:
-                dist_bad_stats.count(gap_ratio)
+                size_good_stats.count(size[1])
+            if distance[0]:
+                dist_bad_stats.count(distance[1])
             else:
-                dist_good_stats.count(gap_ratio)
+                dist_good_stats.count(distance[1])
+            if quality[0]:
+                qual_bad_stats.count(quality[1])
+            else:
+                qual_good_stats.count(quality[1])
 
         def log_locator(detection, locator, name):
             if self.logger is None:
@@ -547,102 +615,107 @@ class Finder:
 
         self.filtered_timing = []
         max_hits = self.expected_marks()  # maximum possible marks per detection
-        for detection, edges in enumerate(self.match_timing()):
-            max_distance_ratio = self.max_distance_ratio[detection]
-            min_size_ratio     = self.min_radius_ratio  [detection]
+        for detection, matches in enumerate(self.match_timing()):
+            max_distance, min_size, min_quality = self.get_limits(detection)
             if self.logger is not None:
                 folder = utils.image_folder(target=self.detections[detection].box_tl)
                 self.logger.push(context='filter_timing/{}'.format(folder), folder=folder)
                 self.logger.log('')
-            got_hits = 0  # how many marks actually qualify for this detection
-            if edges is not None:
-                for edge, marks in enumerate(edges):
-                    for mark in range(len(marks)):
-                        if marks[mark] is None:
-                            continue  # no marks here
-                        # what we have in marks[mark] is an un-ordered list of detected blobs close to our expectation
-                        # drop all but closest that is within acceptable limits
-                        closest_mark = None
-                        closest_gap = None
-                        closest_size = None
-                        for m, tick in enumerate(marks[mark]):
-                            candidate, distance, size_ratio, rr = tick
-                            gap_ratio = distance / rr  # convert units of pixels^2 into expected radius^2
-                            if gap_ratio > max_distance_ratio:
-                                # distance too far from expected - ignore it
-                                if self.logger is not None:
-                                    self.logger.log('Detection {}, edge {}, mark {}: Distance ratio ({:.2f}) too high,'
-                                                    ' limit is {}'.format(detection, edge, mark, math.sqrt(gap_ratio),
-                                                                          math.sqrt(max_distance_ratio)))
-                                    log_tick(detection, edge, mark, tick)
-                                continue
-                            if size_ratio < min_size_ratio:
-                                # size too divergent from expected - ignore it
-                                if self.logger is not None:
-                                    self.logger.log('Detection {}, edge {}, mark {}: Size ratio ({:.2f}) too low,'
-                                                    ' limit is {}'.format(detection, edge, mark,
-                                                                          size_ratio, min_size_ratio))
-                                    log_tick(detection, edge, mark, tick)
-                                continue
-                            if closest_mark is None:
-                                closest_mark = m
-                                closest_gap = gap_ratio
-                                closest_size = size_ratio
-                                continue
-                            if gap_ratio < closest_gap:
-                                closest_mark = m
-                                closest_gap = gap_ratio
-                                closest_size = size_ratio
-                                continue
-                            if gap_ratio > closest_gap:
-                                continue
-                            if size_ratio < closest_size:
-                                closest_mark = m
-                                closest_gap = gap_ratio
-                                closest_size = size_ratio
-                                continue
-                        if closest_mark is None:
-                            # none are close enough to qualify
-                            marks[mark] = []
-                        else:
-                            marks[mark] = [marks[mark][closest_mark]]
-                        # mark is now either empty or contains one item
-                        got_hits += len(marks[mark])
+            # make allocation tracking lists (so we only allocate one pairing once)
+            committed_candidates = [None for _ in range(len(self.find_timing()[detection]))]  # candidates we've used
+            expected_timing = self.expect_timing()[detection]
+            matched_expectation = [None for _ in range(len(expected_timing))]
+            for edge, marks in enumerate(expected_timing):
+                matched_expectation[edge] = [None for _ in range(len(marks))]  # expectations we've done
+            # matches is a distance/size ordered list of expected/discovered pairings
+            got_hits = 0
+            for tick in matches:
+                (candidate, edge, mark), distance, size, quality = Finder.get_metrics(tick,
+                                                                                      max_distance,
+                                                                                      min_size,
+                                                                                      min_quality)
+                # check allowed to use this one
+                if committed_candidates[candidate] is not None:
+                    # already used this, so cannot use it again here
+                    if self.logger is not None:
+                        self.logger.log('Detection {}, candidate {} already used in:'.format(detection, candidate))
+                        log_tick(detection, committed_candidates[candidate])
+                    continue
+                if matched_expectation[edge][mark] is not None:
+                    # already allocated this edge/mark, so do not allocate this candidate to it
+                    if self.logger is not None:
+                        self.logger.log('Detection {}, edge {}, mark {} already paired with:'.
+                                        format(detection, edge, mark))
+                        log_tick(detection, matched_expectation[edge][mark])
+                    continue
+                # we've not used either side of this pairing yet, see if its in spec
+                if distance[0]:
+                    # distance too far from expected - ignore it
+                    if self.logger is not None:
+                        self.logger.log('Detection {}: candidate {} to edge {}, mark {} pairing'
+                                        ' distance ratio ({:.2f}) too high, limit is {}'.
+                                        format(detection, candidate, edge, mark,
+                                               math.sqrt(distance[1]), math.sqrt(max_distance)))
+                        log_tick(detection, tick)
+                    continue
+                if size[0]:
+                    # size too divergent from expected - ignore it
+                    if self.logger is not None:
+                        self.logger.log('Detection {}, candidate {} to edge {}, mark {} pairing'
+                                        ' size ratio ({:.2f}) too low, limit is {}'.
+                                        format(detection, candidate, edge, mark, size[1], min_size))
+                        log_tick(detection, tick)
+                    continue
+                if quality[0]:
+                    # quality too low - ignore it
+                    if self.logger is not None:
+                        self.logger.log('Detection {}, candidate {} to edge {}, mark {} pairing'
+                                        ' quality ({:.2f}) too low, limit is {}'.
+                                        format(detection, candidate, edge, mark,
+                                               math.sqrt(quality[1]), math.sqrt(min_quality)))
+                        log_tick(detection, tick)
+                    continue
+                # found a pairing we're allowed to use that is in 'spec'
+                committed_candidates[candidate] = tick
+                matched_expectation[edge][mark] = tick
+                got_hits += 1
+            # done this detection
             if (got_hits / max_hits) < Finder.MIN_MARK_HITS:
                 # not enough mark hits for this detection to qualify
                 if self.logger is not None:
+                    self.logger.log('')
                     self.logger.log('Detection {}: Has too few detectable timing marks - require at least {:.0f} of {},'
                                     ' only found {} ({:.2f}%, threshold is {:.2f}%):'.
                                     format(detection, Finder.MIN_MARK_HITS * max_hits, max_hits, got_hits,
                                            (got_hits / max_hits) * 100, Finder.MIN_MARK_HITS * 100))
             else:
-                self.filtered_timing.append(detection)
+                self.filtered_timing.append((detection, matched_expectation))
                 if self.logger is not None:
+                    self.logger.log('')
                     self.logger.log('Detection {}: Found {} (of {}, {:.2f}%) timing marks:'.
                                     format(detection, got_hits, max_hits, (got_hits / max_hits) * 100))
             if self.logger is not None:
                 log_locator(detection, self.detections[detection].tl, 'top-left')
                 log_locator(detection, self.detections[detection].tr, 'top-right')
                 log_locator(detection, self.detections[detection].bl, 'bottom-left')
-                if edges is not None:
-                    for edge, marks in enumerate(edges):
-                        self.logger.log('  Edge {} targets:'.format(edge))
-                        for mark, ticks in enumerate(marks):
-                            if ticks is None:
-                                continue  # no ticks here
-                            for tick in ticks:
-                                log_tick(detection, edge, mark, tick)
-                else:
-                    self.logger.log('  No blobs detected!')
+                for edge, marks in enumerate(matched_expectation):
+                    self.logger.log('  Edge {} targets:'.format(edge))
+                    for mark, tick in enumerate(marks):
+                        if tick is None:
+                            continue  # no tick here
+                        self.logger.log('    Mark {}:'.format(mark))
+                        log_tick(detection, tick, '      ')
                 self.logger.pop()
 
         if self.logger is not None:
             self.logger.push(context='filter_timing')
             self.logger.log('')
-            self.logger.log('Size ratio good stats: {}'.format(size_good_stats.show()))
-            self.logger.log('Size ratio bad stats: {}'.format(size_bad_stats.show()))
-            self.logger.log('Distance ratio good stats: {}'.format(dist_good_stats.show()))
-            self.logger.log('Distance ratio bad stats: {}'.format(dist_bad_stats.show()))
+            self.logger.log('Size good stats: {}'.format(size_good_stats.show()))
+            self.logger.log('Size bad stats: {}'.format(size_bad_stats.show()))
+            self.logger.log('Distance good stats: {}'.format(dist_good_stats.show()))
+            self.logger.log('Distance bad stats: {}'.format(dist_bad_stats.show()))
+            self.logger.log('Quality good stats: {}'.format(qual_good_stats.show()))
+            self.logger.log('Quality bad stats: {}'.format(qual_bad_stats.show()))
             self.logger.log('')
             self.draw_timing()
             self.logger.pop()
@@ -662,7 +735,7 @@ class Finder:
 
         def get_found_mark(detection, found_marks, mark):
             """ get the identified found mark """
-            if found_marks[mark] is None or len(found_marks[mark]) == 0:
+            if found_marks[mark] is None:
                 # there isn't one here
                 return None
             found_mark_number = found_marks[mark][0][0]
@@ -704,8 +777,8 @@ class Finder:
             return columns
 
         self.code_grids = []
-        for detection in self.filter_timing():
-            top, right, bottom, left, corner = self.matched_timing[detection]
+        for detection, matches in self.filter_timing():
+            top, right, bottom, left, corner = matches
             top_ref, right_ref, bottom_ref, left_ref, corner_ref = self.expected_timing[detection]
             # region calculate actual bottom right refs from the discovered corner
             br = get_found_mark(detection, corner, 0)
@@ -718,7 +791,7 @@ class Finder:
             right_cols  = make_columns(detection, right,  right_ref)
             bottom_cols = make_columns(detection, bottom, bottom_ref)
             left_cols   = make_columns(detection, left,   left_ref)
-            self.code_grids.append([top_cols, right_cols, bottom_cols, left_cols])
+            self.code_grids.append([detection, top_cols, right_cols, bottom_cols, left_cols])
 
         if self.logger is not None:
             self.logger.push('grids')
@@ -739,55 +812,23 @@ class Finder:
             # already done it
             return self.code_cells
 
-        def intersect(l1_start, l1_end, l2_start, l2_end):
-            # the cells are at the crossing points of the grid lines, we know where each line starts and end, so we can
-            # use determinants to find each intersection (see https://en.wikipedia.org/wiki/Line-line_intersection)
-            # intersection (Px,Py) between two non-parallel lines (x1,y1 -> x2,y2) and (x3,y3 -> x4,y4) is:
-            #   Px = (x1y2 - y1x2)(x3-x4) - (x1-x2)(x3y4 - y3x4)
-            #        -------------------------------------------
-            #             (x1-x2)(y3-y4) - (y1-y2)(x3-x4)
-            #
-            #   Py = (x1y2 - y1x2)(y3-y4) - (y1-y2)(x3y4 - y3x4)
-            #        -------------------------------------------
-            #             (x1-x2)(y3-y4) - (y1-y2)(x3-x4)
-            x1        = l1_start[0]
-            y1        = l1_start[1]
-            x2        = l1_end  [0]
-            y2        = l1_end  [1]
-            x3        = l2_start[0]
-            y3        = l2_start[1]
-            x4        = l2_end  [0]
-            y4        = l2_end  [1]
-            x1y2      = x1 * y2
-            y1x2      = y1 * x2
-            x3y4      = x3 * y4
-            y3x4      = y3 * x4
-            x3_x4     = x3 - x4
-            x1_x2     = x1 - x2
-            y3_y4     = y3 - y4
-            y1_y2     = y1 - y2
-            x1y2_y1x2 = x1y2 - y1x2
-            x3y4_y3x4 = x3y4 - y3x4
-            divisor   = (x1_x2 * y3_y4) - (y1_y2 * x3_x4)
-            Px        = ((x1y2_y1x2 * x3_x4) - (x1_x2 * x3y4_y3x4)) / divisor
-            Py        = ((x1y2_y1x2 * y3_y4) - (y1_y2 * x3y4_y3x4)) / divisor
-            return Px, Py
-
         self.code_cells = []
-        for top, right, bottom, left in self.grids():
+        for detection, top, right, bottom, left in self.grids():
+            size = self.get_image_size(detection)
+            box  = ((0,0), (size[0]-1, size[1]-1))  # x,y limits for extend
             code_rows = []
-            code_rows.append(top)  # first row is the top edge
-            for row in range(1, len(left)-1):
+            for row in range(len(left)):
                 cells = []
-                cells.append(left[row])  # first cell is left edge
-                for col in range(1, len(top)-1):
-                    cell = intersect(top[col], bottom[col], left[row], right[row])  # cell is at intersection
+                #cells.append(left[row])  # first cell is left edge
+                #for col in range(1, len(top)-1):
+                for col in range(len(top)):
+                    line1  = utils.extend(top[col], bottom[col], box)  # extend to image edge
+                    line2  = utils.extend(left[row], right[row], box)  # ..to ensure they always intersect
+                    cell   = utils.intersection(line1, line2)          # cell is at intersection
                     radius = (top[col][2] + bottom[col][2] + left[row][2] + right[row][2]) / 4  # radius is average
                     # ToDo: is average the best option? what about min? what about cells that overlap?
                     cells.append([cell[0], cell[1], radius, None])
-                cells.append(right[row])  # last cell is right edge
                 code_rows.append(cells)
-            code_rows.append(bottom)  # last row is the bottom edge
             self.code_cells.append(code_rows)
         if self.logger is not None:
             self.logger.push('cells')
@@ -799,7 +840,7 @@ class Finder:
         """ get the sub-images for all the accepted detections """
         if self.good_images is None:
             self.good_images = []
-            for detection in self.filter_timing():
+            for detection, _ in self.filter_timing():
                 self.good_images.append(self.get_grayscale(detection))
         return self.good_images
 
@@ -857,10 +898,10 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png'
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('finder.log', 'finder/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test(src, proximity, blur=const.BLUR_KERNEL_SIZE, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

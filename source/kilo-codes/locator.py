@@ -51,13 +51,7 @@ class Detection:
 
     MARGIN_SCALE = 1.2  # scale factor from the maximum blob radius to the enclosing box edges
 
-    @staticmethod
-    def constrain(value, min_value, max_value):
-        """ constrain the given value (as an int) to be between the given min/max (int) limits """
-        value = int(min(max(int(round(value)), min_value), max_value))
-        return value
-
-    def __init__(self, rectangle, image_width, image_height):
+    def __init__(self, rectangle, image_width, image_height, br_radius_scale):
         """ rectangle is as created by Locator.rectangles() - 4 blob of x,y,radius,label,
             image width/height is used to constrain the enclosing box for detections close to the image edges
             the rectangle co-ordinates may be fractional, the box co-ordinates are not
@@ -67,27 +61,33 @@ class Detection:
         self.br = rectangle[2]
         self.bl = rectangle[3]
         self.sq = rectangle[5]  # maybe used as a discriminator downstream
-        min_x = self.min_image_xy(image_width,  Locator.X_COORD)
-        max_x = self.max_image_xy(image_width,  Locator.X_COORD)
-        min_y = self.min_image_xy(image_height, Locator.Y_COORD)
-        max_y = self.max_image_xy(image_height, Locator.Y_COORD)
+        min_x = self.min_image_xy(image_width,  Locator.X_COORD, br_radius_scale)
+        max_x = self.max_image_xy(image_width,  Locator.X_COORD, br_radius_scale)
+        min_y = self.min_image_xy(image_height, Locator.Y_COORD, br_radius_scale)
+        max_y = self.max_image_xy(image_height, Locator.Y_COORD, br_radius_scale)
         self.box_tl = (min_x, min_y)
         self.box_br = (max_x, max_y)
+
+    @staticmethod
+    def constrain(value, min_value, max_value):
+        """ constrain the given value (as an int) to be between the given min/max (int) limits """
+        value = int(min(max(int(round(value)), min_value), max_value))
+        return value
 
     def apply_margin(self, base, scale):
         return base + (scale * Detection.MARGIN_SCALE)
 
-    def min_image_xy(self, limit, xy):
+    def min_image_xy(self, limit, xy, scale):
         min_tl = self.apply_margin(self.tl[xy], -self.tl[Locator.R_COORD]) - 1
         min_tr = self.apply_margin(self.tr[xy], -self.tr[Locator.R_COORD]) - 1
-        min_br = self.apply_margin(self.br[xy], -self.br[Locator.R_COORD]) - 1
+        min_br = self.apply_margin(self.br[xy], -self.br[Locator.R_COORD]/scale) - 1
         min_bl = self.apply_margin(self.bl[xy], -self.bl[Locator.R_COORD]) - 1
         return Detection.constrain(min(min_tl, min_tr, min_br, min_bl), 0, limit-1)
 
-    def max_image_xy(self, limit, xy):
+    def max_image_xy(self, limit, xy, scale):
         max_tl = self.apply_margin(self.tl[xy], self.tl[Locator.R_COORD])
         max_tr = self.apply_margin(self.tr[xy], self.tr[Locator.R_COORD])
-        max_br = self.apply_margin(self.br[xy], self.br[Locator.R_COORD])
+        max_br = self.apply_margin(self.br[xy], self.br[Locator.R_COORD]/scale)
         max_bl = self.apply_margin(self.bl[xy], self.bl[Locator.R_COORD])
         return Detection.constrain(max(max_tl, max_tr, max_br, max_bl), 0, limit-1)
 
@@ -571,7 +571,7 @@ class Locator:
             if rectangle is None:
                 # this one has been dumped
                 continue
-            self.detections.append(Detection(rectangle, width, height))
+            self.detections.append(Detection(rectangle, width, height, Locator.TIMING_SCALE))
         return self.detections
 
     def get_dropped(self):
@@ -660,13 +660,14 @@ def show_results(params, locator, logger):
         draw_rectangle(image, tl, tr, br, bl, colours=(const.OLIVE, const.OLIVE, const.OLIVE, const.OLIVE))
     detections = locator.get_detections(max_x, max_y)
     logger.log('{} detections:'.format(len(detections)))
-    for detection in detections:
-        logger.log('  rectangle: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
-                   format(detection.tl[0], detection.tl[1],
+    for d, detection in enumerate(detections):
+        logger.log('Detection {}:  rectangle: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'.
+                   format(d,
+                          detection.tl[0], detection.tl[1],
                           detection.tr[0], detection.tr[1],
                           detection.br[0], detection.br[1],
                           detection.bl[0], detection.bl[1]))
-        logger.log('    enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
+        logger.log('  enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
                    format(detection.box_tl[0], detection.box_tl[1], detection.box_br[0], detection.box_br[1],
                           detection.sq))
         canvas.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
@@ -676,7 +677,7 @@ def show_results(params, locator, logger):
         canvas.settext(src_image, '{}x{}y'.format(origin[0], origin[1]), (origin[0],origin[1]-2), colour=const.GREEN)
         folder = utils.image_folder(target=origin)
         logger.push(folder=folder)
-        logger.draw(src_image, file='source')
+        logger.draw(src_image, file='source', prefix='  ')
         logger.pop()
     logger.draw(image, file='locators')
 
@@ -731,11 +732,11 @@ def _test(src, proximity, blur, mode, logger, params=None, create_new=True):
 if __name__ == "__main__":
     """ test harness """
 
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png"
     src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('locator.log', 'locator/{}'.format(utils.image_folder(src)))
 
-    _test(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test(src, proximity, blur=const.BLUR_KERNEL_SIZE, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

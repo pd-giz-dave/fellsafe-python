@@ -130,65 +130,6 @@ def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
 
     return points
 
-def line(x0: int, y0: int, x1: int, y1: int) -> [(int, int)]:
-    """ return a list of points that represent all pixels between x0,y0 and x1,y1 in the order x0,x0 -> x1,y1 """
-
-    # see https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm for the algorithm implemented here
-
-    points = []
-
-    def line_low(x0, y0, x1, y1):
-        # x0 <= x1 and slope <=1 guaranteed to get here
-        dx = x1 - x0
-        dy = y1 - y0
-        yi = 1
-        if dy < 0:
-            yi = -1
-            dy = -dy
-        D = (2 * dy) - dx
-        y = y0
-        for x in range(x0, x1+1):
-            points.append((x, y))
-            if D > 0:
-                y = y + yi
-                D = D + (2 * (dy - dx))
-            else:
-                D = D + 2 * dy
-    def line_high(x0, y0, x1, y1):
-        # y0 <= y1 and slope <=1 guaranteed to get here
-        dx = x1 - x0
-        dy = y1 - y0
-        xi = 1
-        if dx < 0:
-            xi = -1
-            dx = -dx
-        D = (2 * dx) - dy
-        x = x0
-        for y in range(y0, y1+1):
-            points.append((x, y))
-            if D > 0:
-                x = x + xi
-                D = D + (2 * (dx - dy))
-            else:
-                D = D + 2 * dx
-
-    if abs(y1 - y0) < abs(x1 - x0):
-        if x0 > x1:
-            line_low(x1, y1, x0, y0)
-            points.reverse()
-        else:
-            line_low(x0, y0, x1, y1)
-    else:
-        if y0 > y1:
-            line_high(x1, y1, x0, y0)
-            points.reverse()
-        else:
-            line_high(x0, y0, x1, y1)
-    return points
-
-def show_point(point):
-    return "({:.2f}, {:.2f})".format(point[0], point[1])
-
 class Circle:
 
     def __init__(self, centre: (float, float), radius: float):
@@ -301,13 +242,13 @@ class Contour:
         if self.points is None:
             return "None"
         first_line = 'start:{}, box:{}..{}, size:{}, points:{}, small:{}'.\
-                     format(show_point(self.points[0]),
-                            show_point(self.get_enclosing_box()[0]), show_point(self.get_enclosing_box()[1]),
-                            show_point(self.get_size()), len(self.points), self.small)
+                     format(utils.show_point(self.points[0]),
+                            utils.show_point(self.get_enclosing_box()[0]), utils.show_point(self.get_enclosing_box()[1]),
+                            utils.show_point(self.get_size()), len(self.points), self.small)
         if not verbose:
             return first_line
         second_line = 'centroid:{}, offsetness:{:.2f}, squareness:{:.2f}, wavyness:{:.2f}'.\
-                      format(show_point(self.get_centroid()), self.get_offsetness(),
+                      format(utils.show_point(self.get_centroid()), self.get_offsetness(),
                              self.get_squareness(), self.get_wavyness())
         return '{}\n{}{}'.format(first_line, prefix, second_line)
 
@@ -534,6 +475,9 @@ class Blob:
         self.box_white = None
         self.circle_black = None
         self.circle_white = None
+        self.thickness = None  # property set externally, ratio of box size to average contour thickness
+        self.sameness  = None  # property set externally, luminance level change across contour edge as fraction of max
+        self.splitness = None  # property set externally, how many times the blob was split
 
     def add_contour(self, contour: Contour):
         """ add a contour to the blob, the first contour is the external one,
@@ -559,14 +503,21 @@ class Blob:
             if verbose is True a multi-line response is made that describes all properties,
             lines after the first are prefixed by prefix
             """
-        header = "label:{}".format(self.label)
+        header = "label:{}({})".format(self.label, self.rejected)
         if self.external is None:
             return header
         body = '{}, {}'.format(header, self.external.show(verbose, prefix))
         if verbose:
             size = self.get_size()
-            body = '{}\n{}internals:{}, blob_pixels:{}, box_pixels:{}, size:{:.2f}'.\
-                   format(body, prefix, len(self.internal), self.get_blob_pixels(), self.get_box_pixels(), size)
+            size = (size[0] + size[1]) / 2
+            body = '{}\n{}internals:{}, blob_pixels:{}, box_pixels:{}, size:{:.2f}, ' \
+                   'blackness:{}, whiteness:{}, thickness:{}, sameness:{}, splitness:{}'.\
+                   format(body, prefix, len(self.internal),
+                          self.get_blob_pixels(), self.get_box_pixels(), size,
+                          utils.show_number(self.get_blackness()),
+                          utils.show_number(self.get_whiteness()),
+                          utils.show_number(self.thickness), utils.show_number(self.sameness),
+                          utils.show_number(self.splitness))
         return body
 
     def get_blob_pixels(self):
@@ -593,11 +544,10 @@ class Blob:
         return self.box_black, self.box_white
 
     def get_size(self) -> float:
-        """ the size of a blob is the average of the width + height of the bounding box """
+        """ get the width and height of the bounding box """
         if self.external is None:
             return None
-        w, h = self.external.get_size()
-        return (w + h) / 2
+        return self.external.get_size()
 
     def get_perimeter(self):
         """ get the unique points around the blob perimeter as a list of x,y points in clockwise order """
@@ -612,10 +562,22 @@ class Blob:
             return None
         return self.external.points  # NB: relying on contours being 'clockwise' followed
 
+    def get_enclosing_circle(self) -> Circle:
+        """ get the enclosing circles of the blob contour """
+        if self.external is None:
+            return None
+        return self.external.get_enclosing_circle(self.mode)
+
     def get_quality_stats(self):
         """ get all the 'quality' statistics for a blob """
-        return self.get_squareness(), self.get_wavyness(),\
-               self.get_whiteness(), self.get_blackness(), self.get_offsetness()
+        return (self.get_squareness(),'squareness'), \
+               (self.get_wavyness()  ,'wayness'   ), \
+               (self.get_whiteness() ,'whiteness' ), \
+               (self.get_blackness() ,'blackness' ), \
+               (self.get_offsetness(),'offsetness'), \
+               (self.thickness       ,'thickness' ), \
+               (self.sameness        ,'sameness'  ), \
+               (self.splitness       ,'splitness' )
 
     def get_circle_pixels(self):
         """ get the total white area and black area within the enclosing circle """
@@ -706,7 +668,7 @@ class Blob:
         # join the ends by adding more points from the end to the start
         start_x, start_y = points[start]
         end_x  , end_y   = points[end  ]
-        join = line(end_x, end_y, start_x, start_y)
+        join = utils.line(end_x, end_y, start_x, start_y)
         # NB: join will contain the first and last point, which we do not want
         for sample in range(1, len(join)-1):
             contour.add_point(join[sample])
@@ -733,36 +695,3 @@ class Labels:
         else:
             # no such label
             return None
-
-def test_line(x0, y0, x1, y1, name):
-    points = line(x0, y0, x1, y1)
-    if points[0] == (x0, y0) and points[-1] == (x1, y1):
-        prefix = '____pass____'
-    else:
-        prefix = '****FAIL****'
-    logger.log('  {}: {:4} {:3}x, {:3}y  -->  {:3}x, {:3}y = {}'.format(prefix, name, x0, y0, x1, y1, points))
-
-if __name__ == "__main__":
-    """ testing """
-
-    logger = utils.Logger('shapes.log', 'shapes')
-    logger.log('Shapes')
-
-    logger.log('')
-    logger.log('Test line()...')
-    test_line(0,0,   0,-10, 'N')
-    test_line(0,0,   3,-10, 'NNE')
-    test_line(0,0,  10,-10, 'NE')
-    test_line(0,0,  10, -3, 'ENE')
-    test_line(0,0,  10,  0, 'E')
-    test_line(0,0,  10,  3, 'ESE')
-    test_line(0,0,  10, 10, 'SE')
-    test_line(0,0,   3, 10, 'SSE')
-    test_line(0,0,   0, 10, 'S')
-    test_line(0,0,  -3, 10, 'SSW')
-    test_line(0,0, -10,-10, 'SW')
-    test_line(0,0, -10, -3, 'WSW')
-    test_line(0,0, -10,  0, 'W')
-    test_line(0,0, -10, -3, 'WNW')
-    test_line(0,0, -10,-10, 'NW')
-    test_line(0,0,  -3,-10, 'NNW')

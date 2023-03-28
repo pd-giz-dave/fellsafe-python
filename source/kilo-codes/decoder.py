@@ -287,7 +287,7 @@ def _test_decoder(logger):
 if __name__ == "__main__":
     """ test harness """
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
@@ -298,4 +298,4 @@ if __name__ == "__main__":
     #_test_decoder(logger)
 
     # test whole pipeline
-    _test_pipeline(src, proximity, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)
+    _test_pipeline(src, proximity, blur=const.BLUR_KERNEL_SIZE, mode=const.RADIUS_MODE_MEAN, logger=logger, create_new=False)

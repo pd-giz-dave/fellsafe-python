@@ -290,7 +290,7 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 
@@ -315,4 +315,4 @@ if __name__ == "__main__":
     logger = utils.Logger('contours.log', 'contours/{}'.format(utils.image_folder(src)))
 
     _test(src, size=const.VIDEO_2K, proximity=proximity, black=const.BLACK_LEVEL[proximity],
-          inverted=True, blur=3, mode=const.RADIUS_MODE_MEAN, logger=logger)
+          inverted=True, blur=const.BLUR_KERNEL_SIZE, mode=const.RADIUS_MODE_MEAN, logger=logger)

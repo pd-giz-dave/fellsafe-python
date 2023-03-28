@@ -47,6 +47,8 @@ VIDEO_2K = 1152
 VIDEO_4K = 2160
 # endregion
 
+BLUR_KERNEL_SIZE = 3  # 0==do not blur, helps in dropping large numbers of small anomalies
+
 # region Debug options...
 DEBUG_NONE = 0  # no debug output
 DEBUG_IMAGE = 1  # just write debug annotated image files
@@ -72,26 +74,32 @@ RADIUS_MODES        = 3  # count of the number of modes
 # region Reject codes for blobs being ignored...
 REJECT_NONE       = 'accepted'
 REJECT_SPLIT      = 'split at bottleneck'
+REJECT_SPLITS     = 'too many splits'
+REJECT_SAMENESS   = 'too much sameness across contour edge'
+REJECT_THICKNESS  = 'thickness too different to box size'
 REJECT_TOO_SMALL  = 'size below minimum'
 REJECT_TOO_BIG    = 'size above maximum'
 REJECT_INTERNALS  = 'too many internal contours'
-REJECT_WHITENESS  = 'not enough circle white'
-REJECT_BLACKNESS  = 'not enough box white'
-REJECT_SQUARENESS = 'not square enough'
-REJECT_WAVYNESS   = 'perimeter too wavy'
-REJECT_OFFSETNESS = 'centroid too offset'
+REJECT_WHITENESS  = 'not enough circle whiteness'
+REJECT_BLACKNESS  = 'too much box blackness'
+REJECT_SQUARENESS = 'not enough box squareness'
+REJECT_WAVYNESS   = 'too much perimeter wavyness'
+REJECT_OFFSETNESS = 'too much centroid offsetness'  # deprecated
 # region and their colours when being drawn...
-REJECT_COLOURS = {REJECT_NONE:       (LIME   , 'lime'   ),
-                  REJECT_SPLIT:      (RED    , 'red'    ),
-                  REJECT_TOO_SMALL:  (YELLOW , 'yellow' ),
-                  REJECT_TOO_BIG:    (YELLOW , 'yellow' ),
-                  REJECT_WHITENESS:  (MAROON , 'maroon' ),
-                  REJECT_BLACKNESS:  (CYAN   , 'cyan'   ),
-                  REJECT_INTERNALS:  (OLIVE  , 'olive'  ),
-                  REJECT_SQUARENESS: (NAVY   , 'navy'   ),
-                  REJECT_WAVYNESS:   (MAGENTA, 'magenta'),
-                  REJECT_OFFSETNESS: (ORANGE , 'orange' ),
-                 }
+REJECT_COLOURS = {REJECT_NONE:       (LIME    , 'lime'    ),
+                  REJECT_SPLIT:      (PALE_RED, 'pale red'),
+                  REJECT_SPLITS:     (RED     , 'red'     ),
+                  REJECT_TOO_SMALL:  (YELLOW  , 'yellow'  ),
+                  REJECT_TOO_BIG:    (YELLOW  , 'yellow'  ),
+                  REJECT_WHITENESS:  (MAROON  , 'maroon'  ),
+                  REJECT_BLACKNESS:  (PINK    , 'pink'    ),
+                  REJECT_INTERNALS:  (OLIVE   , 'olive'   ),
+                  REJECT_SQUARENESS: (NAVY    , 'navy'    ),
+                  REJECT_WAVYNESS:   (MAGENTA , 'magenta' ),
+                  REJECT_OFFSETNESS: (ORANGE  , 'orange'  ),  # deprecated
+                  REJECT_THICKNESS:  (ORANGE  , 'orange'  ),
+                  REJECT_SAMENESS:   (CYAN    , 'cyan'    ),
+                  }
 # endregion
 # endregion
 

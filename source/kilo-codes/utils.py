@@ -65,7 +65,7 @@ class Logger:
     def depth(self):
         return len(self.context)
 
-    def draw(self, image, folder='', file='', ext='png'):
+    def draw(self, image, folder='', file='', ext='png', prefix=''):
         """ unload the given image into the given folder and file,
             folder, iff given, is a sub-folder to save it in (its created as required),
             the parent folder is that given when the logger was created,
@@ -78,7 +78,7 @@ class Logger:
         # save the image
         canvas.unload(image, filename)
 
-        self.log('{}: image saved as: {}'.format(file, filename))
+        self.log('{}{}: image saved as: {}'.format(prefix, file, filename))
         
     def makepath(self, folder='', file='', ext='png'):
         """ make the required folder and return the fully qualified file name """
@@ -241,6 +241,15 @@ def image_folder(source=None, target=(0,0)):
         folder = '{}{}'.format(basename, folder)
     return folder
 
+def show_number(number, how='{:.2f}'):
+    if number is None:
+        return 'None'
+    else:
+        return how.format(number)
+
+def show_point(point, how='{:.2f}'):
+    return "({}, {})".format(show_number(point[0], how), show_number(point[1], how))
+
 def distance(here, there) -> float:
     """ calculate the distance between the two given points,
         returns the distance squared,
@@ -252,3 +261,343 @@ def distance(here, there) -> float:
     distance_y *= distance_y
     distance    = distance_x + distance_y
     return distance
+
+def ratio(a, b):
+    """ return the ratio of a/b or b/a whichever is smaller,
+        this provides a measure of how close to each other the two numbers are,
+        the nearer to 1 the ratio is the closer the numbers are to each other
+        """
+    if a == 0 and b == 0:
+        # special case, we're looking for 'sameness' and 0 is the same as 0
+        return 1
+    result = min(a, b) / max(a, b)  # range 0..1, 0=distant, 1=close
+    return result
+
+def line(x0: int, y0: int, x1: int, y1: int) -> [(int, int)]:
+    """ return a list of points that represent all pixels between x0,y0 and x1,y1 in the order x0,x0 -> x1,y1 """
+
+    # see https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm for the algorithm implemented here
+
+    points = []
+
+    def line_low(x0, y0, x1, y1):
+        # x0 <= x1 and slope <=1 guaranteed to get here
+        dx = x1 - x0
+        dy = y1 - y0
+        yi = 1
+        if dy < 0:
+            yi = -1
+            dy = -dy
+        D = (2 * dy) - dx
+        y = y0
+        for x in range(x0, x1+1):
+            points.append((x, y))
+            if D > 0:
+                y = y + yi
+                D = D + (2 * (dy - dx))
+            else:
+                D = D + 2 * dy
+    def line_high(x0, y0, x1, y1):
+        # y0 <= y1 and slope <=1 guaranteed to get here
+        dx = x1 - x0
+        dy = y1 - y0
+        xi = 1
+        if dx < 0:
+            xi = -1
+            dx = -dx
+        D = (2 * dx) - dy
+        x = x0
+        for y in range(y0, y1+1):
+            points.append((x, y))
+            if D > 0:
+                x = x + xi
+                D = D + (2 * (dx - dy))
+            else:
+                D = D + 2 * dx
+
+    if abs(y1 - y0) < abs(x1 - x0):
+        if x0 > x1:
+            line_low(x1, y1, x0, y0)
+            points.reverse()
+        else:
+            line_low(x0, y0, x1, y1)
+    else:
+        if y0 > y1:
+            line_high(x1, y1, x0, y0)
+            points.reverse()
+        else:
+            line_high(x0, y0, x1, y1)
+    return points
+
+def intersection(line1, line2):
+    """ find the intersection point between line1 and line2, each line is a tuple pair of start/end points """
+    l1_start, l1_end = line1
+    l2_start, l2_end = line2
+    # the cells are at the crossing points of the grid lines, we know where each line starts and end, so we can
+    # use determinants to find each intersection (see https://en.wikipedia.org/wiki/Line-line_intersection)
+    # intersection (Px,Py) between two non-parallel lines (x1,y1 -> x2,y2) and (x3,y3 -> x4,y4) is:
+    #   Px = (x1y2 - y1x2)(x3-x4) - (x1-x2)(x3y4 - y3x4)
+    #        -------------------------------------------
+    #             (x1-x2)(y3-y4) - (y1-y2)(x3-x4)
+    #
+    #   Py = (x1y2 - y1x2)(y3-y4) - (y1-y2)(x3y4 - y3x4)
+    #        -------------------------------------------
+    #             (x1-x2)(y3-y4) - (y1-y2)(x3-x4)
+    x1 = l1_start[0]
+    y1 = l1_start[1]
+    x2 = l1_end[0]
+    y2 = l1_end[1]
+    x3 = l2_start[0]
+    y3 = l2_start[1]
+    x4 = l2_end[0]
+    y4 = l2_end[1]
+    x1y2 = x1 * y2
+    y1x2 = y1 * x2
+    x3y4 = x3 * y4
+    y3x4 = y3 * x4
+    x3_x4 = x3 - x4
+    x1_x2 = x1 - x2
+    y3_y4 = y3 - y4
+    y1_y2 = y1 - y2
+    x1y2_y1x2 = x1y2 - y1x2
+    x3y4_y3x4 = x3y4 - y3x4
+    divisor = (x1_x2 * y3_y4) - (y1_y2 * x3_x4)
+    Px = ((x1y2_y1x2 * x3_x4) - (x1_x2 * x3y4_y3x4)) / divisor
+    Py = ((x1y2_y1x2 * y3_y4) - (y1_y2 * x3y4_y3x4)) / divisor
+    return Px, Py
+
+def extend(start, end, box):
+    """ extend the given line segment such that its ends meet the box walls """
+
+    (xmin, ymin), (xmax, ymax) = box
+    x1 = start[0]  # do it like this 'cos start/end may be a tuple with more then 2 fields
+    y1 = start[1]  # ..
+    x2 = end[0]    # ....
+    y2 = end[1]    # ......
+
+    # sanity check
+    if min(x1, x2) < xmin or max(x1, x2) > xmax or min(y1, y2) < ymin or max(y1, y2) > ymax:
+        raise Exception('line segment {} -> {} not within box {} x {}'.
+                        format(show_point(start), show_point(end), show_point(box[0]), show_point(box[1])))
+
+    # deal with vertical and horizontal
+    if x1 == x2:
+        # vertical line
+        if y1 < y2:
+            # heading to the bottom
+            return (x1, ymin), (x2, ymax)
+        elif y1 > y2:
+            # heading to the top
+            return (x1, ymax), (x2, ymin)
+    elif y1 == y2:
+        # horizontal line
+        if x1 < x2:
+            # heading to the right
+            return (xmin, y1), (xmax, y2)
+        else:
+            # heading to the left
+            return (xmax, y1), (xmin, y2)
+
+    def extend_down(x1, y1, x2, y2):
+        # heading towards bottom-right
+        # we use similar triangles to work it out, like so:
+        #  _____
+        #  ^ ^ *                               Line segment is x--x
+        #  | | |\                              Extending upwards to X-min and downwards to X-max reaches *
+        #  D'| | \                             By similar triangles A/B = E/F = E'/F' = C/D = C'/D'
+        #  | | |C'\           X-max
+        #  v | +---\------------+    Y-min
+        #    D |    \           |
+        #    | |  C  \  A       |
+        #    v +------X--+      |
+        #      |       \ | B    |
+        #      |        \|      |
+        #      |         X------+ ^
+        #      |          \  E  | |
+        #      |           \    | F
+        #      +------------\---+ | ^ Y-max
+        #    X-min           \E'| | |
+        #                     \ | | F'
+        #                      \| | |
+        #                       * v v
+        #                       _____
+        dx = x2 - x1
+        dy = y2 - y1
+        slope = dx / dy
+        # dx = A, dy = B, E = xmax-x2, so A/B = E/F, slope = A/B, F * slope = E, F = E / slope
+        y_at_xmax = y2 + ((xmax - x2) / slope)
+        if y_at_xmax > ymax:
+            # overshot, so back up to ymax, F' = (y2 + F) - ymax, E'/F' = A/B, E' = (A/B)*F'
+            x_at_ymax = xmax - slope * (y_at_xmax - ymax)
+            end = x_at_ymax, ymax
+        else:
+            end = xmax, y_at_xmax
+        # C = x1-xmin, A/B = C/D, D = C / (A/b)
+        y_at_xmin = y1 - ((x1 - xmin) / slope)
+        if y_at_xmin < xmin:
+            # overshot, so back up to ymin (NB: y_at_xmin may go -ve, hence the abs() below)
+            x_at_ymin = xmin + (slope * abs(y_at_xmin - xmin))  # A/B = C'/D', D'= D - X-min, so C' = (A/B) * D'
+            start = x_at_ymin, ymin
+        else:
+            start = xmin, y_at_xmin
+        return start, end
+
+    def extend_up(x1, y1, x2, y2):
+        # heading towards top-right
+        # we use similar triangles to work it out, like so:
+        #  Line segment is x--x
+        #  Extending upwards to X-min and downwards to X-max reaches *
+        #  By similar triangles A/B = C/D = C'/D' = E/F = E'/F'
+        #                              _____
+        #                              * ^ ^
+        #                             /| | |
+        #                            / | | D'
+        #         X-min             /  | D |
+        #    Y-min  +--------------/---+ | v
+        #           |             / C' | |
+        #           |            /     | |
+        #           |           /  C   | |
+        #           |          X-------+ V
+        #           |         /|       |
+        #           |        / | B     |
+        #           |  E    /  |       |
+        #         ^ +------X---+       |
+        #         | |     /  A         |
+        #         | | E' /             |
+        #       ^ | +---/--------------+  Y-max
+        #       | F |  /             X-max
+        #       F'| | /
+        #       | | |/
+        #       v v *
+        #       -----
+        dx = x2 - x1
+        dy = y1 - y2
+        slope = dx / dy
+        # dx = A, dy = B, C = X-max - x2, A/B = C/D, slope = A/B, slope * D = C, D = C / slope
+        y_at_xmax = y2 - ((xmax - x2) / slope)
+        if y_at_xmax < ymin:  # NB: y_at_xmax may go -ve, hence the abs() below
+            # overshot, back up to ymin, D' = y_at_xmax - ymin, C'/D' = A/B, C' = (A/B)*D'
+            x_at_ymin = xmax - (slope * abs(y_at_xmax - ymin))
+            end = x_at_ymin, ymin
+        else:
+            end = xmax, y_at_xmax
+        # E = x1 - xmin, E/F = A/B, F * (A/B) = E, F = E / (A/B)
+        y_at_xmin = y1 + ((x1 - xmin) / slope)
+        if y_at_xmin > ymax:
+            # overshot, back up to ymax, F' = F - ymax, E'/F' = A/B, E' = (A/B) * F'
+            x_at_ymax = xmin + (slope * (y_at_xmin - ymax))
+            start = x_at_ymax, ymax
+        else:
+            start = xmin, y_at_xmin
+        return start, end
+
+    # which corner is the line heading towards?
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx > 0 and dy > 0:
+        # heading towards bottom-right
+        return extend_down(x1, y1, x2, y2)
+    elif dx < 0 and dy < 0:
+        # heading towards top-left - same as bottom-right with start,end reversed
+        start, end = extend_down(x2, y2, x1, y1)
+        return end, start
+    elif dx < 0 and dy > 0:
+        # heading towards bottom-left - same as top-right with start,end reversed
+        start, end = extend_up(x2, y2, x1, y1)
+        return end, start
+    else:  # dx > 0 and dy < 0
+        # heading towards top-right
+        return extend_up(x1, y1, x2, y2)
+
+
+##################################################################
+########################### TESTING ##############################
+##################################################################
+
+def test_line(x0, y0, x1, y1, name):
+    points = line(x0, y0, x1, y1)
+    if points[0] == (x0, y0) and points[-1] == (x1, y1):
+        prefix = '____pass____'
+    else:
+        prefix = '****FAIL****'
+    logger.log('  {}: {:4} {:3}x, {:3}y  -->  {:3}x, {:3}y = {}'.format(prefix, name, x0, y0, x1, y1, points))
+
+def test_extend(start, end, box, name, expect_start, expect_end, error_allowed_squared=1):
+    extended_start, extended_end = extend(start, end, box)
+    error_start_x = extended_start[0] - expect_start[0]
+    error_start_x *= error_start_x
+    error_start_y = extended_start[1] - expect_start[1]
+    error_start_y *= error_start_y
+    error_end_x = extended_end[0] - expect_end[0]
+    error_end_x *= error_end_x
+    error_end_y = extended_end[1] - expect_end[1]
+    error_end_y *= error_end_y
+    if error_start_x <= error_allowed_squared and \
+       error_end_x   <= error_allowed_squared and \
+       error_start_y <= error_allowed_squared and \
+       error_end_y   <= error_allowed_squared:
+        prefix = '____pass____'
+    else:
+        prefix = '****FAIL****'
+    logger.log('  {}: {} {} -> {} extends to {} -> {} for box {} x {} (expect {} -> {})'.
+               format(prefix, name,
+                      show_point(start), show_point(end),
+                      show_point(extended_start), show_point(extended_end),
+                      show_point(box[0]), show_point(box[1]),
+                      show_point(expect_start), show_point(expect_end)))
+
+if __name__ == "__main__":
+    """ testing """
+
+    logger = Logger('utils.log', 'utils')
+    logger.log('Utils')
+
+    # region test_line...
+    logger.log('')
+    logger.log('Test line()...')
+    test_line(0,0,   0,-10, 'N')
+    test_line(0,0,   3,-10, 'NNE')
+    test_line(0,0,  10,-10, 'NE')
+    test_line(0,0,  10, -3, 'ENE')
+    test_line(0,0,  10,  0, 'E')
+    test_line(0,0,  10,  3, 'ESE')
+    test_line(0,0,  10, 10, 'SE')
+    test_line(0,0,   3, 10, 'SSE')
+    test_line(0,0,   0, 10, 'S')
+    test_line(0,0,  -3, 10, 'SSW')
+    test_line(0,0, -10,-10, 'SW')
+    test_line(0,0, -10, -3, 'WSW')
+    test_line(0,0, -10,  0, 'W')
+    test_line(0,0, -10, -3, 'WNW')
+    test_line(0,0, -10,-10, 'NW')
+    test_line(0,0,  -3,-10, 'NNW')
+    # endregion
+
+    # region test_extend...
+    logger.log('')
+    logger.log('Test extend()...')
+    tl = (5,5)
+    tr = (14,5)
+    br = (14,14)
+    bl = (5,14)
+    box = (tl,br)
+    test_extend((6,6), (7,7), box, 'diagonal++', tl, br)
+    test_extend((7,7), (6,6), box, 'diagonal--', br, tl)
+    test_extend((12,7), (13,6), box, 'diagonal+-', bl, tr)
+    test_extend((13,6), (12,7), box, 'diagonal-+', tr, bl)
+    test_extend((6,9), (6,10), box, 'vertical+', (6,5),(6,14))
+    test_extend((6, 10), (6, 9), box, 'vertical-', (6, 14), (6, 5))
+    test_extend((9, 10), (11, 10), box, 'horizontal+', (5, 10), (14, 10))
+    test_extend((11, 10), (9, 10), box, 'horizontal-', (14, 10), (5, 10))
+    test_extend((6,12), (8,13), box, 'shallow slope++low', (5,11), (9,14))
+    test_extend((8,13), (6,12), box, 'shallow slope--low', (9,14), (5,11))
+    test_extend((6, 13), (8, 12), box, 'shallow slope+-low', (5, 13), (14, 9))
+    test_extend((6, 7), (8, 8), box, 'shallow slope++high', (5, 6), (14, 11))
+    test_extend((8, 8), (6, 7), box, 'shallow slope--high', (14, 11), (5, 6))
+    test_extend((6, 7), (7, 10), box, 'steep slope++high', (5, 5), (8, 14))
+    test_extend((13,7), (12,5), box, 'steep slope--high', (14,9), (12,5))
+    test_extend((6,7), (7,5), box, 'steep slope+-high', (5,9), (7,5))
+    test_extend((7,5), (6,7), box, 'steep slope-+high', (7,5), (5,9))
+    # endregion
+
+    logger.log('...done')

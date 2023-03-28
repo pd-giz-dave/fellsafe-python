@@ -92,11 +92,7 @@ def blur(buffer, kernel_size):
     """ return the blurred image as a mean blur over the given kernel size """
     # we do this by integrating then calculating the average via integral differences,
     # this means we only visit each pixel once irrespective of the kernel size
-    if kernel_size is not None:
-        kernel_size = kernel_size | 1  # must be odd (so there is a centre)
-    else:
-        kernel_size = 0
-    if kernel_size < 3:
+    if kernel_size is None or kernel_size < 2:
         return buffer  # pointless
 
     # integrate the image
@@ -126,6 +122,22 @@ def blur(buffer, kernel_size):
 
     return blurred
 
+def get_box_corners(buffer, box=None):
+    """ get the co-ordinates of a box in the buffer """
+    buffer_min_x, buffer_min_y = (0, 0)
+    buffer_max_x, buffer_max_y = size(buffer)
+    if box is None:
+        box_min_x = buffer_min_x
+        box_max_x = buffer_max_x
+        box_min_y = buffer_min_y
+        box_max_y = buffer_max_y
+    else:
+        box_min_x = box[0][0]
+        box_max_x = box[1][0] + 1
+        box_min_y = box[0][1]
+        box_max_y = box[1][1] + 1
+    return (box_min_x, box_min_y), (box_max_x, box_max_y)
+
 def binarize(buffer, box=None, width: float=8, height: float=None, black: float=15, white: float=None):
     """ create a binary (or tertiary) image of the source image within the box using an adaptive threshold,
         if box is None the whole image is processed, otherwise just the area within the given box,
@@ -139,18 +151,7 @@ def binarize(buffer, box=None, width: float=8, height: float=None, black: float=
         """
 
     # region get the source and box metrics...
-    buffer_min_x, buffer_min_y = (0, 0)
-    buffer_max_x, buffer_max_y = size(buffer)
-    if box is None:
-        box_min_x = buffer_min_x
-        box_max_x = buffer_max_x
-        box_min_y = buffer_min_y
-        box_max_y = buffer_max_y
-    else:
-        box_min_x = box[0][0]
-        box_max_x = box[1][0] + 1
-        box_min_y = box[0][1]
-        box_max_y = box[1][1] + 1
+    (box_min_x, box_min_y), (box_max_x, box_max_y) = get_box_corners(buffer, box)
     box_width  = box_max_x - box_min_x
     box_height = box_max_y - box_min_y
     # endregion
@@ -209,6 +210,17 @@ def extract(image, box: ((int, int), (int, int))):
         for y in range(height):
             buffer[y, x] = image[tl_y + y, tl_x + x]
     return buffer
+
+def histogram(buffer, box=None):
+    """ build a histogram of luminance values in the given buffer (or the box within it) """
+    (tl_x, tl_y), (br_x, br_y) = get_box_corners(buffer, box)
+    width  = br_x - tl_x
+    height = br_y - tl_y
+    samples = [0 for _ in range(const.MAX_LUMINANCE+1)]
+    for x in range(width):
+        for y in range(height):
+            samples[buffer[tl_y + y, tl_x + x]] += 1
+    return samples
 
 def upsize(buffer, scale: float):
     """ return a buffer that is scale times bigger in width and height than that given,
@@ -371,6 +383,23 @@ def line(buffer, from_here, to_there, colour=0, thickness=1):
     """ draw a line as directed """
     buffer = incolour(buffer, colour)  # colourize iff required
     return cv2.line(buffer, make_int(from_here), make_int(to_there), colour, thickness)
+
+def grid(buffer, x_spacing=None, y_spacing=None, colour=0, thickness=1, labels=None, label_spacing=1, text_size=0.5):
+    """ draw grid lines as directed """
+    max_x, max_y = size(buffer)
+    if x_spacing is not None:
+        for x in range(0, max_x, x_spacing):
+            buffer = line(buffer, (x, 0), (x, max_y-1), colour=colour, thickness=thickness)
+            if labels is not None:
+                if (x % label_spacing) == 0:
+                    buffer = settext(buffer, '{}'.format(x), (x, max_y-1), colour=labels, size=text_size)
+    if y_spacing is not None:
+        for y in range(0, max_y, y_spacing):
+            buffer = line(buffer, (0, y), (max_x-1, y), colour=colour, thickness=thickness)
+            if labels is not None:
+                if (y % label_spacing) == 0:
+                    buffer = settext(buffer, '{}'.format(y), (0, y), colour=labels, size=text_size)
+    return buffer
 
 def plot(buffer, points, colour):
     """ plot the given points in the given colour """
