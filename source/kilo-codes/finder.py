@@ -32,13 +32,14 @@ class Finder:
     # these ratios have to be sloppy for small images 'cos 1 pixel diff can be huge with low resolution images
     # these ratios are indexed by the image size index (0=small, 1=medium, 2=large)
     MIN_RADIUS_RATIO = (0.2, 0.4, 0.6)  # min radius deviation from expected (1=perfect, 0=rubbish, 0.5=2:1)
-    MAX_DISTANCE_RATIO = (3.6, 3.5, 2.5)  # max distance between actual and expected mark as a multiple of expected radius
+    MAX_DISTANCE_RATIO = (3.6, 3.5, 3.0)  # max distance between actual and expected mark as a multiple of expected radius
     MIN_QUALITY_RATIO = (0.3, 0.3, 0.4)  # 'quality' is radius-error (1..0) times distance-error (1..0), 1 is best, 0 is worst
     DISTANCE_QUALITY_WEIGHT = 0.5  # weighting factor for the distance component of quality (must be <= 1)
     SIZE_QUALITY_WEIGHT = 1.0  # weighting factor for the size component of quality (must be <= 1)
     MATCH_METRIC_SCALE = 2  # the scale factor to apply to the above when matching (scale is 1 when filtering)
-    MIN_MARK_HITS = 6/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_MARK_HITS = 7/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     LOCATOR_MARGIN = 1 + TIMING_SCALE  # timing marks must be separated from locators by at least 1r
+    MIN_TIMING_MARK_GAP = 0.5  # minimum gap between timing marks as a fraction of their expected radii
     # endregion
     # region field offsets in a blob...
     X_COORD = locator.Locator.X_COORD
@@ -292,17 +293,20 @@ class Finder:
         params.source_file = self.source
         params.box = None
         params.integration_width = 2
-        params.black_threshold = 6  # ToDo: HACK-->10
+        params.black_threshold = 8  # ToDo: HACK-->10
         params.direct_neighbours = False
         params.inverted = True
         params.mode = const.RADIUS_MODE_MEAN
         params.blur_kernel_size = 0
         params.min_area = 4
+        params.max_splitness  = (10, 10, 10)
+        params.max_sameness   = (0.9, 0.9, 0.9)
+        params.max_thickness  = (0.9, 0.8, 0.7)
         params.max_squareness = (0.7, 0.7, 0.7)
-        params.max_wavyness = (0.4, 0.4, 0.4)
+        params.max_wavyness   = (0.4, 0.4, 0.4)
         params.max_offsetness = (0.25, 0.25, 0.25)
-        params.max_whiteness = (0.6, 0.6, 0.6)
-        params.max_sameness = (1.0, 0.9, 0.9)
+        params.max_whiteness  = (0.6, 0.6, 0.6)
+        params.max_blackness  = (0.6, 0.6, 0.6)
         # leave thickness, blackness on the defaults
         for i, detection in enumerate(self.detections):
             # do the timing mark detection
@@ -416,9 +420,11 @@ class Finder:
     def match_timing(self):
         """ match candidate timing marks with those expected, matching is done on a proximity and size basis,
             result: for each detection, a list of matching expectations that are 'reasonable', a match is an
-            expected and discovered pair with a distaance and size measure for each,
+            expected and discovered pair with a distance and size measure for each,
             the ordering of the returned list within each detection is closest distance then nearest size,
-            the 'reasonable' thresholds here are expected to be looser than those applied in filter_timing
+            the 'reasonable' thresholds here are expected to be looser than those applied in filter_timing,
+            NB: each detected mark can be associated with several expectations, its the job of filter_timing
+                to sort that out
             """
 
         if self.matched_timing is not None:
@@ -460,7 +466,7 @@ class Finder:
             for locator in (self.detections[detection].tl, self.detections[detection].tr, self.detections[detection].bl):
                 (x, y), r = self.translate_locator(detection, locator)
                 locators.append((x, y, r * Finder.LOCATOR_MARGIN))
-            # find all qualifying timing amrks
+            # find all qualifying timing marks
             for candidate, (fx, fy, fr, _) in enumerate(found_timing):
                 if is_excluded(locators, (fx, fy, fr)):
                     # too near a locator
@@ -574,8 +580,8 @@ class Finder:
         """ filter candidates that are too distant from expectations and detections with too few matches """
         # the lists we work with here (found_timing) are a list of all expected/discovered pairs that are a
         # 'reasonable' match, our job is to extract the best set of pairings,
-        # drop all those too distant, or dissimilar in size, to be considered a potential match (tuning constants),
-        # if not enough matches (another tuning constant) drop the detection as junk
+        # drop all those too distant, too dissimilar in size, or too close together to be considered a potential
+        # match (tuning constants), if not enough matches (another tuning constant) drop the detection as junk
         if self.filtered_timing is not None:
             # already done it
             return self.filtered_timing
@@ -612,6 +618,26 @@ class Finder:
                 return
             centre, radius = self.translate_locator(detection, locator)
             self.logger.log('  Locator ({}): {:.2f}x, {:.2f}y, {:.2f}r'.format(name, centre[0], centre[1], radius))
+
+        def get_tick_circle(detection, tick):
+            """ get the centre and radius of the given tick """
+            (candidate, edge, mark), distance, size = tick
+            circle = self.found_timing[detection][candidate]
+            return circle
+
+        def tick_gap(detection, from_tick, to_tick):
+            """ determine the separation between two ticks,
+                the separation is the gap between their circumferences in pixels,
+                negative means they are overlapping
+                (as the distance squared between their centres)
+                """
+            from_circle = get_tick_circle(detection, from_tick)
+            to_circle   = get_tick_circle(detection, to_tick)
+            separation  = utils.distance(from_circle, to_circle)  # centre to centre distance squared
+            touching    = from_circle[2] + to_circle[2]  # sum of radii
+            touching   *= touching  # squared
+            gap         = separation - touching
+            return gap
 
         self.filtered_timing = []
         max_hits = self.expected_marks()  # maximum possible marks per detection
@@ -676,9 +702,40 @@ class Finder:
                         log_tick(detection, tick)
                     continue
                 # found a pairing we're allowed to use that is in 'spec'
+                # we further check it is not too close one that has already been allocated,
+                # allocations so far will always be closer to their expectation than this one,
+                # if this one is not 'separated' from that by some threshold we must ignore it
+                too_close = None
+                expected_radius  = expected_timing[edge][mark][2]
+                expected_radius *= expected_radius  # squared for comparison with measured gap
+                minimum_gap      = expected_radius * Finder.MIN_TIMING_MARK_GAP
+                for matched_edge, edge_marks in enumerate(matched_expectation):
+                    for matched_mark, matched_tick in enumerate(edge_marks):
+                        if matched_tick is None:
+                            continue
+                        gap = tick_gap(detection, matched_tick, tick)
+                        # the gap must be +ve and at least 1r (expected timing mark radius)
+                        if gap < minimum_gap:
+                            too_close = (matched_edge, matched_mark, gap)
+                            break
+                    if too_close is not None:
+                        break
+                if too_close is not None:
+                    if self.logger is not None:
+                        self.logger.log('Detection {}, candidate {} too close ({:2f}, limit is {:.2f})'
+                                        ' to existing allocation at edge {}, mark {}'.
+                                        format(detection, candidate, too_close[2],
+                                               minimum_gap, too_close[0], too_close[1]))
+                        log_tick(detection, tick)
+                    continue
+                # passed all filters, so use it
                 committed_candidates[candidate] = tick
                 matched_expectation[edge][mark] = tick
                 got_hits += 1
+                if self.logger is not None:
+                    self.logger.log('Detection {}, candidate {} paired to edge {}, mark {}'.
+                                    format(detection, candidate, edge, mark))
+                    log_tick(detection, tick)
             # done this detection
             if (got_hits / max_hits) < Finder.MIN_MARK_HITS:
                 # not enough mark hits for this detection to qualify
@@ -898,7 +955,8 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png'
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
+    #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

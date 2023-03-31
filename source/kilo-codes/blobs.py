@@ -2,6 +2,7 @@
     Finds all contours then filters for the relevant ones
 """
 import math
+import random
 
 import const
 import utils
@@ -16,6 +17,7 @@ class Params(contours.Params):
     # pre-filter params
     min_area: float = 4  # min number of pixels inside the contour box
     max_size: float = 128  # max number of pixels across the contour box
+    max_perimeter = max_size * 4  # anything bigger than this creates performance problems for finding opposites
     max_internals: int = 1  # max number of internal contours that is tolerated to be a blob
     max_depth: int = 4  # max recursion depth when splitting blobs
 
@@ -95,6 +97,9 @@ class Target:
     OUTSIDE_WIDTH = max((const.BLUR_KERNEL_SIZE >> 1), 2)  # how far outside the contour to look for luminance contrast
     INSIDE_WIDTH  = max((const.BLUR_KERNEL_SIZE >> 1), 1)  # how far inside the contour to look for luminance contrast
 
+    PINCHPOINT_MIN_VARIATION  = 0.1  # minimum opposites 'coefficient-of-variation' to trigger finding a pinch-point
+    PINCHPOINT_MIN_VARIATION *= PINCHPOINT_MIN_VARIATION  # squared
+
     PINCHPOINT_MAX_DISTANCE  = 0.5  # max fraction of max opposite distance considered to be a pinch-point
                                     # bigger makes more pinch-points
     PINCHPOINT_MAX_DISTANCE *= PINCHPOINT_MAX_DISTANCE  # squared
@@ -107,14 +112,16 @@ class Target:
     PINCHPOINT_MIN_RATIO     = 2.0  # min length/distance ratio (pi/2==semi-circle-ish, 3==square-ish)
                                     # this must be greater than 1 to ensure there is an enclosed area
 
-    def __init__(self, blob: shapes.Blob, source):
+    def __init__(self, blob: shapes.Blob, source, logger=None):
         self.blob        = blob
         self.source      = source  # the source greyscale image the blob was found in
+        self.logger      = logger
         self.perimeter   = self.blob.get_points()  # NB: need all contour points so can calculate accurate direction
         self.area, self.size = Target.get_size(blob)
         self.direction  = None  # the 'direction' of each contour sample
         self.opposites  = None  # the 'best' opposite sample for each sample
         self.pinchpoint = None  # pinch-point of the contour (if there is one), its a list of 0 or 1 items
+        self.variation  = None  # the opposites coefficient-of-variation (squared)
 
     @staticmethod
     def get_size(blob):
@@ -263,27 +270,43 @@ class Target:
             the worst pinch-point has the shortest distance with the biggest head or tail
             """
         if self.pinchpoint is not None:
-            return self.pinchpoint
+            return self.pinchpoint, self.variation
 
         self.pinchpoint = []
+        self.variation  = None
         if len(self.get_opposites()) < Target.PINCHPOINT_MIN_SAMPLES:  # NB: also triggers opposites calc
             # not enough samples to be meaningful
-            return self.pinchpoint
+            return self.pinchpoint, self.variation
 
         # find distance/length limits
-        max_length   = len(self.opposites)
         max_distance = None
         min_distance = None
+        avg_distance = 0
         for _, distance in self.opposites:
+            avg_distance += distance
             if max_distance is None or distance > max_distance:
                 max_distance = distance
             if min_distance is None or distance < min_distance:
                 min_distance = distance
-        max_distance *= Target.PINCHPOINT_MAX_DISTANCE
-        max_distance = max(max_distance, min_distance)
-        min_length = max(max_length * Target.PINCHPOINT_MIN_LENGTH, Target.PINCHPOINT_MIN_SAMPLES)
+        avg_distance /= len(self.opposites)
+
+        # find the coefficient of variation (see https://en.wikipedia.org/wiki/Coefficient_of_variation)
+        deviation = 0
+        for _, distance in self.opposites:
+            diff = distance - avg_distance
+            deviation += (diff * diff)
+        deviation /= len(self.opposites)               # the actual variation is the square root of this
+        mean = avg_distance * avg_distance             # get the mean distance squared
+        self.variation = deviation / mean              # determine the 'coefficient-of-variation' (0=none, 1+=lots)
+        if self.variation < Target.PINCHPOINT_MIN_VARIATION:
+            # not enough variation for a pinch-point to exist
+            return self.pinchpoint, self.variation
 
         # build list of qualifying lengths for each qualifying distance
+        max_distance *= Target.PINCHPOINT_MAX_DISTANCE
+        max_distance  = max(max_distance, min_distance)
+        max_length    = len(self.opposites)
+        min_length    = max(max_length * Target.PINCHPOINT_MIN_LENGTH, Target.PINCHPOINT_MIN_SAMPLES)
         distances = {}
         for start, (finish, distance) in enumerate(self.opposites):
             if distance > max_distance:
@@ -314,10 +337,10 @@ class Target:
 
         if len(pinchpoints) == 0 or len(pinchpoints[0][1]) == 0:
             # nothing qualifies
-            return self.pinchpoint
+            return self.pinchpoint, self.variation
 
         self.pinchpoint = [pinchpoints[0][1][0]]
-        return self.pinchpoint
+        return self.pinchpoint, self.variation
 
     def get_thickness(self):
         """ the thickness is a measure of how the opposites distances relate to the enclosing box """
@@ -383,7 +406,7 @@ def split_blob(blob: shapes.Blob, params: Params, logger=None, depth=0) -> [Targ
         otherwise an element for pinchpoint split
         """
 
-    target = Target(blob, params.source)
+    target = Target(blob, params.source, logger)
 
     if not params.depinch:
         # being told not to do it
@@ -393,9 +416,15 @@ def split_blob(blob: shapes.Blob, params: Params, logger=None, depth=0) -> [Targ
         # gone too deep
         return [target]
 
-    pinchpoint = target.get_pinchpoint()
+    pinchpoint, variation = target.get_pinchpoint()
     if len(pinchpoint) == 0:
         # no pinchpoint here
+        if logger is not None:
+            if variation is not None:
+                indent = '  '
+                prefix = indent * 2 * depth
+                logger.log('{}Blob {}:'.format(prefix, blob))
+                logger.log('{}{}has no pinch-point (cv={})'.format(prefix, indent, utils.show_number(variation)))
         return [target]
 
     _, start, finish, head, tail, distance = pinchpoint[0]
@@ -406,7 +435,9 @@ def split_blob(blob: shapes.Blob, params: Params, logger=None, depth=0) -> [Targ
         indent = '  '
         prefix = indent * 2 * depth
         logger.log('{}Blob {}:'.format(prefix, blob))
-        logger.log('{}{}splitting at worst pinch-point into:'.format(prefix, indent))
+        logger.log('{}{}splitting at worst pinch-point {} (cv={}) into:'.format(prefix, indent,
+                                                                                pinchpoint,
+                                                                                utils.show_number(variation)))
         logger.log('{}{}{}{}'.format(prefix, indent, indent, head_blob))
         logger.log('{}{}{}{}'.format(prefix, indent, indent, tail_blob))
 
@@ -428,6 +459,11 @@ def filter_blobs(blobs: [shapes.Blob], params: Params, logger=None) -> [shapes.B
     good_blobs = []                      # good blobs are accumulated in here
     all_blobs  = []                      # this is everything, including splits
     for blob in blobs:
+        # do these before attempt split
+        if len(blob.get_points()) > params.max_perimeter:
+            blob.rejected = const.REJECT_TOO_BIG
+            all_blobs.append(blob)
+            continue
         targets = split_blob(blob, params, logger)
         blob.splitness = len(targets)
         _, size = Target.get_size(blob)
@@ -463,11 +499,11 @@ def filter_blobs(blobs: [shapes.Blob], params: Params, logger=None) -> [shapes.B
             if thickness > params.max_thickness[target.size]:
                 blob.rejected = const.REJECT_THICKNESS
                 continue
-            # offsetness = blob.get_offsetness()
-            # if offsetness > params.max_offsetness[target.size]:
-            #     # we've got a potential saucepan
-            #     reason_code = const.REJECT_OFFSETNESS
-            #     break
+            offsetness = blob.get_offsetness()
+            if offsetness > params.max_offsetness[target.size]:
+                # we've got a potential saucepan
+                blob.rejected = const.REJECT_OFFSETNESS
+                continue
             squareness = blob.get_squareness()
             if squareness > params.max_squareness[target.size]:
                 blob.rejected = const.REJECT_SQUARENESS
@@ -545,10 +581,11 @@ def show_result(params, logger):
             draw_bad[y, x] = colour
     logger.draw(draw_bad, file='blobs_rejected')
 
-    # draw accepted blobs (this includes splits)
+    # draw accepted blobs (this includes splits) in random colours (so can see split boundaries)
+    colours = (const.OLIVE, const.GREEN, const.BLUE, const.YELLOW, const.PURPLE, const.CYAN, const.ORANGE, const.PINK)
     draw_good = canvas.colourize(source_part)
     for (_, _, _, blob) in params.targets:
-        colour, _ = colours[blob.rejected]
+        colour = colours[random.randrange(0, len(colours))]
         for (x, y) in blob.external.points:
             draw_good[y, x] = colour
     logger.draw(draw_good, file='blobs_accepted')
@@ -568,9 +605,12 @@ def show_result(params, logger):
         msg = stats.show()
         logger.log('  {:10}: {}'.format(name, msg))
 
+    used_colours = {}  # collect reject colours actually used (for the log)
     logger.log('')
     logger.log("All accepted blobs:")
     for b, blob in enumerate(blobs):
+        if blob.rejected in const.REJECT_COLOURS:
+            used_colours[blob.rejected] = const.REJECT_COLOURS[blob.rejected]  # for log hints later
         reject_stats.count(blob.rejected)
         blob_stats = blob.get_quality_stats()
         if all_stats is None:
@@ -614,7 +654,7 @@ def show_result(params, logger):
         logger.log("  {}: centre: {:.2f}, {:.2f}  radius: {:.2f}".format(t, x, y, r))
     logger.log('')
     logger.log("Blob colours:")
-    for reason, (_, name) in colours.items():
+    for reason, (_, name) in used_colours.items():
         logger.log('  {}: {}'.format(name, reason))
 
 def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None, create_new=True):

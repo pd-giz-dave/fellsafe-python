@@ -15,23 +15,24 @@ OPAQUE      = MAX_LUMINANCE
 
 # region Diagnostic image colours...
 # NB: cv2 colour order is BGR not RGB
-BLACK      = (  0,   0,   0)
-GREY       = ( 64,  64,  64)
-WHITE      = (255, 255, 255)
-RED        = (  0,   0, 255)
-GREEN      = (  0, 255,   0)
-DARK_GREEN = (  0, 128,   0)
-BLUE       = (255,   0,   0)
-DARK_BLUE  = ( 64,   0,   0)
-YELLOW     = (  0, 255, 255)
-PURPLE     = (255,   0, 255)
-PINK       = (128,   0, 128)
-PALE_RED   = (  0,   0, 128)
-PALE_BLUE  = (128,   0,   0)
-PALE_GREEN = (  0, 128,   0)
-CYAN       = (255, 255,   0)
-OLIVE      = (  0, 128, 128)
-ORANGE     = ( 80, 127, 255)
+BLACK       = (  0,   0,   0)
+GREY        = ( 64,  64,  64)
+WHITE       = (255, 255, 255)
+RED         = (  0,   0, 255)
+GREEN       = (  0, 255,   0)
+DARK_GREEN  = (  0, 128,   0)
+BLUE        = (255,   0,   0)
+DARK_BLUE   = ( 64,   0,   0)
+YELLOW      = (  0, 255, 255)
+PURPLE      = (255,   0, 255)
+PINK        = (128,   0, 128)
+PALE_RED    = (  0,   0, 128)
+PALE_BLUE   = (128,   0,   0)
+PALE_GREEN  = (  0, 128,   0)
+CYAN        = (255, 255,   0)
+OLIVE       = (  0, 128, 128)
+ORANGE      = ( 80, 127, 255)
+PALE_ORANGE = (138, 189, 227)
 # synonyms
 LIME    = GREEN
 MAGENTA = PURPLE
@@ -84,21 +85,21 @@ REJECT_WHITENESS  = 'not enough circle whiteness'
 REJECT_BLACKNESS  = 'too much box blackness'
 REJECT_SQUARENESS = 'not enough box squareness'
 REJECT_WAVYNESS   = 'too much perimeter wavyness'
-REJECT_OFFSETNESS = 'too much centroid offsetness'  # deprecated
+REJECT_OFFSETNESS = 'too much centroid offsetness'
 # region and their colours when being drawn...
-REJECT_COLOURS = {REJECT_NONE:       (LIME    , 'lime'    ),
-                  REJECT_SPLIT:      (PALE_RED, 'pale red'),
-                  REJECT_SPLITS:     (RED     , 'red'     ),
-                  REJECT_TOO_SMALL:  (YELLOW  , 'yellow'  ),
-                  REJECT_TOO_BIG:    (YELLOW  , 'yellow'  ),
-                  REJECT_WHITENESS:  (MAROON  , 'maroon'  ),
-                  REJECT_BLACKNESS:  (PINK    , 'pink'    ),
-                  REJECT_INTERNALS:  (OLIVE   , 'olive'   ),
-                  REJECT_SQUARENESS: (NAVY    , 'navy'    ),
-                  REJECT_WAVYNESS:   (MAGENTA , 'magenta' ),
-                  REJECT_OFFSETNESS: (ORANGE  , 'orange'  ),  # deprecated
-                  REJECT_THICKNESS:  (ORANGE  , 'orange'  ),
-                  REJECT_SAMENESS:   (CYAN    , 'cyan'    ),
+REJECT_COLOURS = {REJECT_NONE:       (LIME       , 'lime'       ),
+                  REJECT_SPLIT:      (PALE_RED   , 'pale red'   ),
+                  REJECT_SPLITS:     (RED        , 'red'        ),
+                  REJECT_TOO_SMALL:  (YELLOW     , 'yellow'     ),
+                  REJECT_TOO_BIG:    (YELLOW     , 'yellow'     ),
+                  REJECT_WHITENESS:  (MAROON     , 'maroon'     ),
+                  REJECT_BLACKNESS:  (PINK       , 'pink'       ),
+                  REJECT_INTERNALS:  (OLIVE      , 'olive'      ),
+                  REJECT_SQUARENESS: (NAVY       , 'navy'       ),
+                  REJECT_WAVYNESS:   (MAGENTA    , 'magenta'    ),
+                  REJECT_OFFSETNESS: (ORANGE     , 'orange'     ),
+                  REJECT_THICKNESS:  (PALE_ORANGE, 'pale orange'),
+                  REJECT_SAMENESS:   (CYAN       , 'cyan'       ),
                   }
 # endregion
 # endregion

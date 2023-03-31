@@ -287,10 +287,10 @@ def _test_decoder(logger):
 if __name__ == "__main__":
     """ test harness """
 
-    src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg"
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
-    #proximity = const.PROXIMITY_CLOSE
-    proximity = const.PROXIMITY_FAR
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg"
+    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
+    proximity = const.PROXIMITY_CLOSE
+    #proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('decoder.log', 'decoder/{}'.format(utils.image_folder(src)))
 

@@ -91,6 +91,8 @@ class Detection:
         max_bl = self.apply_margin(self.bl[xy], self.bl[Locator.R_COORD])
         return Detection.constrain(max(max_tl, max_tr, max_br, max_bl), 0, limit-1)
 
+# ToDo: provide a mechanism to discard smaller lower quality rectangles
+#       fully or partially enclosed by a larger higher quality rectangle
 
 class Locator:
 
