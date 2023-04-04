@@ -56,6 +56,18 @@ def downsize(buffer, new_size):
         new_height = int(height / (width / new_size))
     return cv2.resize(buffer, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
 
+def prepare(src, size, logger=None):
+    """ load and downsize an image """
+    if logger is not None:
+        logger.log("Preparing image of size {} from {}".format(size, src))
+    source = load(src)
+    if source is None:
+        if logger is not None:
+            logger.log('Cannot load {}'.format(src))
+        return None
+    # Downsize it (to simulate low quality smartphone cameras)
+    return downsize(source, size)
+
 def integrate(buffer, box=None):
     """ generate the integral of the given box within the given image buffer """
 

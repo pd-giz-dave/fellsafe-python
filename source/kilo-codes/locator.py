@@ -93,6 +93,7 @@ class Detection:
 
 # ToDo: provide a mechanism to discard smaller lower quality rectangles
 #       fully or partially enclosed by a larger higher quality rectangle
+#       how? or not bother as run this risk of dumping something good
 
 class Locator:
 
@@ -142,7 +143,7 @@ class Locator:
 
     @staticmethod
     def is_near(a, b) -> bool:
-        """ determine if corner a is near corner b, 'near' is when their areas overlap,
+        """ determine if corner 'a' is near corner 'b', 'near' is when their areas overlap,
             i.e. the distance between them is less than the sum of their radii times some scaling constant
             """
         gap = utils.distance(a, b)
@@ -175,9 +176,10 @@ class Locator:
 
         # this is a crude O(N^2) algorithm, I'm sure there are better ways!, eg. a k-d tree
         self.neighbours = []
-        neighbour_size_stats = [utils.Stats(20), utils.Stats(20)]  # good and bad
-        neighbour_clse_stats = [utils.Stats(20, value_range=(1,100)), utils.Stats(20)]  # ..
-        neighbour_dist_stats = [utils.Stats(20), utils.Stats(20)]  # ....
+        if self.logger is not None:
+            neighbour_size_stats = [utils.Stats(20), utils.Stats(20)]  # good and bad
+            neighbour_clse_stats = [utils.Stats(20, value_range=(1,100)), utils.Stats(20)]  # ..
+            neighbour_dist_stats = [utils.Stats(20), utils.Stats(20)]  # ....
         for blob, here in enumerate(self.blobs):
             neighbour = []
             for candidate, there in enumerate(self.blobs):
@@ -204,7 +206,7 @@ class Locator:
                     #                 ' sizes match (ratio is {:.2f}, limit is {:.2f})'.
                     #                 format(blob, here_r, candidate, there_r, ratio, Locator.MIN_RADIUS_RATIO))
                     neighbour_size_stats[0].count(ratio)
-                # size OK, now check distance
+                # size OK, now check distance between the blobs in pixels
                 distance = utils.distance(here, there)
                 if distance < Locator.MIN_PIXEL_DISTANCE:
                     # locators too close
@@ -223,6 +225,7 @@ class Locator:
                     #                 ' distance is {:.2f}, limit is {} (ratio is {:.2f})'.
                     #                 format(blob, candidate, distance, Locator.MIN_PIXEL_DISTANCE, ratio))
                     neighbour_clse_stats[0].count(ratio)
+                # now check their distance relative to the expected radius
                 one_unit   = (here_r + there_r) / 2  # one locator distance unit
                 one_unit  *= one_unit                # square it to be compatible with distance
                 separation = distance / one_unit     # this locator pair separation in distance units squared
@@ -237,13 +240,15 @@ class Locator:
                         #                        math.sqrt(ratio), math.sqrt(Locator.MIN_DISTANCE_RATIO)))
                         neighbour_dist_stats[1].count(ratio)
                     continue
-                # log good ones
-                ratio = Locator.is_same(separation, Locator.LOCATOR_DISTANCE)
-                # self.logger.log('Neighbours (good): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
-                #                 ' distance ({:.2f}) close to expected (ratio is {:.2f}, limit is {:.2f})'.
-                #                 format(blob, here_r, candidate, there_r, math.sqrt(separation),
-                #                        math.sqrt(ratio), math.sqrt(Locator.MIN_DISTANCE_RATIO)))
-                neighbour_dist_stats[0].count(ratio)
+                # found a qualifying neighbour
+                if self.logger is not None:
+                    # log good ones
+                    ratio = Locator.is_same(separation, Locator.LOCATOR_DISTANCE)
+                    # self.logger.log('Neighbours (good): Here blob {} ({:.2f}r), there blob {} ({:.2f}r):'
+                    #                 ' distance ({:.2f}) close to expected (ratio is {:.2f}, limit is {:.2f})'.
+                    #                 format(blob, here_r, candidate, there_r, math.sqrt(separation),
+                    #                        math.sqrt(ratio), math.sqrt(Locator.MIN_DISTANCE_RATIO)))
+                    neighbour_dist_stats[0].count(ratio)
                 # size and distance OK
                 neighbour.append((candidate, distance))
             if len(neighbour) >= Locator.MIN_NEIGHBOURS:
@@ -276,8 +281,9 @@ class Locator:
             return self.corners
 
         self.corners = []
-        corner_side_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
-        corner_diag_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
+        if self.logger is not None:
+            corner_side_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
+            corner_diag_stats = [utils.Stats(20), utils.Stats(20)]  # good, bad
         for a, neighbour in self.get_neighbours():
             pivot_x, pivot_y, _, _ = self.blobs[a]
             for b, a2b in neighbour:
@@ -366,6 +372,7 @@ class Locator:
             self.logger.log('  ' + corner_diag_stats[0].show())
         if len(self.corners) > 0:
             self.corners.sort(key=lambda k: (k[0], k[1], k[2], k[3]))  # put corners into blob order
+            # remove duplicates
             ref_a, ref_b, ref_c, ref_p, _ = self.corners[-1]
             for corner in range(len(self.corners) - 2, -1, -1):
                 a, b, c, p, _ = self.corners[corner]

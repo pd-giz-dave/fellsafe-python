@@ -34,7 +34,7 @@ class Params:
     binary = None                        # the binarized blurred image buffer
     box = None                           # when not None the box within the image to process, else all of it
     inverted = False                     # if True look for black blobs, else white blobs
-    blur_kernel_size = 3                 # blur kernel size to apply, must be odd, None or < 3 == do not blur
+    blur_kernel_size = 3                 # blur kernel size to apply, 0 == do not blur
     small = 4                            # contour perimeter small threshold
     mode = const.RADIUS_MODE_MEAN        # what type of circle radius mode to use
     integration_width: int = 48          # width of integration area as fraction of image width
@@ -250,15 +250,6 @@ def set_params(src, proximity, black, inverted, blur, mode, params=None):
     params.mode = mode
     return params
 
-def prepare_image(src, size, logger):
-    """ load and downsize the image """
-    logger.log("Preparing image of size {} from {}".format(size, src))
-    source = canvas.load(src)
-    if source is None:
-        logger.log('Cannot load {}'.format(src))
-        return None
-    # Downsize it (to simulate low quality smartphone cameras)
-    return canvas.downsize(source, size)
 
 def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None):
     """ ************** TEST **************** """
@@ -269,7 +260,7 @@ def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None
         logger.push(context='_test')
     logger.log('')
     logger.log("Detecting contours")
-    shrunk = prepare_image(src, size, logger)
+    shrunk = canvas.prepare(src, size, logger)
     if shrunk is None:
         logger.pop()
         return None
