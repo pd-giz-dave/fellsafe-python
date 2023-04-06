@@ -226,6 +226,10 @@ if __name__ == "__main__":
 
     draw_code(TEST_PATTERN, TEST_PATTERN_LABEL, TEST_PATTERN_NAME)
 
+    for code in (266, 273, 814):  # these are what our test pattern can look like with 3+ errors
+        codeword = codec.encode(code)
+        draw_code(codeword, '{:03d}'.format(code), 'test-code-{:03d}'.format(code))
+
     for test in range(TEST_CODES):
         code = random.randrange(101, 999+1)
         codeword = codec.encode(code)

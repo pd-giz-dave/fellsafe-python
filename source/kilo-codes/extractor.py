@@ -9,10 +9,10 @@ import math
 import const
 import utils
 import canvas
-import finder
+import cells
 import codes
 
-class Params(finder.Params):
+class Params(cells.Params):
     def __init__(self):
         self.extractor = None
 
@@ -25,32 +25,46 @@ class Extractor:
     IGNORE_CELL = 'ignore'
 
     # region tuning constants...
-    INTEGRATION_WIDTH = 1  # fraction of image width that is integrated when creating a tertiary image
+    INTEGRATION_WIDTH = 1   # fraction of image width that is integrated when creating a tertiary image
     BLACK_THRESHOLD   = 15  # % below average to consider to be black in a tertiary image
-    WHITE_THRESHOLD   = 1  # % above average to consider to be white in a tertiary image
+    WHITE_THRESHOLD   = 1   # % above average to consider to be white in a tertiary image
     # gap between black and white threshold is considered to be 'gray'
-    CELL_OVERSAMPLE = 0.6  # how far inside(<1)/outside(>1) the given cell radius to sample for levels
-    GREY_THRESHOLD  = 0.8  # grey ratio threshold for a cell to be considered to be a None
-    ZERO_THRESHOLD  = 0.1  # black - white ratio threshold for a cell to be considered to be a '0'
-    ONE_THRESHOLD   = 0.1  # white - black ratio threshold for a cell to be considered to be a '1'
+    CELL_OVERSAMPLE    = 0.6  # how far inside(<1)/outside(>1) the given cell radius to sample for levels
+    GREY_THRESHOLD     = 0.8  # grey ratio threshold for a cell to be considered to be a None
+    ZERO_THRESHOLD     = 0.1  # black - white ratio threshold for a cell to be considered to be a '0'
+    ONE_THRESHOLD      = 0.1  # white - black ratio threshold for a cell to be considered to be a '1'
+    DONATION_THRESHOLD = 0.3  # grey level above which a donation to black or white considered (>=1 turns it off)
+    DONATION_LEVEL     = 0.2  # what fraction of grey to donate to black or white
     # endregion
 
-    def __init__(self, source, images, cells, circles, logger=None):
-        self.source          = source      # file name of originating image (for diagnostics)
-        self.images          = images      # the grayscale image for each detection (and cells refer to)
+    def __init__(self, source, images, cells, logger=None, origins=None):
+        self.source          = source      # the originating image (that locations will refer to)
+        self.images          = images      # the grayscale sub-image for each detection (and cells refer to)
         self.cells           = cells       # cells discovered in each detection
-        self.circles         = circles     # centre, radius, origin of each detection in the source image
+        self.origins         = origins     # detection origins within the main image
         self.logger          = logger      # for diagnostics
         self.tertiary        = None        # tertiary (black,gray,white) image of each detection grayscale image
         self.cell_levels     = None        # cell luminance levels for each detection
         self.data_bits       = None        # data bits extracted from the cells
+        self.locations       = None        # locations and sizes of every detection
+
+    def draw_locations(self):
+        """ draw all the locations detected on the original image """
+        if self.logger is None:
+            return
+        image = canvas.colourize(self.source)
+        for detection, (centre, radius) in enumerate(self.get_locations()):
+            canvas.circle(image, centre, radius, const.GREEN)
+            canvas.settext(image, '{}x{}y{:.0f}r'.format(centre[0], centre[1], radius), centre,
+                           size=0.4, colour=const.RED)
+        self.logger.draw(image, file='detections')
 
     def draw_bits(self):
         """ draw circle for 0 bits, 1 bits and None bits in distinct colours for all detections """
         if self.logger is None:
             return
         for detection in range(len(self.cells)):
-            data_bits  = self.get_bits(detection)
+            data_bits  = self.get_bits()[detection]
             data_cells = self.cells[detection]
             image      = self.get_tertiary(detection)
             bit_num    = 0
@@ -85,11 +99,16 @@ class Extractor:
             self.logger.draw(image, file='tertiary')
             self.logger.pop()
 
-    def get_origin(self, detection):
+    def get_origin(self, detection, negate=False):
         """ return the origin of the given detection in the source image (diagnostic aid),
-            the origin is the top-left cell centre in the detection
+            the origin is the top-left cell centre in the detection,
+            if negate is True the negation of the origin is returned
             """
-        return self.circles[detection][2]
+        x, y = self.origins[detection]
+        if negate:
+            return -x, -y
+        else:
+            return x, y
 
     def get_tertiary(self, detection=None):
         """ get the tertiary image of the given, or all, detections """
@@ -210,8 +229,49 @@ class Extractor:
         else:
             return self.cell_levels[target]
 
-    def get_bits(self, target=None):
-        """ get the data bits for the given target, None==all,
+    def get_locations(self):
+        """ get the location and size of every detection relative to the original source image,
+            the locations are truncated to pixel boundaries, the size (aka radius) is not
+            """
+        if self.locations is not None:
+            return self.locations
+
+        # the location is the centre of the cells and its size is the radius of a circle passing through the corners,
+        # the cells given to us are a square matrix located on the locators, our reference points are the
+        # first and last cell in the first row and the first and last cell in the last row,
+        # the centre is the intersection of the diagonals from top-left to bottom-right and top-right to
+        # bottom-left (with respect to an un-rotated matrix), the radius is the average distance from the centre
+        # to our reference points
+        self.locations = []
+        for detection, rows in enumerate(self.cells):
+            top_left = rows[0][0]
+            top_right = rows[0][-1]
+            bottom_right = rows[-1][-1]
+            bottom_left = rows[-1][0]
+            sub_centre = utils.intersection((top_left, bottom_right), (top_right, bottom_left))
+            rad1 = utils.distance(sub_centre, top_left)
+            rad2 = utils.distance(sub_centre, top_right)
+            rad3 = utils.distance(sub_centre, bottom_left)
+            rad4 = utils.distance(sub_centre, bottom_right)
+            sub_radius = math.sqrt((rad1 + rad2 + rad3 + rad4) / 4)
+            _, scale = self.images[detection]
+            centre, radius = canvas.translate(sub_centre, sub_radius, self.get_origin(detection, negate=True), scale)
+            self.locations.append(((int(centre[0]), int(centre[1])), radius))
+            if self.logger is not None:
+                folder = utils.image_folder(target=self.get_origin(detection))
+                self.logger.push(context='get_locations/{}'.format(folder), folder=folder)
+                self.logger.log('Detection {}: {:.2f}x {:.2f}y {:.2f}r --> {:.2f}x {:.2f}y {:.2f}r (scale={:.2f})'.
+                                format(detection, sub_centre[0], sub_centre[1], sub_radius,
+                                       centre[0], centre[1], radius, scale))
+                self.logger.pop()
+
+        if self.logger is not None:
+            self.draw_locations()
+
+        return self.locations
+
+    def get_bits(self):
+        """ get the data bits for all detections,
             the bits are returned as a list of 0 (black) or 1 (white) or None (grey) in the order
             defined by Codes.DATA_CELLS
             """
@@ -228,19 +288,31 @@ class Extractor:
                     if typ != Extractor.DATA_CELL:
                         raise Exception('Expected DATA_CELL at {} in detection {}, got {}'.format(cell, detection, typ))
                     # we have a ratio that is black, is grey and is white, they sum to 1
-                    # grey >= max is considered as None
-                    # grey < max is given to the majority of black or white
-                    # black > white by some limit is a '0'
-                    # black < white by some limit is a '1'
-                    # otherwise its a None
+                    # we use these relative levels to determine the bit-ness of the cell (0, 1, or None==don't know)
                     if grey >= Extractor.GREY_THRESHOLD:
+                        # overwhelmingly grey
                         bit = None
-                    elif (black - white) >= Extractor.ZERO_THRESHOLD:
-                        bit = 0
-                    elif (white - black) >= Extractor.ONE_THRESHOLD:
-                        bit = 1
                     else:
-                        bit = None
+                        if grey >= Extractor.DONATION_THRESHOLD:
+                            # there is substantial grey, so donate some to black or white
+                            donation = grey * Extractor.DONATION_LEVEL  # what we are going to donate
+                            if black > white:
+                                # give some to black
+                                black += donation
+                                grey -= donation
+                            elif white > black:
+                                # give some to white
+                                white += donation
+                                grey -= donation
+                            else:
+                                # ambiguous, stay as we are
+                                pass
+                        if (black - white) >= Extractor.ZERO_THRESHOLD:
+                            bit = 0
+                        elif (white - black) >= Extractor.ONE_THRESHOLD:
+                            bit = 1
+                        else:
+                            bit = None
                     bits.append(bit)
                     bit_num += 1
                 self.data_bits.append(bits)
@@ -251,19 +323,18 @@ class Extractor:
                     self.logger.pop()
             if self.logger is not None:
                 self.draw_bits()
-        if target is None:
-            return self.data_bits
-        else:
-            return self.data_bits[target]
-            
 
-def find_bits(src, params, images, cells, circles, logger):
+        return self.data_bits
+
+
+def find_bits(source, params, images, cells, logger, origins):
     """ find code bits within the given detected cells """
     if logger is not None:
         logger.push('find_bits')
         logger.log('')
-    extractor = Extractor(src, images, cells, circles, logger)
+    extractor = Extractor(source, images, cells, logger, origins)
     extractor.get_bits()
+    extractor.get_locations()
     params.extractor = extractor
     if logger is not None:
         logger.pop()
@@ -288,18 +359,19 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
     if create_new:
         if params is None:
             params = Params()
-        params = finder._test(src, proximity, blur=blur, mode=mode, params=params, logger=logger, create_new=create_new)
+        params = cells._test(src, proximity, blur=blur, mode=mode, params=params, logger=logger, create_new=create_new)
         if params is None:
-            logger.log('Finder failed on {}'.format(src))
+            logger.log('Cells failed on {}'.format(src))
             logger.pop()
             return None
         logger.save(params, file='extractor', ext='params')
 
     # process the code areas
-    images = params.finder.images()
-    cells  = params.finder.cells()
-    circles = params.finder.circles()
-    params = find_bits(src, params, images, cells, circles, logger)
+    images = params.cells.images()
+    cell_array = params.cells.cells()
+    origins = params.cells.origins
+    source = params.source
+    params = find_bits(source, params, images, cell_array, logger, origins)
 
     logger.pop()
     return params
@@ -307,7 +379,7 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
 if __name__ == "__main__":
     """ test harness """
 
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-near-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR

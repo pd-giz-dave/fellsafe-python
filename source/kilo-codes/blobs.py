@@ -667,7 +667,7 @@ def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None
     logger.log('')
     logger.log("Detecting blobs (create new {})".format(create_new))
 
-    shrunk = contours.prepare_image(src, size, logger)
+    shrunk = canvas.prepare(src, size, logger)
     if shrunk is None:
         logger.pop()
         return None

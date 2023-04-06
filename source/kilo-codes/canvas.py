@@ -24,7 +24,7 @@ def new(width, height, luminance=const.MIN_LUMINANCE):
 
 def size(buffer):
     """ return the x,y size of the given buffer """
-    max_x = buffer.shape[1]  # NB: cv2 x, y are reversed
+    max_x = buffer.shape[1]  # NB: cv2/numpy x,y are reversed
     max_y = buffer.shape[0]  # ..
     return max_x, max_y
 

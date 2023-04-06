@@ -143,35 +143,37 @@ class Decoder:
         else:
             return None
 
-def decode_bits(bits, source=None, image=None, circles=None, logger=None, codec=None):
-    """ decode the given bit strings into all its options """
+def decode_bits(bits, codec=None, source=None, locations=None, origins=None, logger=None):
+    """ decode the given bit strings into all its options,
+        source, locations, origins and logger can either all be given or none of them, they are used diagnostic logs
+        """
     decoder = Decoder(bits, logger=logger, codec=codec)
     decodes = decoder.get_codes()
     if logger is not None:
+        if source is None or locations is None or origins is None:
+            raise Exception('if a logger is given so must source, locations and origins')
         logger.push('decode_bits')
         logger.log('')
-        draw = None
+        draw = canvas.colourize(source)
         for detection, decode in enumerate(decodes):
-            if circles is not None:
-                centre, radius, origin = circles[detection]
-                folder = utils.image_folder(target=origin)
-                logger.push(folder, folder)
-                if image is not None:
-                    if draw is None:
-                        draw = canvas.colourize(image)
-                    if decode is None:
-                        colour = const.RED
-                        text = 'INVALID ({:.0f})'.format(radius)
-                    else:
-                        colour = const.GREEN
-                        text = '{}.{} ({:.0f})'.format(decode[0], decode[1], radius)
-                    canvas.circle(draw, centre, radius, colour)
-                    canvas.settext(draw, text, centre, colour=colour)
+            origin = origins[detection]
+            centre, radius = locations[detection]
+            folder = utils.image_folder(target=origin)
+            logger.push(folder, folder)
+            if decode is None:
+                colour = const.RED
+                text = 'INVALID ({:.0f})'.format(radius)
+            elif decode[1] != 0:
+                colour = const.BLUE
+                text = '{}.{} ({:.0f})'.format(decode[0], decode[1], radius)
+            else:
+                colour = const.GREEN
+                text = '{}.{} ({:.0f})'.format(decode[0], decode[1], radius)
+            canvas.circle(draw, centre, radius, colour)
+            canvas.settext(draw, text, centre, colour=colour)
             logger.log('Detection {}: {} from {}'.format(detection, decode, bits[detection]))
-            if circles is not None:
-                logger.pop()
-        if draw is not None:
-            logger.draw(draw, file='decodes')
+            logger.pop()
+        logger.draw(draw, file='decodes')
         logger.pop()
     return decodes
 
@@ -199,11 +201,12 @@ def _test_pipeline(src, proximity, blur, mode, logger=None, create_new=True):
         logger.save(params, file='decoder', ext='params')
 
     bits = params.extractor.get_bits()
-    image = params.finder.image
-    circles = params.finder.circles()
+    source = params.extractor.source
+    locations = params.extractor.get_locations()
+    origins = params.extractor.origins
 
     # process the code areas
-    codes = decode_bits(bits, source=src, image=image, circles=circles, logger=logger)
+    codes = decode_bits(bits, source=source, locations=locations, origins=origins, logger=logger)
 
     logger.pop()
     return codes
@@ -287,10 +290,10 @@ def _test_decoder(logger):
 if __name__ == "__main__":
     """ test harness """
 
-    #src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg"
-    src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
-    proximity = const.PROXIMITY_CLOSE
-    #proximity = const.PROXIMITY_FAR
+    src = "/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg"
+    #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png"
+    #proximity = const.PROXIMITY_CLOSE
+    proximity = const.PROXIMITY_FAR
 
     logger = utils.Logger('decoder.log', 'decoder/{}'.format(utils.image_folder(src)))
 

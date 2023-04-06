@@ -1,5 +1,5 @@
-""" Finder for the code area
-    This module takes a list of locator detections and finds the associated data cell co-ordinates
+""" Finder for the locators timing marks
+    This module takes a list of locator detections and finds the associated timing marks
 """
 
 import math
@@ -13,8 +13,6 @@ import canvas
 class Params(locator.Params):
     def __init__(self):
         self.finder = None
-
-# ToDo: split this module in two - find-timing, then the rest
 
 class Finder:
 
@@ -37,7 +35,7 @@ class Finder:
     DISTANCE_QUALITY_WEIGHT = 0.5  # weighting factor for the distance component of quality (must be <= 1)
     SIZE_QUALITY_WEIGHT = 1.0  # weighting factor for the size component of quality (must be <= 1)
     MATCH_METRIC_SCALE = 2  # the scale factor to apply to the above when matching (scale is 1 when filtering)
-    MIN_MARK_HITS = 7/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
+    MIN_MARK_HITS = 6/TIMING_MARKS  # minimum number of matched marks for a detection to qualify as a ratio of the maximum, 1==all
     LOCATOR_MARGIN = 1 + TIMING_SCALE  # timing marks must be separated from locators by at least 1r
     MIN_TIMING_MARK_GAP = 0.5  # minimum gap between timing marks as a fraction of their expected radii
     # endregion
@@ -59,14 +57,14 @@ class Finder:
         self.matched_timing     = None        # discovered/expected pairings in best to worst order
         self.filtered_timing    = None        # list of detections that pass the qualification filter and their matched marks
         self.code_grids         = None        # list of detected code grids for all filtered timings
-        self.code_cells         = None        # list of cell co-ords inside the locators for all filtered timings
-        self.code_circles       = None        # list of all code 'circles' (max enclosed circle within detected locators)
         self.min_radius_ratio   = None        # appropriate radius ratio for each sub-image size
         self.max_distance_ratio = None        # appropriate distance ratio for each sub-image size
         self.min_quality_ratio  = None        # appropriate quality ratio for each sub-image size
 
     def get_grayscale(self, detection=None):
-        """ extract the grayscale sub-image of the given, or all, detection """
+        """ extract the grayscale sub-image of the given, or all, detection,
+            returns the image and its scale (if it got resized)
+            """
 
         def log_size(detection, size, size_name):
             if self.logger is not None:
@@ -123,7 +121,7 @@ class Finder:
         return self.sub_images[detection]
 
     def get_colour_image(self, detection):
-        """ extract the grayscale sub-image of the given detection and coliurize it """
+        """ extract the grayscale sub-image of the given detection and colourize it """
         image, scale = self.get_grayscale(detection)
         return canvas.colourize(image), scale
 
@@ -209,8 +207,8 @@ class Finder:
         def draw_grid(image, here, there, pallete):
             """ draw lines of same cells from here to there on the given image """
             for cell in range(len(here)):
-                src   = here [cell]
-                dst   = there[cell]
+                src = here[cell]
+                dst = there[cell]
                 src_x = src[Finder.X_COORD]
                 src_y = src[Finder.Y_COORD]
                 dst_x = dst[Finder.X_COORD]
@@ -221,64 +219,14 @@ class Finder:
                     colour = pallete[1]
                 canvas.line(image, (src_x, src_y), (dst_x, dst_y), colour, 1)
 
-        for detection, (detection, top, right, bottom, left) in enumerate(self.grids()):
-            image, _     = self.get_colour_image(detection)
-            detection    = self.detections[detection]
+        for detection, top, right, bottom, left in self.grids():
+            image, _ = self.get_colour_image(detection)
+            detection = self.detections[detection]
             draw_grid(image, top, bottom, (const.GREEN, const.BLUE))
-            draw_grid(image, left,right, (const.BLUE, const.GREEN))
+            draw_grid(image, left, right, (const.BLUE, const.GREEN))
             tl_x, tl_y, tl_r, _ = top[0]
             canvas.circle(image, (tl_x, tl_y), tl_r, const.RED, 1)  # mark primary corner
             self.draw(image, 'grid', detection)
-
-    def draw_cells(self):
-        """ draw the detected code cells for diagnostic purposes """
-        if self.logger is None:
-            return
-
-        for detection, rows in enumerate(self.cells()):
-            detection, _ = self.filter_timing()[detection]
-            image, _     = self.get_colour_image(detection)
-            detection    = self.detections[detection]
-            for row, cells in enumerate(rows):
-                for col, (x, y, r, _) in enumerate(cells):
-                    if row == 0 and col == 0:
-                        # highlight reference point
-                        colour = const.RED
-                    elif (row & 1) == 0 and (col & 1) == 0:
-                        # even row and even col
-                        colour = const.GREEN
-                    elif (row & 1) == 0 and (col & 1) == 1:
-                        # even row and odd col
-                        colour = const.BLUE
-                    elif (row & 1) == 1 and (col & 1) == 0:
-                        # odd row and even col
-                        colour = const.BLUE
-                    elif (row & 1) == 1 and (col & 1) == 1:
-                        # odd row and odd col
-                        colour = const.GREEN
-                    image = canvas.circle(image, (x, y), r, colour, 1)
-            self.draw(image, 'cells', detection)
-
-    def circles(self, detection=None):
-        """ get the radius and centre of the maximum enclosed circle of the given, or all, accepted detections """
-        if self.code_circles is None:
-            self.code_circles = []
-            for accepted, _ in self.filter_timing():
-                d = self.detections[accepted]
-                # centre is mid-point of the bottom-left (bl) to top-right (br) locator diagonal as:
-                #   centre_x = (tr_x-bl_x)/2 + bl_x and centre_y = (tr_y-bl_y)/2 + bl_y
-                bl_x, bl_y, _, _ = d.bl
-                tr_x, tr_y, _, _ = d.tr
-                centre = ((tr_x - bl_x) / 2 + bl_x, (tr_y - bl_y) / 2 + bl_y)
-                # radius is the average of the centre to top-left or centre to bottom-left distance
-                c2tl = utils.distance(centre, d.tl)    # NB: returns the squared distance
-                c2bl = utils.distance(centre, d.bl)    #     ..
-                radius = math.sqrt((c2tl + c2bl) / 2)  #     so square root to get actual distance
-                origin = d.box_tl
-                self.code_circles.append((centre, radius, origin))  # origin used for diagnostics (as an id)
-        if detection is None:
-            return self.code_circles
-        return self.code_circles[detection]
 
     def find_timing(self):  # ToDo: move timing blob tuning params to constants
         """ find candidate timing marks in all the detections,
@@ -857,42 +805,6 @@ class Finder:
 
         return self.code_grids
 
-    def cells(self):
-        """ produce the co-ordinates of all cells inside the locators relative to the original image,
-            grid addresses are in clockwise order starting at the primary corner (top-left when not rotated)
-            and relative to the sub-image of the extracted target, cell addresses are row (top to bottom) then
-            column (left to right), i.e. 'array' format, and relative to the original image,
-            cell co-ordinates represent the centre of the cell, and a radius is the maximum circle radius that
-            fits inside the cell
-            """
-        if self.code_cells is not None:
-            # already done it
-            return self.code_cells
-
-        self.code_cells = []
-        for detection, top, right, bottom, left in self.grids():
-            size = self.get_image_size(detection)
-            box  = ((0,0), (size[0]-1, size[1]-1))  # x,y limits for extend
-            code_rows = []
-            for row in range(len(left)):
-                cells = []
-                #cells.append(left[row])  # first cell is left edge
-                #for col in range(1, len(top)-1):
-                for col in range(len(top)):
-                    line1  = utils.extend(top[col], bottom[col], box)  # extend to image edge
-                    line2  = utils.extend(left[row], right[row], box)  # ..to ensure they always intersect
-                    cell   = utils.intersection(line1, line2)          # cell is at intersection
-                    radius = (top[col][2] + bottom[col][2] + left[row][2] + right[row][2]) / 4  # radius is average
-                    # ToDo: is average the best option? what about min? what about cells that overlap?
-                    cells.append([cell[0], cell[1], radius, None])
-                code_rows.append(cells)
-            self.code_cells.append(code_rows)
-        if self.logger is not None:
-            self.logger.push('cells')
-            self.draw_cells()
-            self.logger.pop()
-        return self.code_cells
-
     def images(self):
         """ get the sub-images for all the accepted detections """
         if self.good_images is None:
@@ -901,14 +813,20 @@ class Finder:
                 self.good_images.append(self.get_grayscale(detection))
         return self.good_images
 
+    def get_detections(self):
+        """ return all our detections for upstream use """
+        ids = []  # these are only used for logging diagnostics
+        for detection, _ in self.filter_timing():
+            ids.append(self.detections[detection].box_tl)
+        return self.grids(), self.images(), ids
+
 def find_codes(src, params, image, detections, logger):
     """ find the valid code areas within the given detections """
     if logger is not None:
         logger.push('find_codes')
         logger.log('')
     finder = Finder(src, image, detections, logger)
-    finder.cells()
-    finder.circles()
+    finder.get_detections()
     params.finder = finder
     if logger is not None:
         logger.pop()
@@ -923,7 +841,7 @@ def _test(src, proximity, blur, mode, params=None, logger=None, create_new=True)
     else:
         logger.push('_test')
     logger.log('')
-    logger.log('Finding targets (create new {})'.format(create_new))
+    logger.log('Finding timing marks (create new {})'.format(create_new))
 
     # get the detections
     if not create_new:
