@@ -6,6 +6,7 @@
 import numpy as np
 import cv2
 import const
+import utils
 
 """ WARNING
     cv2 and numpy's co-ordinates are backwards from our pov, the 'x' co-ordinate are columns and 'y' rows.
@@ -13,6 +14,134 @@ import const
     NB: The final implementation will not use cv2 (its too big) so its use here is purely a diagnostic convenience.
         Significant algorithms are implemented DIY. 
     """
+
+# region Very simple bitmap font...
+# Stolen from https://github.com/mikaelpatel/Arduino-LCD/blob/master/src/Driver/PCD8544.h#L304 with minor tweaks
+# Only does ASCII chars 32..127 in a 5x7 font in a 6x8 cell
+
+SIMPLE_FONT = [
+      0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x5F, 0x00, 0x00,
+      0x00, 0x07, 0x00, 0x07, 0x00,
+      0x14, 0x7F, 0x14, 0x7F, 0x14,
+      0x24, 0x2A, 0x7F, 0x2A, 0x12,
+      0x23, 0x13, 0x08, 0x64, 0x62,
+      0x36, 0x49, 0x56, 0x20, 0x50,
+      0x00, 0x08, 0x07, 0x03, 0x00,
+      0x00, 0x1C, 0x22, 0x41, 0x00,
+      0x00, 0x41, 0x22, 0x1C, 0x00,
+      0x2A, 0x1C, 0x7F, 0x1C, 0x2A,
+      0x08, 0x08, 0x3E, 0x08, 0x08,
+      0x00, 0x80, 0x70, 0x30, 0x00,
+      0x08, 0x08, 0x08, 0x08, 0x08,
+      0x00, 0x00, 0x60, 0x60, 0x00,
+      0x20, 0x10, 0x08, 0x04, 0x02,
+      0x3E, 0x51, 0x49, 0x45, 0x3E,
+      0x00, 0x42, 0x7F, 0x40, 0x00,
+      0x72, 0x49, 0x49, 0x49, 0x46,
+      0x21, 0x41, 0x49, 0x4D, 0x33,
+      0x18, 0x14, 0x12, 0x7F, 0x10,
+      0x27, 0x45, 0x45, 0x45, 0x39,
+      0x3C, 0x4A, 0x49, 0x49, 0x31,
+      0x41, 0x21, 0x11, 0x09, 0x07,
+      0x36, 0x49, 0x49, 0x49, 0x36,
+      0x46, 0x49, 0x49, 0x29, 0x1E,
+      0x00, 0x00, 0x14, 0x00, 0x00,
+      0x00, 0x40, 0x34, 0x00, 0x00,
+      0x00, 0x08, 0x14, 0x22, 0x41,
+      0x14, 0x14, 0x14, 0x14, 0x14,
+      0x00, 0x41, 0x22, 0x14, 0x08,
+      0x02, 0x01, 0x59, 0x09, 0x06,
+      0x3E, 0x41, 0x5D, 0x59, 0x4E,
+      0x7C, 0x12, 0x11, 0x12, 0x7C,
+      0x7F, 0x49, 0x49, 0x49, 0x36,
+      0x3E, 0x41, 0x41, 0x41, 0x22,
+      0x7F, 0x41, 0x41, 0x41, 0x3E,
+      0x7F, 0x49, 0x49, 0x49, 0x41,
+      0x7F, 0x09, 0x09, 0x09, 0x01,
+      0x3E, 0x41, 0x41, 0x51, 0x73,
+      0x7F, 0x08, 0x08, 0x08, 0x7F,
+      0x00, 0x41, 0x7F, 0x41, 0x00,
+      0x20, 0x40, 0x41, 0x3F, 0x01,
+      0x7F, 0x08, 0x14, 0x22, 0x41,
+      0x7F, 0x40, 0x40, 0x40, 0x40,
+      0x7F, 0x02, 0x1C, 0x02, 0x7F,
+      0x7F, 0x04, 0x08, 0x10, 0x7F,
+      0x3E, 0x41, 0x41, 0x41, 0x3E,
+      0x7F, 0x09, 0x09, 0x09, 0x06,
+      0x3E, 0x41, 0x51, 0x21, 0x5E,
+      0x7F, 0x09, 0x19, 0x29, 0x46,
+      0x26, 0x49, 0x49, 0x49, 0x32,
+      0x03, 0x01, 0x7F, 0x01, 0x03,
+      0x3F, 0x40, 0x40, 0x40, 0x3F,
+      0x1F, 0x20, 0x40, 0x20, 0x1F,
+      0x3F, 0x40, 0x38, 0x40, 0x3F,
+      0x63, 0x14, 0x08, 0x14, 0x63,
+      0x03, 0x04, 0x78, 0x04, 0x03,
+      0x61, 0x59, 0x49, 0x4D, 0x43,
+      0x00, 0x7F, 0x41, 0x41, 0x41,
+      0x02, 0x04, 0x08, 0x10, 0x20,
+      0x00, 0x41, 0x41, 0x41, 0x7F,
+      0x04, 0x02, 0x01, 0x02, 0x04,
+      0x40, 0x40, 0x40, 0x40, 0x40,
+      0x00, 0x03, 0x07, 0x08, 0x00,
+      0x20, 0x54, 0x54, 0x78, 0x40,
+      0x7F, 0x28, 0x44, 0x44, 0x38,
+      0x38, 0x44, 0x44, 0x44, 0x28,
+      0x38, 0x44, 0x44, 0x28, 0x7F,
+      0x38, 0x54, 0x54, 0x54, 0x18,
+      0x00, 0x08, 0x7E, 0x09, 0x02,
+      0x18, 0xA4, 0xA4, 0x9C, 0x78,
+      0x7F, 0x08, 0x04, 0x04, 0x78,
+      0x00, 0x44, 0x7D, 0x40, 0x00,
+      0x20, 0x40, 0x40, 0x3D, 0x00,
+      0x7F, 0x10, 0x28, 0x44, 0x00,
+      0x00, 0x41, 0x7F, 0x40, 0x00,
+      0x7C, 0x04, 0x78, 0x04, 0x78,
+      0x7C, 0x08, 0x04, 0x04, 0x78,
+      0x38, 0x44, 0x44, 0x44, 0x38,
+      0xFC, 0x18, 0x24, 0x24, 0x18,
+      0x18, 0x24, 0x24, 0x18, 0xFC,
+      0x7C, 0x08, 0x04, 0x04, 0x08,
+      0x48, 0x54, 0x54, 0x54, 0x24,
+      0x04, 0x04, 0x3F, 0x44, 0x24,
+      0x3C, 0x40, 0x40, 0x20, 0x7C,
+      0x1C, 0x20, 0x40, 0x20, 0x1C,
+      0x3C, 0x40, 0x30, 0x40, 0x3C,
+      0x44, 0x28, 0x10, 0x28, 0x44,
+      0x0C, 0x90, 0x90, 0x90, 0x7C,
+      0x44, 0x64, 0x54, 0x4C, 0x44,
+      0x00, 0x08, 0x36, 0x41, 0x00,
+      0x00, 0x00, 0x7F, 0x00, 0x00,
+      0x00, 0x41, 0x36, 0x08, 0x00,
+      0x02, 0x01, 0x02, 0x04, 0x02,
+      0x3C, 0x26, 0x23, 0x26, 0x3C,
+    ]
+SIMPLE_FONT_CHAR_HEIGHT = 7
+SIMPLE_FONT_CHAR_WIDTH  = 5
+# endregion
+
+# region cv2 usage...
+def load(image_file):
+    """ load a buffer from an image file as a grey scale image and return it """
+    return cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+
+def unload(buffer, image_file):
+    """ unload the given buffer to a PNG image file """
+    cv2.imwrite(image_file, buffer)
+
+def colourize(buffer):
+    """ make grey image into an RGB one,
+        returns the image array with 3,
+        its a no-op if we're not a grey image
+        """
+    if len(buffer.shape) == 2:
+        image = cv2.merge([buffer, buffer, buffer])
+    else:
+        image = buffer
+    return image
+
+# endregion
 
 def copy(buffer):
     """ return a copy of the given buffer """
@@ -28,45 +157,71 @@ def size(buffer):
     max_y = buffer.shape[0]  # ..
     return max_x, max_y
 
-def load(image_file):
-    """ load a buffer from an image file as a grey scale image and return it """
-    return cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
-
-def unload(buffer, image_file):
-    """ unload the given buffer to a PNG image file """
-    cv2.imwrite(image_file, buffer)
-
 def downsize(buffer, new_size):
-    """ downsize the image such that either its width or height is at most that given,
+    """ downsize the given greyscale image such that its width is at most that given,
         the aspect ratio is preserved, its a no-op if image already small enough,
         returns a new buffer of the new size,
-        this is purely a diagnostic aid to simulate low-resolution cameras
+        this is purely a diagnostic aid to simulate low-resolution cameras,
+        as such it uses a very simple algorithm:
+          it calculates the sub-image size in the original image that must be represented in the downsized image
+          the downsized image pixel is then just the average of the original sub-image pixels
+        the assumption is that the light that fell on the pixels in the original sub-image would all of have
+        fallen on a single pixel in a 'lesser' camera, so the lesser camera would only have seen their average,
+        the averages are calculated from the integral of the original image, this means each pixel of the original
+        image is only visited once, and the average over any arbitrary area only requires four accesses of that
+        for each downsized pixel.
         """
     width, height = size(buffer)
-    if width <= new_size or height <= new_size:
+    if width <= new_size:
         # its already small enough
         return buffer
-    if width > height:
-        # bring height down to new size
-        new_height = new_size
-        new_width = int(width / (height / new_size))
-    else:
-        # bring width down to new size
-        new_width = new_size
-        new_height = int(height / (width / new_size))
-    return cv2.resize(buffer, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+    # bring width down to new size and re-scale height to maintain aspect ratio
+    new_width    = new_size
+    width_scale  = width / new_width
+    new_height   = int(height / width_scale)
+    height_scale = height / new_height
+    # calculate the kernel size for our average
+    kernel_width   = int(round(width_scale))    # guaranteed to be >= 1
+    kernel_height  = int(round(height_scale))   # ..
+    kernel_plus_x  = kernel_width >> 1    # offset for going forward
+    kernel_minus_x = kernel_plus_x - 1    # offset for going backward
+    kernel_plus_y  = kernel_height >> 1   # ditto
+    kernel_minus_y = kernel_plus_y - 1    # ..
+    # do the downsize via the integral
+    integral  = integrate(buffer)
+    downsized = np.zeros((new_height, new_width), np.uint8)
+    for x in range(new_width):
+        orig_x  = int(min(x * width_scale, width - 1))
+        orig_x1 = int(max(orig_x - kernel_minus_x, 0))
+        orig_x2 = int(min(orig_x + kernel_plus_x, width - 1))
+        for y in range(new_height):
+            orig_y  = int(min(y * height_scale, height - 1))
+            orig_y1 = int(max(orig_y - kernel_minus_y, 0))
+            orig_y2 = int(min(orig_y + kernel_plus_y, height - 1))
+            count = int((orig_x2 - orig_x1) * (orig_y2 - orig_y1))  # how many samples in the integration area
+            # sum = bottom right (x2,y2) + top left (x1,y1) - top right (x2,y1) - bottom left (x1,y2)
+            # where all but bottom right are *outside* the integration window
+            average = int((integral[orig_y2][orig_x2] + integral[orig_y1][orig_x1]
+                          -
+                          (integral[orig_y1][orig_x2] + integral[orig_y2][orig_x1])) / count)
+            downsized[y][x] = average
+    return downsized
 
-def prepare(src, size, logger=None):
+def prepare(src, width, logger=None):
     """ load and downsize an image """
     if logger is not None:
-        logger.log("Preparing image of size {} from {}".format(size, src))
+        logger.log('Preparing image to width {} from {}'.format(width, src))
     source = load(src)
     if source is None:
         if logger is not None:
             logger.log('Cannot load {}'.format(src))
         return None
     # Downsize it (to simulate low quality smartphone cameras)
-    return downsize(source, size)
+    downsized = downsize(source, width)
+    if logger is not None:
+        logger.log('Original size {} reduced to {}'.format(size(source), size(downsized)))
+        logger.draw(downsized, file='downsized')
+    return downsized
 
 def integrate(buffer, box=None):
     """ generate the integral of the given box within the given image buffer """
@@ -83,7 +238,7 @@ def integrate(buffer, box=None):
     box_height = box_max_y - box_min_y
 
     # make an empty buffer to accumulate our integral in
-    integral = np.zeros((box_height, box_width), np.int32)
+    integral = np.zeros((box_height, box_width), np.uint32)
 
     for y in range(box_min_y, box_max_y):
         for x in range(box_min_x, box_max_x):
@@ -237,7 +392,7 @@ def histogram(buffer, box=None):
 def upsize(buffer, scale: float):
     """ return a buffer that is scale times bigger in width and height than that given,
         the contents of the given buffer are also scaled by interpolating neighbours (using makepixel),
-        scale must be positive and greater then 1,
+        scale must be positive and greater than 1,
         each source pixel is considered to consist of scale * scale sub-pixels, each destination pixel
         is one sub-pixel and is constructed from an interpolation of a 1x1 source pixel area centred on
         the sub-pixel
@@ -255,11 +410,6 @@ def upsize(buffer, scale: float):
             pixel = makepixel(buffer, src_x, src_y)
             upsized[dest_y, dest_x] = pixel
     return upsized
-
-def show(buffer, title='title'):
-    """ show the given buffer """
-    cv2.imshow(title, buffer)
-    cv2.waitKey(0)
 
 def getpixel(buffer, x, y):
     """ get the pixel value at x,y
@@ -361,56 +511,81 @@ def incolour(buffer, colour=None):
         return colourize(buffer)
     return buffer
 
-def colourize(buffer):
-    """ make grey image into an RGB one,
-        returns the image array with 3,
-        its a no-op if we're not a grey image
+def settext(buffer, text, origin, colour=0):
+    """ set a text string at x,y of given colour (greyscale or a colour tuple),
+        a very simple 5x7 bitmap font is used (good enough for our purposes)
         """
-    if len(buffer.shape) == 2:
-        image = cv2.merge([buffer, buffer, buffer])
-    else:
-        image = buffer
-    return image
+    buffer = incolour(buffer, colour)      # colourize iff required
+    cursor_x, cursor_y = make_int(origin)  # this is the bottom left of the text, i.e. the 'baseline'
+    cursor_y -= SIMPLE_FONT_CHAR_HEIGHT    # move it to the top
+    start_x = cursor_x                     # used for new-lines (which we allow)
+    for char in text:
+        if char == '\n':
+            cursor_x  = start_x
+            cursor_y += SIMPLE_FONT_CHAR_HEIGHT + 1  # +1 for the inter-line gap
+            continue
+        char_index = (ord(char) - ord(' ')) * SIMPLE_FONT_CHAR_WIDTH
+        if char_index < 0 or char_index >= len(SIMPLE_FONT):
+            # ignore control chars and out-of-range chars
+            continue
+        cols = SIMPLE_FONT[char_index : char_index + SIMPLE_FONT_CHAR_WIDTH]
+        for col, bits in enumerate(cols):
+            for row in range(SIMPLE_FONT_CHAR_HEIGHT):
+                if ((bits >> row) & 1) == 1:
+                    # draw this bit
+                    x = cursor_x + col
+                    y = cursor_y + row
+                    putpixel(buffer, x, y, colour)
+        cursor_x += SIMPLE_FONT_CHAR_WIDTH + 1  # +1 for the inter-char gap
+    return buffer
 
-def settext(buffer, text, origin, size=0.5, colour=0):
-    """ set a text string at x,y of given size and colour (greyscale or a colour tuple) """
+def line(buffer, from_here, to_there, colour=0):
+    """ draw a line as directed """
     buffer = incolour(buffer, colour)  # colourize iff required
-    return cv2.putText(buffer, text, make_int(origin), cv2.FONT_HERSHEY_SIMPLEX, size, colour, 1, cv2.LINE_AA)
+    points = utils.line(int(round(from_here[0])), int(round(from_here[1])),
+                        int(round(to_there[0])), int(round(to_there[1])))
+    for point in points:
+        putpixel(buffer, point[0], point[1], colour)
+    return buffer
 
-def circle(buffer, origin, radius, colour=0, thickness=1):
+def circle(buffer, origin, radius, colour=0):
     """ draw a circle as directed """
     buffer = incolour(buffer, colour)  # colourize iff required
     if radius < 1:
         # too small for a circle, do a point instead
         putpixel(buffer, make_int(origin[0]), make_int(origin[1]), colour)
         return buffer
-    return cv2.circle(buffer, make_int(origin), make_int(radius), colour, thickness)
+    points = utils.circumference(origin[0], origin[1], radius)
+    for point in points:
+        putpixel(buffer, point[0], point[1], colour)
+    return buffer
 
-def rectangle(buffer, top_left, bottom_right, colour=0, thickness=1):
-    """ draw a rectangle as directed """
+def rectangle(buffer, top_left, bottom_right, colour=0):
+    """ draw a rectangle as directed (as four lines) """
     buffer = incolour(buffer, colour)  # colourize iff required
-    return cv2.rectangle(buffer, make_int(top_left), make_int(bottom_right), colour, thickness)
+    top_right   = bottom_right[0], top_left[1]
+    bottom_left = top_left[0], bottom_right[1]
+    buffer = line(buffer, top_left, top_right, colour)
+    buffer = line(buffer, top_right, bottom_right, colour)
+    buffer = line(buffer, bottom_right, bottom_left, colour)
+    buffer = line(buffer, bottom_left, top_left, colour)
+    return buffer
 
-def line(buffer, from_here, to_there, colour=0, thickness=1):
-    """ draw a line as directed """
-    buffer = incolour(buffer, colour)  # colourize iff required
-    return cv2.line(buffer, make_int(from_here), make_int(to_there), colour, thickness)
-
-def grid(buffer, x_spacing=None, y_spacing=None, colour=0, thickness=1, labels=None, label_spacing=1, text_size=0.5):
+def grid(buffer, x_spacing=None, y_spacing=None, colour=0, thickness=1, labels=None, label_spacing=1):
     """ draw grid lines as directed """
     max_x, max_y = size(buffer)
     if x_spacing is not None:
         for x in range(0, max_x, x_spacing):
-            buffer = line(buffer, (x, 0), (x, max_y-1), colour=colour, thickness=thickness)
+            buffer = line(buffer, (x, 0), (x, max_y-1), colour=colour)
             if labels is not None:
                 if (x % label_spacing) == 0:
-                    buffer = settext(buffer, '{}'.format(x), (x, max_y-1), colour=labels, size=text_size)
+                    buffer = settext(buffer, '{}'.format(x), (x, max_y-1), colour=labels)
     if y_spacing is not None:
         for y in range(0, max_y, y_spacing):
-            buffer = line(buffer, (0, y), (max_x-1, y), colour=colour, thickness=thickness)
+            buffer = line(buffer, (0, y), (max_x-1, y), colour=colour)
             if labels is not None:
                 if (y % label_spacing) == 0:
-                    buffer = settext(buffer, '{}'.format(y), (0, y), colour=labels, size=text_size)
+                    buffer = settext(buffer, '{}'.format(y), (0, y), colour=labels)
     return buffer
 
 def plot(buffer, points, colour):

@@ -281,7 +281,7 @@ if __name__ == "__main__":
     #src = "/home/dave/blob-extractor/test/data/lines.png"
     #src = "/home/dave/blob-extractor/test/data/simple.png"
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-far-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

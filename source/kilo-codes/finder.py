@@ -152,7 +152,7 @@ class Finder:
                     # nothing here
                     continue
                 x, y, r, _ = edge[mark]
-                canvas.circle(image, (x, y), r, const.ORANGE, 1)
+                canvas.circle(image, (x, y), r, const.ORANGE)
 
         for i, detection in enumerate(self.detections):
             image, scale = self.get_colour_image(i)
@@ -176,7 +176,7 @@ class Finder:
                     # nothing here
                     continue
                 x, y, r, _ = found_timing[tick[0][0]]
-                image = canvas.circle(image, (x, y), r, const.GREEN, 1)
+                image = canvas.circle(image, (x, y), r, const.GREEN)
             return image
 
         def draw_locator(image, detection, scale, locator, colour):
@@ -217,7 +217,7 @@ class Finder:
                     colour = pallete[0]
                 else:
                     colour = pallete[1]
-                canvas.line(image, (src_x, src_y), (dst_x, dst_y), colour, 1)
+                canvas.line(image, (src_x, src_y), (dst_x, dst_y), colour)
 
         for detection, top, right, bottom, left in self.grids():
             image, _ = self.get_colour_image(detection)
@@ -225,7 +225,7 @@ class Finder:
             draw_grid(image, top, bottom, (const.GREEN, const.BLUE))
             draw_grid(image, left, right, (const.BLUE, const.GREEN))
             tl_x, tl_y, tl_r, _ = top[0]
-            canvas.circle(image, (tl_x, tl_y), tl_r, const.RED, 1)  # mark primary corner
+            canvas.circle(image, (tl_x, tl_y), tl_r, const.RED)  # mark primary corner
             self.draw(image, 'grid', detection)
 
     def find_timing(self):  # ToDo: move timing blob tuning params to constants
@@ -874,7 +874,7 @@ if __name__ == "__main__":
 
     #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png'
     #src = '/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-code-145.png'
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

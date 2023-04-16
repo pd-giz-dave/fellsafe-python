@@ -26,109 +26,6 @@ def count_pixels(image, perimeter):
                 white += 1
     return black, white
 
-def circumference(centre_x: float, centre_y: float, r: float) -> [(int, int)]:
-    """ return a list of co-ordinates of a circle centred on x,y of radius r,
-        x,y,r do not need to be integer but the returned co-ordinates will be integers,
-        the co-ordinates returned are suitable for drawing the circle,
-        co-ordinates returned are unique but in a random order,
-        the algorithm here was inspired by: https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
-        """
-
-    centre_x: int = int(round(centre_x))
-    centre_y: int = int(round(centre_y))
-
-    points = []  # list of x,y tuples for a circle of radius r centred on centre_x,centre_y
-
-    def plot(x_offset: int, y_offset: int):
-        """ add the circle point for the given x,y offsets from the centre """
-        points.append((centre_x + x_offset, centre_y + y_offset))
-
-    def circle_points(x: int, y: int):
-        """ make all 8 quadrant points from the one point given
-            from https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
-                Procedure Circle_Points(x,y: Integer);
-                Begin
-                    Plot(x,y);
-                    Plot(y,x);
-                    Plot(y,-x);
-                    Plot(x,-y);
-                    Plot(-x,-y);
-                    Plot(-y,-x);
-                    Plot(-y,x);
-                    Plot(-x,y)
-                End;
-        """
-
-        # NB: when a co-ord is 0, x and -x are the same, ditto for y
-
-        if x == 0 and y == 0:
-            plot(0, 0)
-        elif x == 0:
-            plot(0, y)
-            plot(y, 0)
-            plot(0, -y)
-            plot(-y, 0)
-        elif y == 0:
-            plot(x, 0)
-            plot(0, x)
-            plot(0, -x)
-            plot(-x, 0)
-        elif x == y:
-            plot(x, x)
-            plot(x, -x)
-            plot(-x, -x)
-            plot(-x, x)
-        elif x == -y:
-            plot(x, -x)
-            plot(-x, x)
-            plot(-x, -x)
-            plot(x, x)
-        else:
-            plot(x, y)
-            plot(y, x)
-            plot(y, -x)
-            plot(x, -y)
-            plot(-x, -y)
-            plot(-y, -x)
-            plot(-y, x)
-            plot(-x, y)
-
-    """ from https://www.cs.helsinki.fi/group/goa/mallinnus/ympyrat/ymp1.html
-        Begin {Circle}
-        x := r;
-        y := 0;
-        d := 1 - r;
-        Repeat
-            Circle_Points(x,y);
-            y := y + 1;
-            if d < 0 Then
-                d := d + 2*y + 1
-            Else Begin
-                x := x - 1;
-                d := d + 2*(y-x) + 1
-            End
-        Until x < y
-        End; {Circle}
-    """
-    x = int(round(r))
-    if x == 0:
-        # special case
-        plot(0,0)
-    else:
-        y = 0
-        d = 1 - x
-        while True:
-            circle_points(x, y)
-            y += 1
-            if d < 0:
-                d += (2 * y + 1)
-            else:
-                x -= 1
-                d += (2 * (y - x) + 1)
-            if x < y:
-                break
-
-    return points
 
 class Circle:
 
@@ -153,7 +50,7 @@ class Circle:
             # already done it
             return self.points
         # this is expensive, so only do it once
-        points = circumference(self.centre[0], self.centre[1], self.radius)
+        points = utils.circumference(self.centre[0], self.centre[1], self.radius)
         # we want a min_y/max_y value pair for every x
         y_limits = {}
         min_x = None

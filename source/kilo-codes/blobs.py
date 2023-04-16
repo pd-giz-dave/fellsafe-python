@@ -564,7 +564,7 @@ def show_result(params, logger):
     # highlight our detections on the greyscale image
     draw = canvas.colourize(source_part)
     for (x, y, r, _) in params.targets:
-        canvas.circle(draw, (x, y), r, const.GREEN, 1)
+        canvas.circle(draw, (x, y), r, const.GREEN)
     logger.draw(draw, file='blobs')
 
     colours = const.REJECT_COLOURS
@@ -692,7 +692,7 @@ def _test(src, size, proximity, black, inverted, blur, mode, logger, params=None
 if __name__ == "__main__":
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

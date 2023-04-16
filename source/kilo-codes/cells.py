@@ -70,7 +70,7 @@ class Cells:
                     elif (row & 1) == 1 and (col & 1) == 1:
                         # odd row and odd col
                         colour = const.GREEN
-                    image = canvas.circle(image, (x, y), r, colour, 1)
+                    image = canvas.circle(image, (x, y), r, colour)
             self.draw(image, 'cells', detection)
 
     def get_intersections(self):

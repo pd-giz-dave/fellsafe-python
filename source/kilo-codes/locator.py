@@ -625,12 +625,12 @@ def show_results(params, locator, logger):
                    format(blob, x, y, r, len(neighbour)))
         for there, distance in neighbour:
             x, y, r, _ = locator.blobs[there]
-            canvas.circle(image, (x, y), r, const.RED, 1)
+            canvas.circle(image, (x, y), r, const.RED)
             logger.log('      {}: centre: {:.2f}, {:.2f}, radius: {:.2f}, distance: {:.2f} '.
                        format(there, x, y, r, math.sqrt(distance)))
     for blob, neighbour in neighbours:
         x, y, r, _ = locator.blobs[blob]
-        canvas.circle(image, (x, y), r, const.YELLOW, 1)
+        canvas.circle(image, (x, y), r, const.YELLOW)
     corners = locator.get_corners()
     logger.log('{} corner triplets found:'.format(len(corners)))
     for a, b, c, primary, squareness in corners:
@@ -656,7 +656,7 @@ def show_results(params, locator, logger):
         logger.log('  {} -> {} -> D -> {}: {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f} -> {:.2f} x {:.2f}'
                    ' (squareness={:.2f})'.format(a, b, c, ax, ay, bx, by, dx, dy, cx, cy, squareness))
         draw_rectangle(image, tl, tr, br, bl)
-        canvas.circle(image, (dx, dy), dr, const.GREEN, 1)  # mark our estimated blob
+        canvas.circle(image, (dx, dy), dr, const.GREEN)  # mark our estimated blob
     dropped = locator.get_dropped()
     logger.log('{} dropped rectangles:'.format((len(dropped))))
     for tl, tr, br, bl, (a, b, c), squareness in dropped:
@@ -679,10 +679,10 @@ def show_results(params, locator, logger):
         logger.log('  enclosing box: tl: {} x {} -> br: {} x {} (squareness={:.2f})'.
                    format(detection.box_tl[0], detection.box_tl[1], detection.box_br[0], detection.box_br[1],
                           detection.sq))
-        canvas.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+        canvas.rectangle(image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN)
         src_image = canvas.colourize(source)
         origin = (detection.box_tl[0], detection.box_tl[1])
-        canvas.rectangle(src_image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN, 1)
+        canvas.rectangle(src_image, detection.box_tl, (detection.box_br[0]+1, detection.box_br[1]+1), const.GREEN)
         canvas.settext(src_image, '{}x{}y'.format(origin[0], origin[1]), (origin[0],origin[1]-2), colour=const.GREEN)
         folder = utils.image_folder(target=origin)
         logger.push(folder=folder)
@@ -700,10 +700,11 @@ def draw_rectangle(image, tl, tr, br, bl, origin=(0,0), scale=1.0,
     (bx, by), _ = canvas.translate(tr, 1.0, origin, scale)
     (cx, cy), _ = canvas.translate(bl, 1.0, origin, scale)
     (dx, dy), _ = canvas.translate(br, 1.0, origin, scale)
-    canvas.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), colours[0], 1)
-    canvas.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), colours[1], 1)
-    canvas.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), colours[2], 1)
-    canvas.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), colours[3], 1)
+    # NB: we use lines rather than use the canvas.rectangle function so alignment errors are visible
+    canvas.line(image, (int(round(ax)), int(round(ay))), (int(round(bx)), int(round(by))), colours[0])
+    canvas.line(image, (int(round(bx)), int(round(by))), (int(round(dx)), int(round(dy))), colours[1])
+    canvas.line(image, (int(round(dx)), int(round(dy))), (int(round(cx)), int(round(cy))), colours[2])
+    canvas.line(image, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), colours[3])
     return image
 
 
@@ -742,7 +743,7 @@ if __name__ == "__main__":
     """ test harness """
 
     #src = "/home/dave/precious/fellsafe/fellsafe-image/source/kilo-codes/codes/test-alt-bits.png"
-    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-close-150-257-263-380-436-647-688-710-777.jpg'
+    src = '/home/dave/precious/fellsafe/fellsafe-image/media/kilo-codes/kilo-codes-distant-150-257-263-380-436-647-688-710-777.jpg'
     #proximity = const.PROXIMITY_CLOSE
     proximity = const.PROXIMITY_FAR
 

@@ -166,7 +166,7 @@ class Codes:
 
     def draw_name(self, position: (int, int), name:str):
         """ draw the codeword name """
-        canvas.settext(self.canvas, name, self.cell2pixel(position), size=0.5)
+        canvas.settext(self.canvas, name, self.cell2pixel(position))
 
     def draw_cell(self, position: (int, int), colour: int=BLACK):
         """ draw a cell - i.e. make the area black """
