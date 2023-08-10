@@ -390,12 +390,13 @@ def histogram(buffer, box=None):
     return samples
 
 def upsize(buffer, scale: float):
-    """ return a buffer that is scale times bigger in width and height than that given,
-        the contents of the given buffer are also scaled by interpolating neighbours (using makepixel),
+    """ upsize the given greyscale image by the given scale in both width and height,
+        return a buffer that is scale times bigger in width and height than that given,
+        the contents of the given buffer are scaled by interpolating neighbours (using makepixel),
         scale must be positive and greater than 1,
         each source pixel is considered to consist of scale * scale sub-pixels, each destination pixel
         is one sub-pixel and is constructed from an interpolation of a 1x1 source pixel area centred on
-        the sub-pixel
+        the sub-pixel,
         """
     if scale <= 1:
         return buffer

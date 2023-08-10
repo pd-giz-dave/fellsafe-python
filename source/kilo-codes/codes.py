@@ -110,7 +110,7 @@ class Codes:
     LOCATORS_PER_CODE = 3  # how many 'major' locators there are per code
     TIMING_PER_CODE   = 9  # how mnay 'timing' marks there are per code (including the 'minor' locator)
     LOCATOR_SCALE = 3  # size of major locators relative to markers (so radius of enclosing circle is half this)
-    TIMING_SCALE  = 1 / LOCATOR_SCALE  # size of timing marks relative to locators
+    # not used -->TIMING_SCALE  = 1 / LOCATOR_SCALE  # size of timing marks relative to locators
     LOCATOR_SPAN = 8  # distance between locator centres in units of *marker width*
     LOCATOR_SPACING = LOCATOR_SPAN / (LOCATOR_SCALE / 2)  # locator spacing in units of *locator radius*
     # These cell positions are relative to the 'active' area of the code (see visualisation above)
@@ -170,13 +170,15 @@ class Codes:
 
     def draw_cell(self, position: (int, int), colour: int=BLACK):
         """ draw a cell - i.e. make the area black """
-        start_x, start_y = self.cell2pixel(position)
-        end_x = start_x + self.cell_width
-        end_y = start_y + self.cell_height
-        for x in range(start_x, end_x):
-            for y in range(start_y, end_y):
-                canvas.putpixel(self.canvas, x, y, colour)
 
+        def draw_cell(self, position: (int, int), colour: int = BLACK):
+            """ draw a cell - i.e. make the area black """
+            start_x, start_y = self.cell2pixel(position)
+            end_x = start_x + self.cell_width
+            end_y = start_y + self.cell_height
+            for x in range(start_x, end_x):
+                for y in range(start_y, end_y):
+                    canvas.putpixel(self.canvas, x, y, colour)
     def clear_canvas(self):
         """ make the entire codeword structure white """
         for x in range(self.MAX_X_CELL + 1):

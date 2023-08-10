@@ -134,7 +134,7 @@ class CRC:
             """
         if self.codewords is not None:
             # already done it
-            return self.hamming_distance
+            return self.hamming_distance, self.error_bits
         if self.logger is not None:
             self.logger.push(context='crc')
             self.logger.log('Build codewords table for polynomial {:b}:...'.format(self.poly))
@@ -310,8 +310,8 @@ if __name__ == "__main__":
     POLY_BITS     = const.POLY_BITS
     PAYLOAD_RANGE = const.PAYLOAD_RANGE
     # find best CRC polynomial (by doing an exhaustive search of all poly-bit polynomials)
-    # best_candidates = find_best_poly(POLY_BITS, PAYLOAD_BITS, logger)
-    # POLYNOMIAL     = best_candidates[0][0]
+    #best_candidates = find_best_poly(POLY_BITS, PAYLOAD_BITS, logger)
+    #POLYNOMIAL     = best_candidates[0][0]
     POLYNOMIAL     = const.POLYNOMIAL
     codec = CRC(PAYLOAD_BITS, POLYNOMIAL, logger)
     logger.log('CRC spec: payload bits: {}, crc bits: {}, polynomial: {:b}, payload range: 1..{}, code range 0..{}'.
